@@ -1,0 +1,135 @@
+# Detects handle_bulk_actions-* filter callbacks that lack a capability check.
+rules:
+
+  # Rule 1: Flag the callback function body when it has the standard 3-parameter
+  # bulk action handler signature but contains no current_user_can() call.
+  - id: claude.php.wordpress.access.bulk-action-handler-missing-auth
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      Function with the standard WordPress bulk action handler signature
+      ($redirect_to, $doaction, $ids) contains no current_user_can() call.
+      If registered on a handle_bulk_actions-* filter, WordPress Core verifies
+      the bulk-action nonce and enforces the page-level capability, but does not
+      check whether the user should be able to act on the specific items submitted.
+      If the callback exports data or performs writes on the submitted IDs, a user
+      who can access the admin list table page may operate on items they do not own
+      (CWE-862). Verify this function is registered on handle_bulk_actions-* and
+      add current_user_can() to enforce the intended privilege level.
+    patterns:
+      - pattern: |
+          function $FUNC($REDIRECT, $ACTION, $IDS) {
+            ...
+          }
+      # Must reference the action parameter — matches positive (===) or negation (!==) dispatch.
+      # Negation style is common: if ('action' !== $doaction && 'other' !== $doaction) { return; }
+      - pattern-either:
+          - pattern-inside: |
+              function $FUNC($REDIRECT, $ACTION, $IDS) {
+                ...
+                if ($ACTION === '...') { ... }
+                ...
+              }
+          - pattern-inside: |
+              function $FUNC($REDIRECT, $ACTION, $IDS) {
+                ...
+                if (<... '...' !== $ACTION ...>) { ... }
+                ...
+              }
+      # Must return the redirect parameter (WordPress bulk action handler convention)
+      - pattern-inside: |
+          function $FUNC($REDIRECT, $ACTION, $IDS) {
+            ...
+            return $REDIRECT;
+          }
+      - pattern-not: |
+          function $FUNC($REDIRECT, $ACTION, $IDS) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC($REDIRECT, $ACTION, $IDS) {
+            ...
+            if (<... current_user_can(...) ...>) { ... }
+            ...
+          }
+      # Exclude: plugins_api_filter() is the fixed callback name for WordPress's own
+      # `plugins_api` filter (also the standard EDD Software Licensing updater method
+      # name redistributed across many premium plugins) — a coincidental 3-parameter,
+      # early-return, return-first-param shape unrelated to handle_bulk_actions-*.
+      - pattern-not: |
+          function plugins_api_filter(...) {
+            ...
+          }
+      # Positive-evidence guard: require an actual handle_bulk_actions-* registration
+      # referencing this function, since the 3-param/action-dispatch/return-redirect
+      # shape alone also matches unrelated same-shaped WordPress filter callbacks.
+      # Both member/statement orderings are covered — registration commonly precedes
+      # the handler (constructor/init method) but is just as often appended after it
+      # (procedural style: define the function, then add_filter() below it).
+      - pattern-either:
+          - pattern-inside: |
+              class $CLASS {
+                ...
+                function $REGFUNC(...) {
+                  ...
+                  add_filter($HOOK, array($THIS, '$FUNC'), ...);
+                  ...
+                }
+                ...
+                function $FUNC($REDIRECT, $ACTION, $IDS) {
+                  ...
+                }
+                ...
+              }
+          - pattern-inside: |
+              class $CLASS {
+                ...
+                function $FUNC($REDIRECT, $ACTION, $IDS) {
+                  ...
+                }
+                ...
+                function $REGFUNC(...) {
+                  ...
+                  add_filter($HOOK, array($THIS, '$FUNC'), ...);
+                  ...
+                }
+                ...
+              }
+          - pattern-inside: |
+              ...
+              add_filter($HOOK, '$FUNC', ...);
+              ...
+              function $FUNC($REDIRECT, $ACTION, $IDS) {
+                ...
+              }
+              ...
+          - pattern-inside: |
+              ...
+              function $FUNC($REDIRECT, $ACTION, $IDS) {
+                ...
+              }
+              ...
+              add_filter($HOOK, '$FUNC', ...);
+              ...
+      - metavariable-regex:
+          metavariable: $HOOK
+          regex: "^[\"']handle_bulk_actions-"
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/hooks/handle_bulk_actions-screen/

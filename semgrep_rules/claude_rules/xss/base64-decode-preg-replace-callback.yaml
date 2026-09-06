@@ -1,0 +1,49 @@
+rules:
+  - id: claude.php.wordpress.xss.base64-decode-preg-replace-callback
+    languages: [php]
+    severity: HIGH
+    message: |
+      base64_decode() output returned directly from a preg_replace_callback closure
+      without sanitization or structural validation. If the matched content can be
+      influenced by users (e.g., stored in post content, transmitted via request),
+      this allows arbitrary HTML/JS injection (Stored or Reflected XSS, CWE-79).
+      HIGH FP RATE — verify that the matched content is user-controllable before
+      reporting. Fix: validate the decoded value against an allowlist structure
+      (e.g., preg_match('/^\[shortcode\]$/', $decoded)) or sanitize with wp_kses()
+      before returning.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://plugins.trac.wordpress.org/browser/luckywp-table-of-contents/tags/2.1.14/plugin/Shortcode.php#L315
+    patterns:
+      - pattern: |
+          preg_replace_callback(..., function (...) {
+            ...
+            return base64_decode(...);
+          }, ...)
+      # Decoded output wrapped in wp_kses — safe for HTML contexts.
+      - pattern-not: |
+          preg_replace_callback(..., function (...) {
+            ...
+            return wp_kses(base64_decode(...), ...);
+          }, ...)
+      - pattern-not: |
+          preg_replace_callback(..., function (...) {
+            ...
+            return wp_kses_post(base64_decode(...));
+          }, ...)
+      # Decoded output HTML-escaped — safe, though likely breaks intentional HTML content.
+      - pattern-not: |
+          preg_replace_callback(..., function (...) {
+            ...
+            return esc_html(base64_decode(...));
+          }, ...)

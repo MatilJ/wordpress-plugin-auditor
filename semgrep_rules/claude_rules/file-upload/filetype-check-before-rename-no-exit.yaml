@@ -1,0 +1,243 @@
+rules:
+  - id: claude.php.wordpress.upload.filetype-check-before-rename-no-exit
+    languages: [php]
+    severity: HIGH
+    message: |
+      wp_check_filetype_and_ext() is called and its result stored, but the
+      function proceeds to rename() without a conditional return/die that would
+      halt execution when the file type is invalid. An attacker can upload a
+      valid file via a preceding endpoint, then supply a malicious 'name' value
+      (e.g. 'shell.php') when triggering this processing function — the file is
+      moved to a permanent web-accessible directory with a dangerous extension,
+      enabling remote code execution (CWE-434).
+
+      This pattern occurs when a plugin implements its own file-processing
+      pipeline (e.g. a format() method that moves tmp uploads to permanent
+      storage) outside of move_uploaded_file(). The filetype check result is
+      written to an error accumulator ($errors[], $this->task->errors[...]) but
+      execution is not halted before the rename() call.
+
+      Confirmed TP: everest-forms 3.0.9.4
+        includes/abstracts/class-evf-form-fields-upload.php format() lines 1114-1134
+        wp_check_filetype_and_ext() → sets evf()->task->errors[...] + update_option()
+        but NO return/continue → @rename($file['tmp_path'], $file['path']) executes
+        with $file['path'] extension derived from attacker-controlled $_POST name field.
+        Attack: upload valid image via nopriv upload_file AJAX → submit form with
+        name='shell.php' → file moved to everest_forms_uploads/ with .php extension.
+
+      Fix: add return/continue immediately after recording the filetype error, before
+      any rename()/move_uploaded_file() call in the same loop or function body.
+
+      Variant: an upload-handling function performs its file validation (type,
+      size, or upload-error check) inside a try block and throws on failure,
+      but the matching catch block only logs the exception (e.g. error_log())
+      with no return/die/exit/re-throw. Execution falls through the catch and
+      the file is still saved as if validation had passed (CWE-434).
+
+      Fix: add return/die/exit (or re-throw) in the catch block immediately
+      after logging, before any further processing of the rejected upload.
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_check_filetype_and_ext/
+        - https://www.php.net/manual/en/function.rename.php
+      # TRIAGE GUIDANCE:
+      #
+      # 1. Verify the rename() destination extension is attacker-controlled.
+      #    If the destination path is constructed from a developer-hardcoded
+      #    filename or from a server-side hash alone (no user-supplied extension),
+      #    the extension cannot be controlled → FP.
+      #    Check: does pathinfo($user_supplied_name, PATHINFO_EXTENSION) contribute
+      #    to the rename() destination path?
+      #
+      # 2. Verify there is no early exit on failed filetype check.
+      #    Read the code between wp_check_filetype_and_ext() and rename():
+      #    - Is there a return/continue/die inside the error-recording if block? → FP
+      #    - Does the loop have a 'continue' after the error push? → FP
+      #    - Does the caller check evf()->task->errors before the rename executes? → FP
+      #
+      # 3. Verify the upload directory is web-accessible and PHP-executable.
+      #    wp-content/uploads/ subdirectories are publicly accessible by default.
+      #    If a .htaccess or Nginx rule prevents PHP execution in the target dir → FP.
+      #    Most WordPress installations do NOT have PHP execution blocked in uploads.
+      #
+      # 4. (Variant, try/catch branch below) Verify the catch block truly has no
+      #    halting statement. A return/die/exit/throw ANYWHERE in the catch body
+      #    (not just as its last statement) is a proper exit → FP. Also confirm
+      #    the enclosing function name plausibly handles an upload (the branch
+      #    is scoped to functions whose name contains "upload").
+
+    pattern-either:
+      # ---------------------------------------------------------------------
+      # Variant A: wp_check_filetype_and_ext() result stored but the function
+      # still proceeds to rename() unconditionally afterward.
+      # ---------------------------------------------------------------------
+      - patterns:
+          # Core: function assigns result of wp_check_filetype_and_ext AND calls rename
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $RESULT = wp_check_filetype_and_ext(...);
+                ...
+                rename($SRC, $DST);
+                ...
+              }
+          # Exclude: there IS a conditional return between the filetype check and rename
+          # (developer properly exits execution on bad filetype before rename runs).
+          # Leading/trailing "..." inside the if-block let the exit statement sit
+          # alongside other statements (e.g. an error-message assignment or an
+          # update_option() call recording the failure) rather than requiring it
+          # to be the block's only statement.
+          - pattern-not: |
+              function $FUNC(...) {
+                ...
+                $RESULT = wp_check_filetype_and_ext(...);
+                ...
+                if ($COND) {
+                  ...
+                  return $X;
+                  ...
+                }
+                ...
+                rename($SRC, $DST);
+                ...
+              }
+          - pattern-not: |
+              function $FUNC(...) {
+                ...
+                $RESULT = wp_check_filetype_and_ext(...);
+                ...
+                if ($COND) {
+                  ...
+                  return;
+                  ...
+                }
+                ...
+                rename($SRC, $DST);
+                ...
+              }
+          # Exclude: wp_die() used as the exit mechanism on bad filetype
+          - pattern-not: |
+              function $FUNC(...) {
+                ...
+                $RESULT = wp_check_filetype_and_ext(...);
+                ...
+                if ($COND) {
+                  ...
+                  wp_die(...);
+                  ...
+                }
+                ...
+                rename($SRC, $DST);
+                ...
+              }
+          # Exclude: throw used as the exit mechanism
+          - pattern-not: |
+              function $FUNC(...) {
+                ...
+                $RESULT = wp_check_filetype_and_ext(...);
+                ...
+                if ($COND) {
+                  ...
+                  throw $E;
+                  ...
+                }
+                ...
+                rename($SRC, $DST);
+                ...
+              }
+      # ---------------------------------------------------------------------
+      # Variant B: an upload-handling function throws on a failed validation
+      # check inside a try block, but the catch clause only logs the error —
+      # no return/die/exit/re-throw — so execution falls through and the
+      # rejected file is still processed/saved.
+      # ---------------------------------------------------------------------
+      - patterns:
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+              }
+          # Scope to upload-handling functions by name (generic naming signal,
+          # not a plugin-specific identifier) to avoid flagging unrelated
+          # try/catch blocks elsewhere in a codebase.
+          - metavariable-regex:
+              metavariable: $FUNC
+              regex: "(?i).*upload.*"
+          - pattern: |
+              try {
+                ...
+                throw $EXC;
+                ...
+              } catch ($ETYPE $E) {
+                ...
+              }
+          # Exclude: catch body contains a return/die/exit/re-throw anywhere —
+          # any of these halts execution before the rejected file can be saved.
+          - pattern-not: |
+              try {
+                ...
+                throw $EXC;
+                ...
+              } catch ($ETYPE $E) {
+                ...
+                return $X;
+                ...
+              }
+          - pattern-not: |
+              try {
+                ...
+                throw $EXC;
+                ...
+              } catch ($ETYPE $E) {
+                ...
+                return;
+                ...
+              }
+          - pattern-not: |
+              try {
+                ...
+                throw $EXC;
+                ...
+              } catch ($ETYPE $E) {
+                ...
+                die(...);
+                ...
+              }
+          - pattern-not: |
+              try {
+                ...
+                throw $EXC;
+                ...
+              } catch ($ETYPE $E) {
+                ...
+                exit(...);
+                ...
+              }
+          - pattern-not: |
+              try {
+                ...
+                throw $EXC;
+                ...
+              } catch ($ETYPE $E) {
+                ...
+                wp_die(...);
+                ...
+              }
+          - pattern-not: |
+              try {
+                ...
+                throw $EXC;
+                ...
+              } catch ($ETYPE $E) {
+                ...
+                throw $EXC2;
+                ...
+              }

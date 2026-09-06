@@ -1,0 +1,134 @@
+rules:
+  - id: claude.php.wordpress.file-upload.request-basename-filename-no-extension-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      A destination filename is derived from a request superglobal
+      ($_REQUEST/$_POST/$_GET, including a nested/array-indexed key) via
+      basename() alone -- with no extension-extraction, allow-list, or
+      content-type step anywhere applied to it -- and is handed straight to
+      a file-write sink: file_put_contents(), $wp_filesystem->put_contents(),
+      or a same-purpose custom save/write/store delegate call (CWE-434).
+      basename() strips directory components only; it does not restrict or
+      validate the extension, so an attacker can submit any filename (e.g.
+      "shell.php") and, if the written content is also request-influenced,
+      achieve arbitrary file creation of a dangerous type -- frequently
+      reachable pre-authentication when the write is wired to a
+      "compiler"/"cache save" style AJAX action that lacks a capability
+      check.
+
+      TRIAGE:
+        1. Confirm the write is reachable without an admin-only capability
+           check (a nonce alone does not gate this if the nonce value is
+           embedded in a page any visitor, including an unauthenticated
+           one, can load).
+        2. Confirm the file-content argument is also attacker-influenced
+           (another request field), not a fixed/developer-controlled value.
+        3. Confirm no extension allow-list (pathinfo()+in_array(),
+           wp_check_filetype(), wp_check_filetype_and_ext()) or real
+           content-type check (finfo, getimagesize(), exif_imagetype(),
+           mime_content_type()) gates the write anywhere in the enclosing
+           function.
+        4. Confirm the destination directory is web-accessible.
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/434.html
+        - https://owasp.org/Top10/A04_2021-Insecure_Design/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern: $OBJ->$SAVEFUNC(<... basename($SRC) ...>, ...)
+              - metavariable-regex:
+                  metavariable: $SAVEFUNC
+                  regex: (?i)^(?=.*(save|write|store|compil)).*$
+          - patterns:
+              - pattern: $SAVEFUNC(<... basename($SRC) ...>, ...)
+              - metavariable-regex:
+                  metavariable: $SAVEFUNC
+                  regex: (?i)^(?=.*(save|write|store|compil)).*$
+          - pattern: $FS->put_contents(<... basename($SRC) ...>, $CONTENT, ...)
+          - pattern: file_put_contents(<... basename($SRC) ...>, $CONTENT, ...)
+      - metavariable-pattern:
+          metavariable: $SRC
+          patterns:
+            - pattern-either:
+                - pattern: $_REQUEST[...]
+                - pattern: $_REQUEST[...][...]
+                - pattern: $_REQUEST[...][...][...]
+                - pattern: $_POST[...]
+                - pattern: $_POST[...][...]
+                - pattern: $_POST[...][...][...]
+                - pattern: $_GET[...]
+                - pattern: $_GET[...][...]
+                - pattern: $_GET[...][...][...]
+      # The official fix (and the general neutralizer for this class): an
+      # extension allow-list or content-type check present anywhere in the
+      # enclosing function before the write.
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            pathinfo($Y, PATHINFO_EXTENSION);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            wp_check_filetype(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            wp_check_filetype_and_ext(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            finfo_file(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            new finfo(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            getimagesize(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            exif_imagetype(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            mime_content_type(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            in_array($EXT, $ALLOWED, ...);
+            ...
+          }

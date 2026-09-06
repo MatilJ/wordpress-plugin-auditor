@@ -1,0 +1,321 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+# Confirmed (recent Semgrep): `semgrep --test` DOES execute join-mode rules
+# correctly when logged in — the earlier belief that --test can't run join
+# mode was incorrect. If a join-mode rule reports 0 findings unexpectedly,
+# suspect a pattern bug in one of the join's sub-rules before suspecting the
+# join mechanism itself; verify each sub-rule standalone (temporarily promote
+# it to its own top-level `rules:` entry) to isolate which one is silently
+# failing to match. A common cause: embedding a metavariable as a partial
+# prefix inside a quoted string literal, e.g. pattern: add_action('wp_ajax_$X', ...)
+# does NOT do prefix matching — it requires an exact literal match. Capture the
+# whole string with a bare metavariable instead and constrain it with
+# metavariable-regex (see the $ACTION / regex: wp_ajax_.* pattern below) —
+# metavariable-regex itself is prefix-anchored (like Python re.match), not
+# substring search, so lead the regex with .* to match past any literal prefix.
+
+rules:
+  - id: claude.php.wordpress.access.wp-ajax-nonce-only-no-capability-check
+    mode: join
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A callback registered on a wp_ajax_ hook verifies a nonce but calls no
+      capability-check function (current_user_can). Nonces confirm CSRF intent but
+      not the caller's privilege level — any logged-in user who can obtain the
+      nonce can invoke this handler regardless of role (CWE-862).
+
+      This rule targets the pattern missed by nonce-without-capability-check:
+      handlers that verify a nonce and then delegate writes to a helper method.
+      The write need not appear directly in the handler body for this to be
+      exploitable.
+
+      HIGH FP RATE — triage required before reporting:
+      1. Find where wp_create_nonce('<action>') is called. If it is only reachable
+         inside customize_controls_enqueue_scripts, an admin_menu callback,
+         or any hook already gating on manage_options/edit_others_posts, the
+         endpoint is effectively admin-gated (PR:H → out-of-scope).
+      2. If the nonce is localized on enqueue_block_editor_assets (requires
+         edit_posts, so Contributor+), admin_enqueue_scripts without a capability
+         guard, or a public page, the nonce is reachable by low-privilege users.
+      3. Confirm the callback performs state-changing writes (directly or via
+         called methods) with attacker-controlled parameters before reporting.
+      4. Functions that call check_current_ajax_user_can() or other plugin-specific
+         wrappers encapsulating current_user_can() are safe and are excluded —
+         including the assign-to-a-variable-then-negate-check idiom
+         (`$can_access = $CLASS::can_access(...); if (!$can_access) { return; }`),
+         not just a bare call or an inline if-condition.
+
+      Known FP — dual nopriv+priv registration: A callback registered on BOTH
+      wp_ajax_nopriv_X and wp_ajax_X has no meaningful privilege floor to enforce —
+      any user including unauthenticated can reach it via the nopriv path, so adding
+      current_user_can() in the callback body would not restrict access. This rule
+      fires because the callback name matches the wp_ajax_ hook, but the real exposure
+      is via the nopriv path. Investigate the handler for substantive vulnerabilities
+      (unescaped output in JSON response, unvalidated parameters) rather than the
+      absent capability check.
+      Confirmed FP: pisol-sales-notification public/class-pisol-sales-notification-public.php:342
+      getOrders() — registered on both wp_ajax_nopriv_pisol_live_orders and
+      wp_ajax_pisol_live_orders; actual finding was Stored XSS in the JSON response.
+
+      Known FP — attendee opt-in nonce scoped to specific attendee IDs:
+      A nonce action computed as '<prefix>-' . md5($attendee_ids) where
+      $attendee_ids comes from the request is technically an own-resource operation
+      (attendee updating their own RSVP opt-in status). Low CIA impact.
+      Confirmed FP: event-tickets 5.27.6.1 src/Tribe/RSVP.php:584.
+
+      Remediation: add current_user_can('appropriate_capability') immediately
+      after the nonce check, calling wp_die() or return on failure.
+    join:
+      rules:
+        - id: ajax-nonce-hook-registration
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_action('$ACTION', [..., '$CALLBACK'], ...);
+                - pattern: add_action('$ACTION', '$CALLBACK', ...);
+                # OOP instance-method callbacks via array($this, 'method')
+                - pattern: add_action('$ACTION', array($OBJ, '$CALLBACK'), ...);
+            - metavariable-regex:
+                metavariable: $ACTION
+                regex: wp_ajax_.*
+
+        - id: has-nonce-no-capability
+          languages: [php]
+          patterns:
+            # Function must contain a nonce check (either form)
+            - pattern-either:
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_verify_nonce(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      if (<... wp_verify_nonce(...) ...>) {
+                        ...
+                      }
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      check_ajax_referer(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      if (<... check_ajax_referer(...) ...>) {
+                        ...
+                      }
+                      ...
+                    }
+            # Must NOT call current_user_can() directly
+            - pattern-not: |
+                function $CALLBACK(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            # Plugin-specific capability wrappers
+            - pattern-not: function $CALLBACK(...) { ... $this->validate_access_rights(...); ... }
+            - pattern-not: function $CALLBACK(...) { ... $this->check_permissions(...); ... }
+            - pattern-not: function $CALLBACK(...) { ... $this->has_access(...); ... }
+            - pattern-not: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... $this->has_access(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not: function $CALLBACK(...) { ... self::verify_access(...); ... }
+            - pattern-not: function $CALLBACK(...) { ... static::verify_access(...); ... }
+            # check_current_ajax_user_can() — event-tickets / seating capability wrapper
+            - pattern-not: function $CALLBACK(...) { ... check_current_ajax_user_can(...); ... }
+            - pattern-not: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... check_current_ajax_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            # Smash Balloon shared-framework capability wrapper
+            - pattern-not: function $CALLBACK(...) { ... sbi_current_user_can(...); ... }
+            # Smush (wp-smushit) capability wrapper
+            - pattern-not: function $CALLBACK(...) { ... Helper::is_user_allowed(...); ... }
+            # AdTribes/Rymera (woo-product-feed-pro) capability wrapper
+            - pattern-not: function $CALLBACK(...) { ... Helper::is_current_user_allowed(...); ... }
+            - pattern-not: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... Helper::is_current_user_allowed(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            # Generic hasCapability() static wrapper — wraps current_user_can() with exit handling.
+            - pattern-not: function $CALLBACK(...) { ... $CLASS::hasCapability(...); ... }
+            - pattern-not: function $CALLBACK(...) { ... $OBJ->hasCapability(...); ... }
+            # Class-qualified wrapper method sharing the native function's exact name
+            # (e.g. Helper::current_user_can()) — a common helper-class re-export pattern;
+            # the bare current_user_can() pattern-not above only matches the unqualified call.
+            - pattern-not: function $CALLBACK(...) { ... $CLASS::current_user_can(...); ... }
+            - pattern-not: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... $CLASS::current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            # Generalized capability-wrapper naming convention (ports the
+            # equivalent exclusion already used by nonce-without-capability-check.yaml):
+            # a static/instance/bare wrapper function whose own name denotes a
+            # capability/permission/access gate — covers plugin-authored wrappers
+            # around current_user_can() without hardcoding every plugin's own
+            # wrapper name. Both the bare-call and if-condition-guard forms.
+            - pattern-not:
+                patterns:
+                  - pattern: function $CALLBACK(...) { ... $CLASS::$WRAP(...); ... }
+                  - metavariable-regex:
+                      metavariable: $WRAP
+                      regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access).*
+            - pattern-not:
+                patterns:
+                  - pattern: |
+                      function $CALLBACK(...) {
+                        ...
+                        if (<... $CLASS::$WRAP(...) ...>) {
+                          ...
+                        }
+                        ...
+                      }
+                  - metavariable-regex:
+                      metavariable: $WRAP
+                      regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access).*
+            - pattern-not:
+                patterns:
+                  - pattern: function $CALLBACK(...) { ... $OBJ->$WRAP(...); ... }
+                  - metavariable-regex:
+                      metavariable: $WRAP
+                      regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access).*
+            - pattern-not:
+                patterns:
+                  - pattern: |
+                      function $CALLBACK(...) {
+                        ...
+                        if (<... $OBJ->$WRAP(...) ...>) {
+                          ...
+                        }
+                        ...
+                      }
+                  - metavariable-regex:
+                      metavariable: $WRAP
+                      regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access).*
+            - pattern-not:
+                patterns:
+                  - pattern: function $CALLBACK(...) { ... $WRAP(...); ... }
+                  - metavariable-regex:
+                      metavariable: $WRAP
+                      regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access).*
+            - pattern-not:
+                patterns:
+                  - pattern: |
+                      function $CALLBACK(...) {
+                        ...
+                        if (<... $WRAP(...) ...>) {
+                          ...
+                        }
+                        ...
+                      }
+                  - metavariable-regex:
+                      metavariable: $WRAP
+                      regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access).*
+            # Assign-then-check variant: the wrapper's result is stored in a
+            # variable first, then negate-checked in a separate if-statement
+            # (`$can_access = $CLASS::can_access(...); if (!$can_access) { return; }`)
+            # rather than being called bare or inlined in the if-condition —
+            # a very common WP-plugin coding style not covered by the shapes
+            # above.
+            - pattern-not:
+                patterns:
+                  - pattern: |
+                      function $CALLBACK(...) {
+                        ...
+                        $GATEVAR = $CLASS::$WRAP(...);
+                        ...
+                        if (! $GATEVAR) {
+                          ...
+                        }
+                        ...
+                      }
+                  - metavariable-regex:
+                      metavariable: $WRAP
+                      regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access).*
+            - pattern-not:
+                patterns:
+                  - pattern: |
+                      function $CALLBACK(...) {
+                        ...
+                        $GATEVAR = $OBJ->$WRAP(...);
+                        ...
+                        if (! $GATEVAR) {
+                          ...
+                        }
+                        ...
+                      }
+                  - metavariable-regex:
+                      metavariable: $WRAP
+                      regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access).*
+            - pattern-not:
+                patterns:
+                  - pattern: |
+                      function $CALLBACK(...) {
+                        ...
+                        $GATEVAR = $WRAP(...);
+                        ...
+                        if (! $GATEVAR) {
+                          ...
+                        }
+                        ...
+                      }
+                  - metavariable-regex:
+                      metavariable: $WRAP
+                      regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access).*
+
+      on:
+        - 'ajax-nonce-hook-registration.path == has-nonce-no-capability.path'
+        - 'ajax-nonce-hook-registration.$CALLBACK == has-nonce-no-capability.$CALLBACK'
+
+    # Freemius SDK is bundled third-party; out-of-scope for Wordfence bounty.
+    paths:
+      exclude:
+        - "**/freemius/**"
+
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/nonces/
+        - https://developer.wordpress.org/apis/security/user-capabilities-and-roles/
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/

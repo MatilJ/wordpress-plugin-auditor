@@ -1,0 +1,73 @@
+rules:
+  - id: claude.php.wordpress.rce.redundant-unserialize-meta-array
+    languages: [php]
+    severity: HIGH
+    message: |
+      A "return everything" WP core meta accessor (get_post_meta()/
+      get_post_custom()/get_user_meta()/get_comment_meta() called with no
+      single meta key) is captured in a variable, then one of its subscripted
+      values is unserialized AGAIN via an explicit maybe_unserialize()/
+      unserialize() call, with no allowed_classes restriction. WP core's own
+      metadata layer already ran maybe_unserialize() once while building this
+      array; the plugin's redundant second call becomes exploitable when some
+      write path stores a raw, unsanitized external string (not an array or
+      object) under that meta key: WordPress's own maybe_serialize() re-wraps
+      a scalar that merely LOOKS serialized in one extra serialize() layer
+      before storing it, so the value round-trips back out unchanged, and the
+      plugin's second, unrestricted unserialize() call then deserializes it
+      with full class support (CWE-502).
+
+      TRIAGE:
+      1. Find every write path for this same meta key: does any path store a
+         scalar (not run through serialize()/maybe_serialize()/
+         wp_json_encode()) that is itself reachable from external input
+         (form submission, request parameter) at a low privilege or
+         unauthenticated?
+      2. Confirm the read path shown here is reachable without an
+         intervening authorization/nonce check.
+      3. Inventory magic methods (__wakeup/__destruct/__unserialize/
+         __toString/__call) across the plugin and its vendored libraries for
+         a usable POP chain gadget — the sink is only RCE/file-write/SSRF
+         with a reachable gadget.
+
+      Fix: unserialize($value, ['allowed_classes' => false]) on the second
+      call, or avoid re-unserializing a value WP core already deserialized.
+    metadata:
+      category: security
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+      owasp: "A08:2021 - Software and Data Integrity Failures"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Insecure Deserialization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/502.html
+        - https://owasp.org/www-community/vulnerabilities/PHP_Object_Injection
+    patterns:
+      - pattern-inside: |
+          $ARR = $METAFN(...);
+          ...
+      - metavariable-regex:
+          metavariable: $METAFN
+          regex: '^(get_post_meta|get_post_custom|get_user_meta|get_comment_meta)$'
+      - pattern-either:
+          - pattern: maybe_unserialize($ARR[$KEY])
+          - pattern: unserialize($ARR[$KEY])
+          - pattern: maybe_unserialize($ARR[$KEY][$IDX])
+          - pattern: unserialize($ARR[$KEY][$IDX])
+          - pattern: maybe_unserialize(reset($ARR[$KEY]))
+          - pattern: unserialize(reset($ARR[$KEY]))
+      # The neutralizer the real-world fix adds — an explicit allowed_classes
+      # restriction (short/long array syntax, false or empty allow-list).
+      - pattern-not: unserialize($ARR[$KEY], ['allowed_classes' => false])
+      - pattern-not: unserialize($ARR[$KEY], ['allowed_classes' => []])
+      - pattern-not: unserialize($ARR[$KEY], array('allowed_classes' => false))
+      - pattern-not: unserialize($ARR[$KEY], array('allowed_classes' => array()))
+      - pattern-not: unserialize($ARR[$KEY][$IDX], ['allowed_classes' => false])
+      - pattern-not: unserialize($ARR[$KEY][$IDX], ['allowed_classes' => []])
+      - pattern-not: unserialize($ARR[$KEY][$IDX], array('allowed_classes' => false))
+      - pattern-not: unserialize($ARR[$KEY][$IDX], array('allowed_classes' => array()))
+      - pattern-not: unserialize(reset($ARR[$KEY]), ['allowed_classes' => false])
+      - pattern-not: unserialize(reset($ARR[$KEY]), array('allowed_classes' => false))

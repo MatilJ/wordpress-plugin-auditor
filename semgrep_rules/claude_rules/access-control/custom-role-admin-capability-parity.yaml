@@ -1,0 +1,67 @@
+rules:
+  - id: claude.php.wordpress.access-control.custom-role-admin-capability-parity
+    languages: [php]
+    severity: HIGH
+    message: |
+      A custom role is granted the same capability as the 'administrator'
+      role in the same role/capability registration routine (CWE-266:
+      Incorrect Privilege Assignment). If any user can end up in the custom
+      role through an unauthenticated or low-privilege path (front-end
+      self-registration, wp_insert_user(), set_role()), that user silently
+      inherits a capability meant to gate admin-only functionality — no
+      privilege check is bypassed because none was ever required.
+
+      TRIAGE:
+      1. Confirm the custom role is reachable by an unauthenticated or
+         self-registering user (public registration form, or a REST/AJAX
+         handler with no capability gate calling wp_insert_user()/
+         set_role()/->set_role()).
+      2. Confirm the shared capability gates real admin functionality
+         elsewhere (the capability argument to add_menu_page()/
+         add_submenu_page(), or a current_user_can($CAP) check).
+      3. Out of scope if the custom role is only ever assigned by an
+         existing administrator through wp-admin (admin-granted access).
+
+      Fix: grant the capability only to 'administrator' (or an equally
+      trusted role); the self-registerable role should receive no
+      capability beyond a no-op ('read' => false).
+    metadata:
+      category: security
+      cwe: "CWE-266: Incorrect Privilege Assignment"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/266.html
+        - https://developer.wordpress.org/reference/functions/add_role/
+        - https://developer.wordpress.org/reference/classes/wp_roles/add_cap/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $ROLES->add_cap($ROLE, $CAP);
+              $ROLES->add_cap('administrator', $CAP);
+          - pattern: |
+              $ROLES->add_cap('administrator', $CAP);
+              $ROLES->add_cap($ROLE, $CAP);
+          - pattern: |
+              get_role($ROLE)->add_cap($CAP);
+              get_role('administrator')->add_cap($CAP);
+          - pattern: |
+              get_role('administrator')->add_cap($CAP);
+              get_role($ROLE)->add_cap($CAP);
+      - metavariable-regex:
+          metavariable: $ROLE
+          regex: ^(?!.*administrator).*$
+      # The official fix replaces the paired grant with a single,
+      # has_cap()-guarded grant to administrator alone — no adjacent
+      # custom-role statement remains to pair with, so this stays silent.
+      - pattern-not-inside: |
+          if (<... has_cap($CAP) ...>) { ... }
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"

@@ -1,0 +1,82 @@
+rules:
+  - id: claude.php.wordpress.xss.parse-url-fragment-unescaped-reassembly
+    languages: [php]
+    severity: HIGH
+    message: |
+      A URL is split into components via wp_parse_url()/parse_url(), and
+      the 'fragment' component is spliced back into the reassembled URL
+      string with a literal '#' prefix but no encoding function applied
+      (CWE-79, root cause CWE-116 — Improper Encoding). This is an
+      asymmetric-treatment bug: code that reassembles a parsed URL
+      commonly re-encodes the query-string component correctly (e.g.
+      parse_str() + urlencode_deep() + build_query()) while treating the
+      fragment as a plain structural marker requiring only the '#' prefix
+      rule, missing that it is equally attacker-controllable text that
+      needs its own encoding step. If the caller supplied the URL's
+      original text (a shortcode attribute, a request-derived merge/
+      personalization-tag value, a stored redirect target), a literal `"`
+      or `'` inside the fragment survives into the reassembled URL and,
+      if later echoed into an href/src attribute, terminates the
+      attribute early and permits arbitrary attribute injection.
+
+      Fix: apply the same encoding used for the query string to the
+      fragment before splicing it back in, e.g.
+      '#' . rawurlencode( $parts['fragment'] ), or esc_attr()/esc_url()
+      the fully-assembled URL at the point it is echoed into markup.
+
+      TRIAGE: confirm (1) the reassembled URL (or a value built from it)
+      is actually echoed into HTML markup rather than used only for an
+      internal comparison or a server-side redirect target, and (2) the
+      fragment's source text can be influenced by something other than
+      hardcoded/admin-authored configuration (a request parameter, a
+      shortcode/widget attribute, a merge-tag resolver). Safe if the
+      fragment is rawurlencode()'d/urlencode()'d/esc_url()'d/esc_attr()'d
+      before the '#' concatenation, or if it originates from a fixed,
+      hardcoded string.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_parse_url/
+        - https://developer.wordpress.org/reference/functions/esc_url/
+        - https://cwe.mitre.org/data/definitions/79.html
+        - https://cwe.mitre.org/data/definitions/116.html
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/vendor_prefixed/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              function $F(...) {
+                ...
+                $PARTS = wp_parse_url(...);
+                ...
+              }
+          - pattern-inside: |
+              function $F(...) {
+                ...
+                $PARTS = parse_url(...);
+                ...
+              }
+      - pattern-either:
+          - pattern: $PARTS['fragment'] = '#' . $PARTS['fragment'];
+          - pattern: $PARTS['fragment'] = "#" . $PARTS['fragment'];
+          - pattern: $FRAG = '#' . $PARTS['fragment'];
+          - pattern: $FRAG = "#" . $PARTS['fragment'];
+      # Defensive: the shapes above already exclude any inline-wrapped form
+      # (the encoder call, not the bare array-index read, would occupy this
+      # position) — kept for documentation/robustness against minor
+      # pattern variations the parser may normalize differently.
+      - pattern-not: $PARTS['fragment'] = '#' . rawurlencode($PARTS['fragment']);
+      - pattern-not: $PARTS['fragment'] = '#' . urlencode($PARTS['fragment']);
+      - pattern-not: $PARTS['fragment'] = '#' . esc_attr($PARTS['fragment']);
+      - pattern-not: $PARTS['fragment'] = '#' . esc_url($PARTS['fragment']);

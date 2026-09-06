@@ -1,0 +1,99 @@
+rules:
+  - id: claude.php.wordpress.file.download-stream-no-path-validation
+    languages: [php]
+    severity: HIGH
+    message: |
+      A file-serving endpoint sets Content-Disposition or octet-stream
+      headers and uses fopen()+fpassthru()/fread() to stream file
+      contents, but no path sanitizer (basename, sanitize_file_name,
+      realpath, validate_file, sanitize_key) appears in the function
+      body. Stream-based downloads are functionally identical to
+      readfile() for path traversal (CWE-22). An attacker can read
+      wp-config.php to obtain database credentials and auth salts.
+    metadata:
+      category: security
+      cwe: "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - "CVE-2024-10470: WPLMS unauthenticated readfile() path traversal"
+        - "CVE-2024-9047: WordPress File Upload plugin path traversal in wfu_file_downloader.php"
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — stream download with no path validation:
+      #   header('Content-Type: application/octet-stream');
+      #   $fp = fopen($file, 'rb');
+      #   fpassthru($fp);
+      #   → $file constructed from user input without sanitization.
+      #
+      # FALSE POSITIVE — hardcoded base + sanitized filename:
+      #   $name = sanitize_file_name($_GET['file']);
+      #   $fp = fopen(PLUGIN_DIR . '/exports/' . $name, 'rb');
+      #   header('Content-Disposition: attachment');
+      #   fpassthru($fp);
+      #   → sanitize_file_name strips traversal sequences.
+      #
+      # CONTEXT CHECK:
+      #   1. Is the function registered via wp_ajax_nopriv_ or admin_post_nopriv_?
+      #   2. Is the fopen() path built from user input?
+      #   3. Does sanitization apply to the PATH (not just the download header filename)?
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                header(...);
+                ...
+                $FP = fopen($PATH, ...);
+                ...
+                fpassthru($FP);
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                header(...);
+                ...
+                $FP = fopen($PATH, ...);
+                ...
+                fread($FP, ...);
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $PATH
+          regex: .*\$.*
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            basename(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            sanitize_file_name(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            realpath(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            validate_file(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            sanitize_key(...);
+            ...
+          }

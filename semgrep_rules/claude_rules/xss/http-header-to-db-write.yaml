@@ -1,0 +1,126 @@
+rules:
+  - id: claude.php.wordpress.xss.http-header-to-db-write
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      An HTTP request header ($_SERVER['HTTP_*']) flows into a database write
+      function without sanitization. HTTP headers (Referer, User-Agent,
+      X-Forwarded-For, Host, Accept-Language) are fully attacker-controlled
+      and can contain arbitrary HTML/JavaScript payloads.
+
+      If the stored value is later rendered in an admin dashboard, log viewer,
+      or analytics page without output escaping (esc_html/esc_attr), this
+      creates a second-order Stored XSS (CWE-79).
+
+      Common in: analytics plugins, SEO/redirect plugins, visitor tracking,
+      security/logging plugins, form submission logging.
+
+      Also fires when the header is only wrapped in a no-op transform (e.g.
+      trim()) inside a small "extraction helper" function (get_user_agent(),
+      get_client_ip(), parse_browser(), etc.) and returned as-is: analytics/
+      tracking plugins commonly centralize raw $_SERVER['HTTP_*'] reads in one
+      helper, several call frames away from the eventual database write, which
+      single-file taint analysis cannot bridge. The unsanitized return value
+      is the reachable, intra-function proxy for that unseen downstream write.
+
+      Real-world CVEs:
+        - CVE-2023-6961: WP Meta SEO — Referer header stored unsanitized,
+          rendered in admin 404 Redirects dashboard
+        - CVE-2025-9816: WP Statistics — User-Agent stored without
+          sanitization, rendered in admin Device Models report
+
+      Fix: sanitize at write time with sanitize_text_field() (strips HTML
+      tags) or esc_url_raw() (for Referer URLs). Also escape at render time
+      with esc_html()/esc_attr() for defense in depth. For extraction
+      helpers, sanitize at the point of extraction (e.g.
+      sanitize_text_field(wp_unslash($_SERVER['HTTP_USER_AGENT']))) so every
+      caller inherits a clean value.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://www.fastly.com/blog/active-exploitation-unauthenticated-stored-xss-vulnerabilities-wordpress
+        - https://developer.wordpress.org/apis/security/escaping/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_SERVER['HTTP_REFERER']
+          - pattern: $_SERVER["HTTP_REFERER"]
+          - pattern: $_SERVER['HTTP_USER_AGENT']
+          - pattern: $_SERVER["HTTP_USER_AGENT"]
+          - pattern: $_SERVER['HTTP_X_FORWARDED_FOR']
+          - pattern: $_SERVER["HTTP_X_FORWARDED_FOR"]
+          - pattern: $_SERVER['HTTP_HOST']
+          - pattern: $_SERVER["HTTP_HOST"]
+          - pattern: $_SERVER['HTTP_ACCEPT_LANGUAGE']
+          - pattern: $_SERVER["HTTP_ACCEPT_LANGUAGE"]
+    pattern-sinks:
+      - pattern-either:
+          - pattern: update_option(..., $X, ...)
+          - pattern: update_post_meta(..., ..., $X)
+          - pattern: add_post_meta(..., ..., $X, ...)
+          - pattern: update_user_meta(..., ..., $X)
+          - pattern: add_user_meta(..., ..., $X, ...)
+          - pattern: $wpdb->insert(..., $X, ...)
+          - pattern: $wpdb->update(..., $X, ...)
+          - pattern: $wpdb->replace(..., $X, ...)
+          - pattern: $wpdb->query($X)
+      # Extraction-helper boundary: a function/method returns the header
+      # value (or something built from it) without sanitizing it first. Many
+      # analytics/tracking plugins centralize the raw $_SERVER['HTTP_*'] read
+      # in a small getter and persist/render the return value several call
+      # frames — often several files — away, out of reach of single-file
+      # taint analysis. The return statement is the closest reachable proxy
+      # for that unseen sink.
+      - patterns:
+          - pattern: return $X;
+          - focus-metavariable: $X
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+        # PSR-7/HTTP-client libraries frequently bundled by WP plugins under a
+        # variety of vendor-folder names (Dependencies/, libs/, deps/, ...);
+        # their own request-object builders (e.g. Guzzle's
+        # ServerRequest::getUriFromGlobals()) legitimately read $_SERVER['HTTP_*']
+        # to construct an immutable URI/request VALUE OBJECT they return — not a
+        # stored/rendered string. Namespace folder name is invariant under
+        # Composer's PSR-4 autoloading regardless of the containing vendor dir.
+        - "**/GuzzleHttp/**"
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_text_field(...)
+          - pattern: sanitize_textarea_field(...)
+          - pattern: esc_html(...)
+          - pattern: esc_attr(...)
+          - pattern: esc_url(...)
+          - pattern: esc_url_raw(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          - pattern: strip_tags(...)
+          - pattern: wp_strip_all_tags(...)
+          - pattern: sanitize_url(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          # rawurlencode()/urlencode() percent-encode every character outside
+          # a small safe set — no `<`, `>`, `"`, `'`, or `&` byte can survive,
+          # so wrapped output cannot carry HTML/attribute-breakout content
+          # regardless of which sink (DB write or the "return $X" extraction-
+          # helper proxy) it later reaches. Common when a header value is
+          # embedded as a query-string parameter in an outbound API call
+          # (e.g. a license-check request) rather than stored/rendered raw.
+          - pattern: rawurlencode(...)
+          - pattern: urlencode(...)

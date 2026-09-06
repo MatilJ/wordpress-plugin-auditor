@@ -1,0 +1,59 @@
+rules:
+  - id: claude.php.wordpress.xss.sanitizer-key-allowlist-bypass
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A custom recursive input-sanitization helper returns its input completely
+      unmodified whenever the current field/key name exactly matches one of a
+      hardcoded list of key names, before the function's own sanitizer call
+      (wp_kses_post/sanitize_text_field/esc_html/etc.) is ever reached. If the
+      key name is itself attacker-influenced (e.g. an arbitrary nested array
+      key in request data that this same function processes recursively), the
+      attacker can choose a key that hits the allowlist and have the value
+      returned completely raw. This is only exploitable when the raw value can
+      later reach an HTML/JS output context without independent render-side
+      escaping. CWE-79.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      # Every hit requires two manual checks before confirming: (1) can the
+      # attacker choose/influence the key name reaching this function (e.g. a
+      # nested POST array key processed recursively), and (2) does the raw
+      # value returned on the bypass path reach an output sink without
+      # independent esc_html()/esc_attr()/wp_kses() at render time. A hit
+      # where the skip condition ALSO constrains the input's shape/type
+      # (e.g. combined with an is_array()/is_string() check) is the
+      # remediated form and is excluded by this rule; verify no OTHER
+      # branch of the same allowlist condition still bypasses on key name
+      # alone (partial fixes commonly patch one hardcoded key and leave
+      # sibling prefix/name checks in the same condition untouched).
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/79.html
+        - https://developer.wordpress.org/apis/security/data-validation/
+    patterns:
+      - pattern-inside: |
+          function $SANFUNC($DATA, $KEY, ...) {
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $SANFUNC
+          regex: "(?i).*(saniti[sz]e?|clean_|purify|filter_recursive|escape_recursive).*"
+      - pattern-either:
+          - pattern: |
+              $SKIPLIST = array(...);
+              ...
+              if (<... in_array($KEY, $SKIPLIST, ...) ...>) {
+                return $DATA;
+              }
+          - pattern: |
+              if (<... in_array($KEY, array(...), ...) ...>) {
+                return $DATA;
+              }
+      - pattern-not-regex: "is_array|is_string|is_scalar"

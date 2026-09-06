@@ -1,0 +1,99 @@
+rules:
+  - id: claude.php.wordpress.sqli.unquoted-bare-variable-sql-fragment-interpolation
+    languages: [php]
+    severity: HIGH
+    message: |
+      A local variable is assigned (or appended to, via .=) a double-quoted
+      PHP string that builds a raw SQL condition fragment (an AND/OR/WHERE-
+      shaped snippet), with another bare variable interpolated directly
+      after a comparison operator with NO surrounding quote characters and
+      no array/property access — e.g. "AND donate_id = $id". Because the
+      value sits UNQUOTED in the SQL text, an attacker does not even need to
+      break out of a string literal: whatever the variable contains is
+      spliced verbatim into the query as raw SQL syntax at that position
+      (CWE-89).
+
+      This is the plain-bare-variable sibling of interpolating a value
+      inside single quotes ('$var') or as an array/object access
+      ({$arr['key']}) — those two shapes are already covered by dedicated
+      rules. A bare, un-cast, ID-like variable spliced straight after "="
+      in a WHERE/AND/OR fragment is at least as common, especially for
+      numeric primary-key lookups reached through a REST route or AJAX
+      handler. The fragment variable is frequently built inside one small
+      route/handler function and only reaches an actual $wpdb call inside a
+      separate, custom query-wrapper method one or more calls later —
+      detection or triage that only looks at the final
+      $wpdb->query()/get_results() call argument passes right over the real
+      vulnerable line, which is this assignment.
+
+      Fix: build the fragment with $wpdb->prepare() using a %d/%f
+      placeholder for the value, or at minimum cast the value with
+      (int)/(float)/absint()/intval() before it is ever interpolated.
+
+      TRIAGE GUIDANCE
+      ───────────────────────────────────────────────────────────────────
+      TRUE POSITIVE indicators:
+        - The interpolated variable (or an alias of it) traces back to a
+          REST request parameter ($request['x']/$request->get_param()),
+          $_GET/$_POST/$_REQUEST, or any other request-controlled source,
+          with no cast/sanitizer applied anywhere between the source and
+          this assignment.
+        - The resulting fragment variable is later handed to $wpdb-> or to
+          a custom query-builder/wrapper method as a raw condition
+          argument.
+
+      FALSE POSITIVE indicators:
+        - The interpolated variable was already cast with (int)/(float) or
+          run through intval()/absint() earlier in the same function — this
+          pattern cannot see that guard on a prior line; confirm manually.
+        - The variable is a plugin-defined constant/enum value never
+          influenced by request data.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+      # KNOWN LIMITATION — same class as raw-sql-clause-quoted-variable-
+      # interpolation.yaml: this is a pattern-mode (non-taint) rule. It
+      # cannot see prior-line sanitization of the interpolated variable, and
+      # intentionally does not require the fragment variable to be traced
+      # into a $wpdb call — the vulnerable line for this class is the
+      # string assignment itself, which is frequently several calls away
+      # from the eventual $wpdb execution inside a custom wrapper method.
+    patterns:
+      - pattern-either:
+          - pattern: $FRAG = $S;
+          - pattern: $FRAG .= $S;
+      # $S must itself be a double-quoted string literal (interpolation via
+      # $var/{$var} inside is fine — "..." only excludes further
+      # concatenation/closures/calls). Without this, $S can bind to ANY
+      # right-hand-side expression, including a closure or callable literal
+      # whose PHP source text (parameter names, body) can coincidentally
+      # satisfy the regex below despite never building a SQL fragment at
+      # all — e.g. `$cb = function ($where) use ($x) { $where .= $x; ... };`
+      # matches on the literal substring "where .= $x" in the closure's own
+      # source even though $x is never SQL text.
+      - metavariable-pattern:
+          metavariable: $S
+          patterns:
+            - pattern: "\"...\""
+      - metavariable-regex:
+          metavariable: $S
+          regex: "(?is).*\\b(and|or|where)\\b[^'\"]*?=\\s*\\$(?!wpdb\\b)[a-z_][a-z0-9_]*\\b(?!\\s*(?:->|\\[))"
+      # Fix-derived FP guard: the seeding CVE's patch replaced this entire
+      # fragment-assignment shape with a single $wpdb->prepare() call using
+      # a %d placeholder — no bare-variable interpolation into a fragment
+      # string remains at all. These clauses make that exclusion explicit
+      # for callers who keep the assignment shape but wrap the value first.
+      - pattern-not: $FRAG = $OBJ->prepare(...);
+      - pattern-not: $FRAG .= $OBJ->prepare(...);
+      - pattern-not: $FRAG = esc_sql(...);
+      - pattern-not: $FRAG .= esc_sql(...);

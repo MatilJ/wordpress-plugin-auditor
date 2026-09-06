@@ -1,0 +1,133 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+  # WP Core restricts creating a personal-data export/erase request to
+  # administrators (Tools > Export/Erase Personal Data, capability
+  # 'manage_options'/'erase_others_personal_data'). A plugin that calls
+  # wp_create_user_request()/wp_send_user_request() directly from a callback
+  # on an unconditional, always-fired hook re-implements this Core UI flow
+  # without re-implementing the capability check Core's own admin screen
+  # performs before ever reaching these functions.
+
+  - id: claude.php.wordpress.access-control.public-hook-no-auth-privacy-data-request
+    mode: join
+    languages: [php]
+    severity: HIGH
+    message: |
+      A callback on the 'init', 'wp', 'wp_loaded', 'parse_request', or
+      'template_redirect' hook calls wp_create_user_request() or
+      wp_send_user_request() — WordPress Core's personal-data export/erase
+      request creation API, normally reachable only via the admin-only
+      Tools > Export/Erase Personal Data screens (capability
+      'manage_options'/'erase_others_personal_data') — without calling
+      current_user_can() or any nonce verification function in the same
+      function body (CWE-862). These hooks fire for every request including
+      unauthenticated visitors.
+
+      An attacker can make the site create and email a personal-data
+      request confirmation for any address they choose (not required to
+      belong to an existing account), abusing the site's own outbound mail
+      transport/reputation and polluting the site's Privacy-tools admin
+      queue with fabricated requests.
+
+      TRIAGE:
+      1. Confirm the request type / target email is read from request data
+         ($_GET, $_POST, $_REQUEST) rather than hardcoded.
+      2. Confirm no current_user_can()/nonce check exists anywhere in the
+         call chain — including a wrapper function this rule cannot see.
+      3. Confirm no experiment-flag/feature-flag gate that is itself
+         admin-only stands between the hook firing and the sink (a
+         user-toggleable feature flag does not count as an authorization
+         check).
+
+      Fix: add current_user_can( 'manage_options' ) (or the specific
+      'erase_others_personal_data' capability) immediately before creating
+      the request, returning early on failure — mirroring the capability
+      WP Core itself requires before its own admin screens reach this API.
+    join:
+      rules:
+        - id: public-hook-registration
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_action('$HOOK', [..., '$CALLBACK'], ...);
+                - pattern: add_action('$HOOK', '$CALLBACK', ...);
+                - pattern: add_action('$HOOK', array($OBJ, '$CALLBACK'), ...);
+            - metavariable-regex:
+                metavariable: $HOOK
+                regex: (init|wp|wp_loaded|parse_request|template_redirect)
+
+        - id: no-auth-privacy-request-creation
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_create_user_request(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_send_user_request(...);
+                      ...
+                    }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  wp_verify_nonce(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  check_ajax_referer(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  check_admin_referer(...);
+                  ...
+                }
+
+      on:
+        - 'public-hook-registration.path == no-auth-privacy-request-creation.path'
+        - 'public-hook-registration.$CALLBACK == no-auth-privacy-request-creation.$CALLBACK'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: LOW
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/functions/wp_create_user_request/
+        - https://developer.wordpress.org/reference/functions/wp_send_user_request/

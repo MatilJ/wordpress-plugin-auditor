@@ -1,0 +1,130 @@
+rules:
+  # wp_doing_ajax() checks request context (whether the current request goes
+  # through admin-ajax.php), NOT user role or capabilities. It returns true
+  # for ALL requests to admin-ajax.php, including unauthenticated ones via
+  # wp_ajax_nopriv_ hooks.
+  # Source: load.php:1745 — returns apply_filters('wp_doing_ajax',
+  #   defined('DOING_AJAX') && DOING_AJAX)
+  #
+  # Code that gates state-changing operations behind wp_doing_ajax() without
+  # current_user_can() is NOT authorization-protected.
+
+  - id: claude.php.wordpress.access-control.wp-doing-ajax-as-authorization
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A state-changing operation (database write, file operation, or option update) is
+      guarded by wp_doing_ajax() without a current_user_can() check. wp_doing_ajax()
+      returns true for ALL requests routed through admin-ajax.php — including
+      unauthenticated AJAX via wp_ajax_nopriv_ hooks (CWE-862). It checks request
+      context, NOT user privilege. Source: load.php:1745.
+      Replace or supplement with current_user_can('appropriate_capability').
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_doing_ajax/
+        - https://developer.wordpress.org/plugins/security/nonces/#common-pitfalls
+    patterns:
+      - pattern-inside: |
+          if (wp_doing_ajax()) {
+            ...
+          }
+      - pattern-either:
+          - pattern: $wpdb->insert(...)
+          - pattern: $wpdb->update(...)
+          - pattern: $wpdb->delete(...)
+          - pattern: $wpdb->replace(...)
+          - pattern: $wpdb->query(...)
+          - pattern: update_option(...)
+          - pattern: update_post_meta(...)
+          - pattern: update_user_meta(...)
+          - pattern: wp_delete_post(...)
+          - pattern: wp_delete_attachment(...)
+          - pattern: unlink(...)
+          - pattern: wp_insert_post(...)
+          - pattern: wp_update_post(...)
+          - pattern: wp_schedule_event(...)
+          - pattern: wp_schedule_single_event(...)
+          - pattern: wp_insert_user(...)
+          - pattern: wp_update_user(...)
+      - pattern-not-inside: |
+          if (wp_doing_ajax()) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not-inside: |
+          if (wp_doing_ajax()) {
+            ...
+            if (<... current_user_can(...) ...>) {
+              ...
+            }
+            ...
+          }
+
+  - id: claude.php.wordpress.access-control.doing-ajax-constant-as-authorization
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A state-changing operation is guarded by defined('DOING_AJAX') && DOING_AJAX
+      without a current_user_can() check. This constant is set by admin-ajax.php for
+      ALL AJAX requests including unauthenticated ones (CWE-862). It checks request
+      context, NOT user privilege.
+      Replace or supplement with current_user_can('appropriate_capability').
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_doing_ajax/
+    patterns:
+      - pattern-inside: |
+          if (defined('DOING_AJAX') && DOING_AJAX) {
+            ...
+          }
+      - pattern-either:
+          - pattern: $wpdb->insert(...)
+          - pattern: $wpdb->update(...)
+          - pattern: $wpdb->delete(...)
+          - pattern: $wpdb->replace(...)
+          - pattern: $wpdb->query(...)
+          - pattern: update_option(...)
+          - pattern: update_post_meta(...)
+          - pattern: update_user_meta(...)
+          - pattern: wp_delete_post(...)
+          - pattern: wp_delete_attachment(...)
+          - pattern: unlink(...)
+          - pattern: wp_insert_post(...)
+          - pattern: wp_update_post(...)
+          - pattern: wp_schedule_event(...)
+          - pattern: wp_schedule_single_event(...)
+          - pattern: wp_insert_user(...)
+          - pattern: wp_update_user(...)
+      - pattern-not-inside: |
+          if (defined('DOING_AJAX') && DOING_AJAX) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not-inside: |
+          if (defined('DOING_AJAX') && DOING_AJAX) {
+            ...
+            if (<... current_user_can(...) ...>) {
+              ...
+            }
+            ...
+          }

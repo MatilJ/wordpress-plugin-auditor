@@ -1,0 +1,51 @@
+rules:
+  - id: claude.php.wordpress.xss.wp-block-attribute-unescaped-output
+    languages: [php]
+    severity: HIGH
+    message: |
+      A WordPress block render callback extracts a value from the $attributes or
+      $atts array and outputs it without escaping — either via echo, do_shortcode(),
+      or a tag-building function. Block attributes are stored as JSON in post_content
+      HTML comments. While wp_pre/post_kses_block_attributes() preserves the block
+      comment structure through kses, attribute values containing HTML are still
+      kses-filtered for users without unfiltered_html (event handlers and dangerous
+      protocols stripped). However, block attribute XSS is still exploitable via
+      attribute context breakout (plain-text payloads that break out of HTML attribute
+      or script contexts — kses-irrelevant) or javascript: protocol in href/src
+      attributes without esc_url(). Requires manual verification of the output context
+      to confirm exploitability. Escape with esc_html(), esc_attr(), or esc_url().
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Stored Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/block-editor/reference-guides/block-api/block-attributes/
+    patterns:
+      - pattern-either:
+          # echo of array-key access on $attributes without escaping
+          - pattern: echo $attributes[$KEY];
+          # echo of array-key access on $atts without escaping
+          - pattern: echo $atts[$KEY];
+          # do_shortcode() on a value extracted from $attributes
+          - pattern: do_shortcode($attributes[$KEY])
+          # do_shortcode() on a value extracted from $atts
+          - pattern: do_shortcode($atts[$KEY])
+          # Common WP helper: blocksy_akg/blocksy_default_akg extracts from $attributes
+          - pattern: do_shortcode(blocksy_akg($KEY, $attributes, ...))
+          - pattern: do_shortcode(blocksy_default_akg($KEY, $atts, ...))
+          # Direct echo of blocksy_akg from attributes
+          - pattern: echo blocksy_akg($KEY, $attributes, ...);
+          - pattern: echo blocksy_default_akg($KEY, $atts, ...);
+      # Exclude when wrapped in an escaping function
+      - pattern-not-inside: esc_html(...)
+      - pattern-not-inside: esc_attr(...)
+      - pattern-not-inside: wp_kses_post(...)
+      - pattern-not-inside: wp_kses(...)
+      - pattern-not-inside: intval(...)
+      - pattern-not-inside: absint(...)

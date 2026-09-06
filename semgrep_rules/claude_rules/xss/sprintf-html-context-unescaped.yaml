@@ -1,0 +1,135 @@
+rules:
+  - id: claude.php.wordpress.xss.sprintf-html-context-unescaped
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      Stored or user-controlled value flows into sprintf()/printf() that builds
+      HTML without output escaping. The tainted data may be interpolated into
+      HTML attribute or body contexts. This includes values read from a
+      module/widget/field settings array (e.g. $instance[...], $field[...],
+      $atts[...]), or a hydrated record/model object's get_prop()-backed
+      getter (e.g. $comment->get_author_name()) whose backing property was
+      set verbatim from REST/AJAX request input with no sanitization in the
+      setter — and passed straight into a format string that is later
+      echoed, returned, or concatenated onto an HTML builder variable — the
+      sink is the sprintf()/printf() call itself, not just an immediate echo.
+      Escape the value with esc_html(), esc_attr(), or esc_url() before
+      passing it to sprintf/printf.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+    pattern-sources:
+      - pattern-either:
+          - pattern: get_post_meta(...)
+          - pattern: get_option(...)
+          - pattern: get_user_meta(...)
+          - pattern: get_term_meta(...)
+          - pattern: get_the_author_meta(...)
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          # A value read from any settings/config array — covers widget
+          # $instance[...], shortcode $atts[...], block $attributes[...],
+          # and form/module $field[...]-shaped settings arrays alike.
+          - pattern: $ARR[$KEY]
+          # WP core accessors with a boolean escape/display argument that
+          # defaults to true: passing it false explicitly opts out of the
+          # accessor's own built-in escaping and returns the raw request value.
+          - pattern: get_search_query(false)
+          - pattern: get_search_query(0)
+          # A hydrated record/model object's identity or free-text getter —
+          # the common WC_Data-style get_prop()-backed accessor pattern
+          # (WooCommerce and its many derivatives) where the backing
+          # property was set verbatim from REST/AJAX request input with no
+          # sanitization in the setter itself.
+          - patterns:
+              - pattern: $OBJ->$GETTER(...)
+              - metavariable-regex:
+                  metavariable: $GETTER
+                  regex: "(?i)^get_(author_name|author_email|author_url|user_name|user_email|user_url|display_name|reviewer_name|commenter_name|name|title|content|description|message)$"
+    pattern-sinks:
+      # Sink is the format call itself: flagged whether its result is
+      # echoed immediately, returned, or concatenated onto a builder
+      # variable ($html .= sprintf(...)) for later output.
+      - patterns:
+          - pattern-either:
+              - pattern: sprintf($FMT, ..., $SINK, ...)
+              - pattern: printf($FMT, ..., $SINK, ...)
+          # A format string with no %s specifier (bare or positional, e.g.
+          # the %1$s/%2$s form WP i18n guidelines recommend once a string
+          # has 2+ placeholders, since translators may need to reorder them)
+          # can only be filled with numeric-coerced values (%d/%o/%x/%X/%b/
+          # %u/%c) — the substituted data cannot surface as raw string/HTML
+          # content in the result.
+          - metavariable-regex:
+              metavariable: $FMT
+              regex: (?s).*%(\d+\$)?s.*
+          # HTTP headers and mail bodies are not browser-rendered HTML.
+          - pattern-not-inside: header(...)
+          - pattern-not-inside: mail(...)
+          - pattern-not-inside: wp_mail(...)
+          - pattern-not-inside: error_log(...)
+          # A plugin's own logging-wrapper call (Class::log()/$this->log()) —
+          # the sprintf() result is written to a log file/PHP error log, not
+          # rendered as HTML. Confirmed FP source: templately 3.7.0
+          # AIContent.php — Helper::log(sprintf(...), 'ai-import', 'info').
+          - pattern-not-inside: $CLASS::log(...)
+          - pattern-not-inside: $OBJ->log(...)
+          # WP-CLI output is command-line stdout, never rendered in a browser
+          # context — HTML escaping is not applicable regardless of privilege.
+          - pattern-not-inside: WP_CLI::log(...)
+          - pattern-not-inside: WP_CLI::line(...)
+          - pattern-not-inside: WP_CLI::success(...)
+          - pattern-not-inside: WP_CLI::warning(...)
+          - pattern-not-inside: WP_CLI::error(...)
+          - pattern-not-inside: WP_CLI::debug(...)
+          - pattern-not-inside: WP_CLI::confirm(...)
+          # PHP's throw statement only accepts a Throwable, so any constructor
+          # call directly inside it builds an exception/error message, not HTML.
+          - pattern-not-inside: |
+              throw new $EXC(...);
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: esc_html(...)
+          - pattern: esc_attr(...)
+          - pattern: esc_url(...)
+          - pattern: esc_js(...)
+          - pattern: esc_textarea(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: selected(...)
+          - pattern: checked(...)
+          - pattern: disabled(...)
+          # Always returns a bounded, computed string (e.g. "2 hours") from
+          # numeric timestamps — cannot pass through arbitrary input content.
+          - pattern: human_time_diff(...)
+          # Percent-encodes the value (including " ' < > =), which prevents
+          # attribute or tag breakout when the result later reaches an HTML
+          # attribute context via sprintf/printf.
+          - pattern: urlencode(...)
+          - pattern: rawurlencode(...)
+          # JSON_HEX_TAG hex-encodes < and > to </> in addition to
+          # json_encode()'s default quote/backslash escaping, so the result
+          # cannot break out of a JS string literal or inject an HTML tag
+          # even if later rendered outside a <script> block.
+          - pattern: wp_json_encode($X, <... JSON_HEX_TAG ...>)
+          - pattern: json_encode($X, <... JSON_HEX_TAG ...>)
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"

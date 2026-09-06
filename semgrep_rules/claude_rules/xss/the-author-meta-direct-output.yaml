@@ -1,0 +1,53 @@
+rules:
+  - id: claude.php.wordpress.xss.the-author-meta-direct-output
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      the_author_meta() echoes the user-controlled author metadata field directly
+      without any escaping. WordPress stores user profile fields (nickname,
+      display_name, description, etc.) via _wp_specialchars(ENT_NOQUOTES), which
+      does NOT encode the double-quote character ("). When this output lands inside
+      a JavaScript double-quoted string (e.g., inside a <script> block or an
+      inline event handler), a " in the field value breaks out of the string and
+      allows arbitrary JavaScript execution — Stored XSS (CWE-79).
+
+      TRIAGE: Confirm whether the call site is inside a JavaScript string context
+      (<script> block or event attribute). HTML-body output is lower risk but
+      still warrants escaping.
+
+      Safe replacement for JavaScript context:
+        echo esc_js( get_the_author_meta( $field, $author_id ) );
+
+      Safe replacement for HTML body / attribute context:
+        echo esc_html( get_the_author_meta( $field, $author_id ) );
+        echo esc_attr( get_the_author_meta( $field, $author_id ) );
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      # the_author_meta() is a WordPress output function — it always echoes directly
+      # and returns void. Taint mode cannot track its implicit echo. This pattern
+      # rule flags every call site; manual triage confirms whether the call lands
+      # in a JS string context (vulnerable) or HTML body context (lower risk).
+      #
+      # The dangerous output context is inside a <script> block, e.g.:
+      #   _statcounter.push({"tags": {"author": "<?php the_author_meta('nickname', $id); ?>"}});
+      # A " in the nickname breaks out of the JS string literal.
+      #
+      # Confirmed TP: official-statcounter-plugin-for-wordpress 2.1.1
+      # StatCounter-Wordpress-Plugin.php:274 — the_author_meta('nickname') echoed
+      # inside _statcounter.push() JS string. CVSS 6.4 base / 8.0 with XSS→admin chain.
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    # Freemius SDK is a bundled third-party library; OOS for Wordfence bounty.
+    paths:
+      exclude:
+        - "**/freemius/**"
+    pattern: the_author_meta(...)

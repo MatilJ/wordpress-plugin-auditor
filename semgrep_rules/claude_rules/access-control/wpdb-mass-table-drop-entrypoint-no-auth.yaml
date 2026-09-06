@@ -1,0 +1,172 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+
+  # A class defines BOTH (1) a method that destructively iterates a table
+  # collection with $wpdb->query() (DROP TABLE / TRUNCATE TABLE / an
+  # unconditional DELETE FROM spanning the loop variable) and (2) a public
+  # entry-point method taking an array parameter (the caller-selected target
+  # list) with no current_user_can()/wp_verify_nonce()/check_admin_referer()/
+  # check_ajax_referer() anywhere in the entry method's own body. The
+  # capability/nonce guard commonly lands in the entry method that DISPATCHES
+  # the destructive sequence, not in the low-level per-table loop itself, so
+  # this join correlates the two by class rather than requiring both in one
+  # function.
+
+  - id: claude.php.wordpress.access-control.wpdb-mass-table-drop-entrypoint-no-auth
+    mode: join
+    languages: [php]
+    severity: HIGH
+    message: |
+      This class defines a method that runs a destructive $wpdb->query() —
+      DROP TABLE, TRUNCATE TABLE, or an unconditional DELETE FROM — across
+      every item of a looped table collection, AND a public entry-point
+      method taking an array parameter (the caller-selected target list)
+      whose own body has no current_user_can(), wp_verify_nonce(),
+      check_admin_referer(), or check_ajax_referer() call (CWE-862 /
+      CWE-284). Full-table DROP/TRUNCATE/DELETE is irreversible data loss for
+      the entire site if this entry point is reachable without the intended
+      privilege level.
+
+      TRIAGE:
+      1. Confirm the entry method is actually reachable externally — a direct
+         add_action() hook callback, or called from one. admin_init is
+         dispatched by admin-post.php/admin-ajax.php for logged-out visitors
+         as well as any authenticated user visiting /wp-admin/, not only from
+         a page requiring an established admin session.
+      2. Read the entry method in full: a request-derived value compared only
+         against ANOTHER request-derived value (e.g. two fields from the same
+         request checked against each other, rather than against a
+         server-stored expected value) is not a real authorization or CSRF
+         check.
+      3. Confirm the array parameter actually reaches the destructive method
+         (directly, or through one or two further private-method calls) and
+         is not a hardcoded/internal-only list.
+
+      Fix: require current_user_can('manage_options') (or a capability
+      matching the operation's impact) AND a verified nonce/referer check
+      before the destructive sequence runs, in the entry method itself.
+    join:
+      rules:
+        - id: mass-table-drop-sink-in-class
+          languages: [php]
+          patterns:
+            - pattern-inside: |
+                class $CLASS {
+                  ...
+                }
+            - pattern-inside: |
+                function $SINKMETHOD(...) {
+                  ...
+                }
+            - pattern-inside: |
+                foreach ($TABLES as $TABLE) {
+                  ...
+                }
+            - pattern: $wpdb->query($QUERY)
+            - metavariable-regex:
+                metavariable: $QUERY
+                regex: '(?i).*(drop\s+table|truncate\s+table|delete\s+from).*'
+
+        - id: array-param-entrypoint-no-auth-in-class
+          languages: [php]
+          patterns:
+            - pattern-inside: |
+                class $CLASS {
+                  ...
+                }
+            - pattern: |
+                function $ENTRYMETHOD(array $PARAM) {
+                  ...
+                }
+            # NOTE: metavariable-regex cannot filter a metavariable bound only
+            # inside a pattern-not-inside clause (its bindings do not escape
+            # the negative pattern) — confirmed empirically: a single
+            # metavariable'd $AUTHCHECK(...) clause here matched (and wrongly
+            # excluded) functions containing ANY if-wrapped call at all, not
+            # just an auth call. Each guard function is enumerated as its own
+            # hardcoded pattern-not-inside instead, both bare-statement and
+            # if-condition forms.
+            - pattern-not-inside: |
+                function $ENTRYMETHOD(array $PARAM) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $ENTRYMETHOD(array $PARAM) {
+                  ...
+                  wp_verify_nonce(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $ENTRYMETHOD(array $PARAM) {
+                  ...
+                  check_admin_referer(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $ENTRYMETHOD(array $PARAM) {
+                  ...
+                  check_ajax_referer(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $ENTRYMETHOD(array $PARAM) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                function $ENTRYMETHOD(array $PARAM) {
+                  ...
+                  if (<... wp_verify_nonce(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                function $ENTRYMETHOD(array $PARAM) {
+                  ...
+                  if (<... check_admin_referer(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                function $ENTRYMETHOD(array $PARAM) {
+                  ...
+                  if (<... check_ajax_referer(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+
+      on:
+        - 'mass-table-drop-sink-in-class.$CLASS == array-param-entrypoint-no-auth-in-class.$CLASS'
+        - 'mass-table-drop-sink-in-class.path == array-param-entrypoint-no-auth-in-class.path'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: LOW
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://cwe.mitre.org/data/definitions/284.html
+        - https://developer.wordpress.org/reference/hooks/admin_init/
+        - https://developer.wordpress.org/apis/security/user-capabilities-and-roles/

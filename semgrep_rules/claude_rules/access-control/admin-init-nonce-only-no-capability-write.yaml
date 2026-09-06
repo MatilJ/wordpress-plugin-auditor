@@ -1,0 +1,112 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+
+  # admin_init fires for every authenticated user (Subscriber+) visiting /wp-admin/.
+  # check_admin_referer() verifies CSRF origin only — not the caller's privilege level.
+  # A handler that has check_admin_referer() but no current_user_can() before a write
+  # allows any Subscriber+ who obtains a valid nonce to trigger the write.
+
+  - id: claude.php.wordpress.access.admin-init-nonce-only-no-capability-write
+    mode: join
+    languages: [php]
+    severity: MEDIUM
+    message: >
+      Callback on admin_init verifies a nonce with check_admin_referer() but
+      performs a write operation without current_user_can(). check_admin_referer()
+      confirms CSRF origin only; any authenticated user (Subscriber+) who can
+      obtain a valid nonce can trigger the write. Add current_user_can() with
+      the required capability before the write call (CWE-862).
+    join:
+      rules:
+        - id: admin-init-registration
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_action('admin_init', [..., '$CALLBACK'], ...);
+                - pattern: add_action('admin_init', '$CALLBACK', ...);
+
+        - id: nonce-write-no-cap
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_update_post(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      update_option(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_delete_post(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      update_post_meta(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_insert_post(...);
+                      ...
+                    }
+            # Function must contain check_admin_referer() somewhere
+            - pattern-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  check_admin_referer(...);
+                  ...
+                }
+            # Exclude functions that also call current_user_can(), whether as a
+            # bare statement or embedded inside an if-condition expression
+            # (e.g. `if ( ! current_user_can(...) ) { wp_die(...); }`) — the
+            # latter is the more common real-world capability-guard idiom.
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+
+      on:
+        - 'admin-init-registration.path == nonce-write-no-cap.path'
+        - 'admin-init-registration.$CALLBACK == nonce-write-no-cap.$CALLBACK'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://owasp.org/www-project-top-ten/

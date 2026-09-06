@@ -1,0 +1,88 @@
+rules:
+  - id: claude.php.wordpress.sqli.dynamic-where-array-key-as-operator
+    languages: [php]
+    severity: HIGH
+    message: |
+      A hand-rolled query-builder function iterates an associative array of
+      filter conditions and concatenates the loop's KEY directly onto a
+      column/table identifier to form a new WHERE-clause sub-condition (e.g.
+      building `[$column . $conditionKey => $conditionValue]`), while the
+      paired VALUE is kept separate for safe parameter binding. The key is
+      never checked against an allow-list of permitted comparison operators
+      (>=, <=, <, >, !=, LIKE, ...) before being concatenated.
+
+      Only the value is protected here — it is bound through a placeholder
+      later on — but the key becomes a raw, unvalidated SQL fragment. If the
+      key can be influenced by request-supplied array structure (nested
+      query-string arrays, JSON body fields, deserialized filter objects)
+      rather than always being a fixed literal chosen by the plugin itself,
+      an attacker can inject arbitrary SQL through the key while the properly
+      escaped value masks the fact that the identifier position is
+      unsanitized (CWE-89).
+
+      Fix: validate the key against a strict allow-list before using it to
+      build any part of a raw SQL fragment, e.g.
+      `if (!in_array(trim($key), $allowed_operators, true)) { continue; }`,
+      and only concatenate once validated.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: LOW
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              foreach ($CONDVALS as $CONDKEY => $CONDVAL) {
+                ...
+                $TEMPKEY = $BASE . $CONDKEY;
+                $SUBCONDS = [$TEMPKEY => $CONDVAL];
+                ...
+              }
+          - pattern: |
+              foreach ($CONDVALS as $CONDKEY => $CONDVAL) {
+                ...
+                $SUBCONDS = [$BASE . $CONDKEY => $CONDVAL];
+                ...
+              }
+      # An allow-list guard on the key anywhere in the same loop means it was
+      # validated before being concatenated, so the finding is suppressed.
+      - pattern-not-inside: |
+          foreach ($CONDVALS as $CONDKEY => $CONDVAL) {
+            ...
+            if (in_array(trim($CONDKEY), $ALLOWED, ...)) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          foreach ($CONDVALS as $CONDKEY => $CONDVAL) {
+            ...
+            if (!in_array(trim($CONDKEY), $ALLOWED, ...)) {
+              continue;
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          foreach ($CONDVALS as $CONDKEY => $CONDVAL) {
+            ...
+            if (in_array($CONDKEY, $ALLOWED, ...)) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          foreach ($CONDVALS as $CONDKEY => $CONDVAL) {
+            ...
+            if (!in_array($CONDKEY, $ALLOWED, ...)) {
+              continue;
+            }
+            ...
+          }

@@ -1,0 +1,99 @@
+rules:
+  - id: claude.php.wordpress.xss.tracking-param-store-no-sanitizer
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A marketing/referral tracking parameter (utm_source, utm_campaign, ref,
+      source, affiliate, landing page, traffic source, etc.) is read directly
+      from the request, a cookie, or a session variable — or is extracted
+      from an arbitrary URL string via a two-argument "get URL parameter"
+      helper method/function — and then stored into an array field or a
+      persistent WordPress data store (option/meta/$wpdb write) without a
+      sanitizer (CWE-79).
+
+      These parameters are fully attacker-controlled and require zero
+      authentication beyond a visitor loading a crafted URL or a client that
+      sets the tracking cookie before a later action (e.g. checkout) persists
+      it server-side. Common in analytics, referral-tracking, and
+      marketing-attribution plugins that log the raw parameter value as a
+      human-readable "source name", "landing page", or "campaign" label for
+      admin dashboards and order/report views. A frequent variant: a sibling
+      code path sanitizes the same field when it comes from $_REQUEST/$_GET
+      but falls back to an unsanitized raw read of $_COOKIE/$_SESSION when
+      the request parameter is absent.
+
+      TRIAGE: this rule flags insufficient sanitization at the storage
+      boundary, not a confirmed render-time XSS — confirm the stored value is
+      later rendered without esc_html()/esc_attr() before reporting.
+      sanitize_text_field()/sanitize_textarea_field() at the storage point IS
+      treated as a sufficient sanitizer here (it strips literal HTML tags);
+      still confirm no downstream html_entity_decode() or innerHTML/outerHTML
+      consumption exists before dismissing an entity-encoded bypass.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — Stored"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/79.html
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://developer.wordpress.org/apis/security/data-validation/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: $_GET[$PARAM]
+              - pattern: $_REQUEST[$PARAM]
+              - pattern: $_COOKIE[$PARAM]
+              - pattern: $_SESSION[$PARAM]
+              - pattern: $CLASS::$METHOD($URL, $PARAM)
+              - pattern: $OBJ->$METHOD($URL, $PARAM)
+          - metavariable-regex:
+              metavariable: $PARAM
+              regex: (?i)^["'](utm_source|utm_medium|utm_campaign|utm_term|utm_content|source|ref|referrer|campaign|affiliate|aff)["']$|(?i)["'][a-z0-9_]*(landingpage|landing_page|trafficsource|traffic_source)[a-z0-9_]*["']
+    pattern-sinks:
+      - patterns:
+          - pattern: $ARR[$KEY] = $VALUE;
+          - focus-metavariable: $VALUE
+      - pattern: $wpdb->insert($TABLE, $DATA, ...)
+      - pattern: $wpdb->update($TABLE, $DATA, ...)
+      - pattern: $wpdb->replace($TABLE, $DATA, ...)
+      - pattern: update_option($OPT_KEY, $OPT_VALUE, ...)
+      - pattern: add_option($OPT_KEY, $OPT_VALUE, ...)
+      - pattern: update_post_meta($POST_ID, $META_KEY, $META_VALUE)
+      - pattern: add_post_meta($POST_ID, $META_KEY, $META_VALUE, ...)
+      - pattern: update_user_meta($USER_ID, $META_KEY, $META_VALUE)
+      - pattern: add_user_meta($USER_ID, $META_KEY, $META_VALUE, ...)
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_text_field(...)
+          - pattern: sanitize_textarea_field(...)
+          - pattern: esc_html(...)
+          - pattern: esc_attr(...)
+          - pattern: esc_url(...)
+          - pattern: esc_url_raw(...)
+          - pattern: sanitize_url(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          - pattern: strip_tags(...)
+          - pattern: wp_strip_all_tags(...)
+          - pattern: sanitize_key(...)
+          - pattern: sanitize_title(...)
+          - pattern: sanitize_html_class(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)

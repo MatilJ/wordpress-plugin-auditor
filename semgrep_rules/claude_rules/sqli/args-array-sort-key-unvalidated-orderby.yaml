@@ -1,0 +1,152 @@
+rules:
+  - id: claude.php.wordpress.sqli.args-array-sort-key-unvalidated-orderby
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function reads a 'sort' / 'orderby' / 'order_by' key directly out of
+      its own query-arguments array parameter, and the SAME function also
+      runs a raw (unprepared) $wpdb query — with no call whose name suggests
+      validation/sanitization of the WHOLE arguments array (sanitize*/
+      validate*/filter*/clean*) appearing anywhere earlier in the function.
+      This is CWE-89 SQL Injection.
+
+      This is the "trusted-by-convention query-args parameter" shape: a
+      reusable DB-helper method (get_items($args), get_object_locations($q),
+      a WP_List_Table data getter, a custom query class, etc.) assumes every
+      caller has already sanitized $args['sort'] before invoking it. In
+      practice, plugins commonly have MULTIPLE call sites for the same
+      helper — some sanitize before calling, one does not (a search widget,
+      a REST callback, a template tag) — and the helper itself never
+      re-validates its own parameter. Because the untrusted data enters
+      through a different function (often a different file/class) than the
+      one containing the SQL sink, ordinary superglobal-source taint
+      tracking does not connect the two; this rule instead flags the sink
+      function's OWN failure to defend itself regardless of caller.
+
+      Fix: inside the DB-helper function itself (not only at any one
+      caller), validate the sort/orderby value with an allow-list, e.g.
+      sanitize_sql_orderby($value), in_array($value, $allowed_columns,
+      true), or $wpdb->prepare("... ORDER BY %i", $value) (WP 6.2+).
+
+      TRIAGE GUIDANCE
+      ───────────────────────────────────────────────────────────────────
+      TRUE POSITIVE indicators:
+        - At least one reachable caller of this function can supply the
+          'sort'/'orderby'/'order_by' array entry from user input (a
+          request parameter, POST body, shortcode/widget instance option)
+          without passing it through an allow-list first.
+        - The value is concatenated or interpolated into the query string
+          (e.g. 'ORDER BY ' . esc_sql($sort) or "ORDER BY {$sort}") rather
+          than passed as a $wpdb->prepare() %i placeholder.
+
+      FALSE POSITIVE indicators:
+        - The read variable is validated directly (not via a whole-array
+          wrapper call) a few lines later — e.g. a switch/in_array allow-
+          list on the scalar value itself, or a differently-named helper
+          (an "esc_sql_order()"-style scalar sanitizer) that this rule's
+          whole-array naming heuristic does not recognize. This is the
+          rule's dominant known FP class (confirmed against a mature
+          codebase during authoring: a switch statement immediately after
+          the read validated 'order_by' against a hardcoded column list and
+          a direct value check handled 'sort'). Read the following ~20
+          lines before treating this as exploitable.
+        - Every reachable caller already passes a hardcoded or
+          server-generated value for this key (never user input).
+        - The enclosing function's only $wpdb call is ->prepare() (building
+          a statement string for a caller to execute) — note that if the
+          SAME function also happens to run an unrelated raw query/
+          get_results/get_row/get_var/get_col elsewhere, the rule fires on
+          that co-occurrence, not on proven dataflow to it; confirm the sort
+          value's actual destination before treating that case as a TP.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/functions/sanitize_sql_orderby/
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+    patterns:
+      - pattern-inside: |
+          function $FN(...) {
+            ...
+          }
+      - pattern-either:
+          - pattern: $SORT = $ARGS['sort'];
+          - pattern: |
+              $SORT = isset($ARGS['sort']) ? $ARGS['sort'] : $DEFAULT;
+          - pattern: |
+              $SORT = empty($ARGS['sort']) ? $DEFAULT : $ARGS['sort'];
+          - pattern: $SORT = $ARGS['orderby'];
+          - pattern: $SORT = $ARGS['order_by'];
+          # 'orderby'/'order_by' isset()/empty() ternary-read variants — the same
+          # shapes already covered for 'sort' above, extended for parity after a
+          # confirmed real-world miss: a plugin's own DB-helper read the key as
+          # `isset($opts['orderby']) ? $opts['orderby'] : $default` (ternary form),
+          # which the 'sort'-only ternary patterns above did not match because
+          # they hardcode the literal key name 'sort'.
+          - pattern: |
+              $SORT = isset($ARGS['orderby']) ? $ARGS['orderby'] : $DEFAULT;
+          - pattern: |
+              $SORT = empty($ARGS['orderby']) ? $DEFAULT : $ARGS['orderby'];
+          - pattern: |
+              $SORT = isset($ARGS['order_by']) ? $ARGS['order_by'] : $DEFAULT;
+          - pattern: |
+              $SORT = empty($ARGS['order_by']) ? $DEFAULT : $ARGS['order_by'];
+      # Fix-derived FP guard: the confirmed patch for this class re-validates
+      # the WHOLE arguments array through a sanitize/validate-style wrapper
+      # before any key is read out of it, rather than trusting the caller.
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                $ARGS = $SANFUNC(...);
+                ...
+            - metavariable-regex:
+                metavariable: $SANFUNC
+                regex: (?i).*(sanitiz|valid|clean|filter).*
+      # Require the enclosing function to actually run a raw $wpdb query —
+      # without this, "reads a sort key from an args array" alone is much
+      # too common (e.g. template/localize-only usage) to be a useful signal.
+      - pattern-inside:
+          patterns:
+            - pattern: |
+                function $FN2(...) {
+                  ...
+                  $WPDB->$METHOD($Q, ...);
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $METHOD
+                regex: ^(query|get_results|get_row|get_var|get_col)$
+      # Second fix-derived FP guard (distinct confirmed patch, same class): rather
+      # than re-validating the WHOLE args array up front, this fix instead re-checks
+      # the SCALAR sort/orderby value itself later in the same function with an
+      # inequality allow-list against hardcoded literals -- the common
+      # "if ($v != 'a' && $v != 'b' && ...) { $v = 'default'; }" idiom, with any
+      # number of chained literals. `$SORT = $ANYVAL; ... if ($COND) { ... }` anchors
+      # on the SAME assignment already matched above (whatever its right-hand form),
+      # followed eventually by an `if` whose condition metavariable is independently
+      # re-matched (via metavariable-pattern, which re-runs generic subtree search
+      # over just that captured condition) against a bare "$SORT != $LIT" /
+      # "$SORT !== $LIT" comparison -- this is what lets an arbitrary-length &&-chain
+      # of literals suppress the finding, not just a fixed clause count.
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                $SORT = $ANYVAL;
+                ...
+                if ($COND) {
+                  ...
+                }
+            - metavariable-pattern:
+                metavariable: $COND
+                patterns:
+                  - pattern-either:
+                      - pattern: $SORT != $LIT
+                      - pattern: $SORT !== $LIT

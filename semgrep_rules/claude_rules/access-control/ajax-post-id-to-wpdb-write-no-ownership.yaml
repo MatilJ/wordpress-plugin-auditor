@@ -1,0 +1,71 @@
+rules:
+  - id: claude.php.wordpress.access-control.ajax-post-id-to-wpdb-write-no-ownership
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A record ID from $_POST/$_GET/$_REQUEST flows into a $wpdb write operation
+      (update, delete, or query) targeting a custom table. The handler checks
+      capabilities and/or nonce but the query WHERE clause uses only the record ID
+      without filtering by an ownership column (e.g., AND user_id = %d with
+      get_current_user_id()). Any user at the handler's auth floor can modify or
+      delete records belonging to other users by supplying arbitrary record IDs.
+
+      TRIAGE:
+      1. Check whether the custom table has a user-ownership column (user_id,
+         blog_user_id, created_by, author_id). If no ownership column exists
+         (shared/global records), the finding may be by-design → FP.
+      2. Check whether a separate ownership verification happens before the write
+         (e.g., fetching the record first and comparing its owner field against
+         get_current_user_id()). If so → FP.
+      3. Confirm the handler's auth floor (Author+, Subscriber+, etc.) and that
+         at least two users at that level can have distinct records in the table.
+
+      Fix: add AND [ownership_col] = %d to the WHERE clause, binding
+      get_current_user_id() as the parameter.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: HIGH
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Insecure Direct Object Reference (IDOR)"
+      technology: [php, wordpress]
+      references:
+        - https://owasp.org/www-project-top-ten/2021/A01_2021-Broken_Access_Control
+        - https://developer.wordpress.org/apis/security/user-capabilities-and-roles/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_POST
+          - pattern: $_GET
+          - pattern: $_REQUEST
+          - pattern: filter_input(...)
+    pattern-sanitizers:
+      - pattern-either:
+          # DB reads break the taint — value is server-sourced after the read.
+          - pattern: $wpdb->get_results(...)
+          - pattern: $wpdb->get_row(...)
+          - pattern: $wpdb->get_var(...)
+          - pattern: $wpdb->get_col(...)
+          - pattern: get_option(...)
+          - pattern: get_post_meta(...)
+          - pattern: get_user_meta(...)
+    pattern-sinks:
+      # $wpdb->update() third arg is the WHERE clause array.
+      - patterns:
+          - pattern: $wpdb->update($TABLE, $DATA, $WHERE, ...)
+          - focus-metavariable: $WHERE
+      # $wpdb->delete() second arg is the WHERE clause array.
+      - patterns:
+          - pattern: $wpdb->delete($TABLE, $WHERE, ...)
+          - focus-metavariable: $WHERE
+      # $wpdb->query() with prepare() — tainted ID reaches the raw query.
+      - patterns:
+          - pattern: $wpdb->query($wpdb->prepare($FMT, ..., $ID, ...))
+          - focus-metavariable: $ID
+      # $wpdb->query() with prepare() — single-arg form.
+      - patterns:
+          - pattern: $wpdb->query($wpdb->prepare($FMT, $ID))
+          - focus-metavariable: $ID

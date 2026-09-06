@@ -1,0 +1,84 @@
+rules:
+  - id: claude.php.wordpress.file-upload.incomplete-php-extension-denylist
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A hardcoded denylist of disallowed upload file extensions (a variable
+      or a dedicated "not allowed"/"blacklist" function) already lists
+      several PHP-family extensions ('php' and 'phtml' are both present —
+      proving the intent is to block PHP execution) but is missing the
+      '.pht' alias. '.pht' is a well-known PHP-executable extension still
+      mapped to the PHP handler by many Apache/LiteSpeed configurations
+      (alongside siblings such as .php3/.php4/.php5/.php7 that are often
+      missed the same way). Because the validation is denylist-based rather
+      than allowlist-based, an attacker can upload a file using the omitted
+      extension and, on a host that maps it to PHP, achieve remote code
+      execution (CWE-434, incomplete-blacklist sub-class CWE-184).
+
+      TRIAGE:
+        1. Confirm this array is actually consulted with in_array()/
+           strpos() as a gate BEFORE the file is persisted
+           (move_uploaded_file(), wp_handle_upload(), file_put_contents(),
+           copy()) — not just returned for display or option storage.
+        2. Confirm the upload endpoint is reachable without admin
+           privileges (unauthenticated / Subscriber / Customer).
+        3. If a SEPARATE allow-list of safe extensions (images, documents)
+           already constrains uploads in the same code path and this
+           denylist is only a secondary/defense-in-depth filter, the gap
+           may not be independently exploitable — check whether the
+           allow-list can be widened to '*'/all-types by a site setting.
+      Prefer converting to an explicit allow-list of safe extensions over
+      patching individual denylist gaps.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-434: Unrestricted Upload of File with Dangerous Type"
+        - "CWE-184: Incomplete Blacklist"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/434.html
+        - https://cwe.mitre.org/data/definitions/184.html
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          # Assignment shape: $not_allowed_ext = array(...); / [...]
+          - patterns:
+              - pattern: $DENYLIST = $ARR;
+              - metavariable-regex:
+                  metavariable: $DENYLIST
+                  regex: "(?i).*(not_?allow|black.?list|deny.?list|disallow|forbidden|blocked|restrict|dangerous|unsafe|excluded|invalid_?(?:ext|type)|bad_?(?:ext|type)).*"
+          # Dedicated-function shape: function xyz_not_allowed_ext() { return array(...); }
+          - patterns:
+              - pattern: return $ARR;
+              - pattern-inside: |
+                  function $FN(...) {
+                    ...
+                  }
+              - metavariable-regex:
+                  metavariable: $FN
+                  regex: "(?i).*(not_?allow|black.?list|deny.?list|disallow|forbidden|blocked|restrict|dangerous|unsafe|excluded|invalid_?(?:ext|type)|bad_?(?:ext|type)).*"
+      - metavariable-pattern:
+          metavariable: $ARR
+          patterns:
+            - pattern-either:
+                - pattern: array(...)
+                - pattern: "[...]"
+            # Single combined regex (rather than separate pattern-regex /
+            # pattern-not-regex entries) — empirically, multiple pattern-regex
+            # clauses inside the same metavariable-pattern do not compose as
+            # an AND (each independently range-matches and the combination
+            # yields zero results); a single regex with lookaheads is the
+            # form that actually applies all three conditions to the same
+            # captured array text: contains 'php', contains 'phtml', and does
+            # NOT contain the standalone 'pht' alias.
+            - pattern-regex: "(?=[\\s\\S]*['\"]php['\"])(?=[\\s\\S]*['\"]phtml['\"])(?![\\s\\S]*['\"]pht['\"])[\\s\\S]*"

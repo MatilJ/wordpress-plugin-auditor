@@ -1,0 +1,118 @@
+rules:
+  - id: claude.php.wordpress.email-injection.merge-tag-header-injection
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      The output of a merge-tag / smart-tag / mail-tag expansion function
+      (form-builder plugins substitute per-submission field values into
+      notification templates this way) is interpolated directly into a raw
+      "From:"/"Reply-To:"/"Cc:"/"Bcc:" email header line, with no
+      CRLF-stripping sanitizer wrapping the value at the point of
+      interpolation (CWE-93). Many form-builder field types (textarea /
+      paragraph-text, HTML, hidden) preserve embedded \r\n in the stored
+      submission value, so if any such field can be selected as the tag
+      source for a From/Reply-To display name, an unauthenticated submitter
+      can inject arbitrary SMTP headers (extra Bcc, forged From, or a new
+      MIME body) into the outgoing notification email. This differs from
+      direct $_POST-to-header taint: the tainted value is buffered through
+      the plugin's own tag-storage/expansion layer, so it will not surface
+      via a simple superglobal-to-sink rule.
+    metadata:
+      category: security
+      cwe: "CWE-93: Improper Neutralization of CRLF Sequences ('CRLF Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Mail Header Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/93.html
+        - https://developer.wordpress.org/reference/functions/wp_mail/
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — tag-expansion output used unsanitized as a header
+      # display name, and the plugin lets the site owner pick ANY field
+      # (not just an email-typed field) as that tag's source:
+      #   $name = $this->process_tag($matches[1]);
+      #   $headers = "Reply-To: {$name} <{$addr}>\r\n";
+      #   -> Confirm which field types can populate the tag: a type whose
+      #   sanitizer preserves newlines (textarea/paragraph-text, HTML,
+      #   hidden, signature) makes this exploitable by an unauthenticated
+      #   submitter. A type restricted to single-line sanitizers
+      #   (sanitize_text_field-style, collapses \r\n to a space) does not.
+      #
+      # FALSE POSITIVE — the expanded value only ever feeds the message
+      # BODY, not a header line (body CRLF is not a security boundary):
+      #   $message = $this->process_tag($template);
+      #   wp_mail($to, $subject, $message, $headers);
+      #
+      # FALSE POSITIVE — tag expansion is restricted to an address-safe
+      # context that itself validates the result is a bare email address
+      # (e.g. is_email()/sanitize_email() applied to the SAME value after
+      # expansion, before it reaches the header). Check whether the
+      # sanitizer sits on the display-NAME half too, not just the address
+      # half — plugins commonly validate the address but forget the name.
+    pattern-sources:
+      - pattern-either:
+          # Generic merge-tag/smart-tag/mail-tag method-call idiom used
+          # across WP form-builder plugins (Gravity Forms, Ninja Forms,
+          # Formidable, Contact Form 7, Fluent Forms, etc. each use one
+          # of these conventional names for per-submission tag expansion).
+          - pattern: $OBJ->process_tag(...)
+          - pattern: $OBJ->process_smart_tags(...)
+          - pattern: $OBJ->replace_tags(...)
+          - pattern: $OBJ->replace_tag(...)
+          - pattern: $OBJ->replace_variables(...)
+          - pattern: $OBJ->merge_tags(...)
+          - pattern: $OBJ->merge_tag(...)
+          - pattern: $OBJ->parse_tags(...)
+          - pattern: $OBJ->parse_tag(...)
+          - pattern: $OBJ->expand_tags(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              # Header line built with an explicit RFC 5322 header name prefix.
+              - pattern: '"From: {$NAME} <{$ADDR}>\r\n"'
+              - pattern: '"From: {$NAME} <{$ADDR}>"'
+              - pattern: '"Reply-To: {$NAME} <{$ADDR}>\r\n"'
+              - pattern: '"Reply-To: {$NAME} <{$ADDR}>"'
+              # Prefix-less "Display Name <addr>" value later embedded
+              # verbatim into a header elsewhere (e.g. a get_reply_to()-style
+              # helper that returns the formatted pair for a caller to splice
+              # into the actual "Reply-To: ...\r\n" line).
+              - pattern: '"{$NAME} <{$ADDR}>"'
+          - focus-metavariable: $NAME
+      - patterns:
+          - pattern-either:
+              - pattern: '"From: {$NAME} <{$ADDR}>\r\n"'
+              - pattern: '"From: {$NAME} <{$ADDR}>"'
+              - pattern: '"Reply-To: {$NAME} <{$ADDR}>\r\n"'
+              - pattern: '"Reply-To: {$NAME} <{$ADDR}>"'
+              - pattern: '"{$NAME} <{$ADDR}>"'
+              - pattern: '"Reply-To: {$ADDR}\r\n"'
+              - pattern: '"Reply-To: {$ADDR}"'
+              - pattern: '"Cc: {$ADDR}\r\n"'
+              - pattern: '"Cc: {$ADDR}"'
+              - pattern: '"Bcc: {$ADDR}\r\n"'
+              - pattern: '"Bcc: {$ADDR}"'
+          - focus-metavariable: $ADDR
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_email(...)
+          - pattern: is_email(...)
+          - pattern: filter_var($X, FILTER_VALIDATE_EMAIL)
+          - pattern: sanitize_text_field(...)
+          - pattern: wp_strip_all_tags(...)
+          - pattern: strip_tags(...)
+          - pattern: sanitize_key(...)
+          # Name-agnostic match on any project-specific CRLF/header-safe
+          # helper — plugins commonly ship their own such as
+          # sanitize_email_header()/sanitize_email_header_name().
+          - patterns:
+              - pattern: $OBJ->$METHOD(...)
+              - metavariable-regex:
+                  metavariable: $METHOD
+                  regex: (?i)^(sanitize|clean|strip|escape)_?(email_?)?header

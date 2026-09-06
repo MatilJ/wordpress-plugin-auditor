@@ -1,0 +1,221 @@
+rules:
+  - id: claude.php.wordpress.lfi.extract-before-template-path-resolve
+    languages: [php]
+    severity: HIGH
+    message: |
+      A template/view loader function calls extract() on a caller-supplied
+      args array BEFORE using its own like-named path parameter to resolve
+      and include a file. extract() overwrites any local variable whose
+      name matches an array key, so a caller that forwards request-derived
+      data through the args array can clobber the path parameter and
+      redirect the include to an arbitrary file (CWE-98 / CWE-22).
+      Resolve and validate the include path before calling extract(), or
+      call extract() with EXTR_SKIP so it cannot overwrite an existing
+      variable.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program ('PHP Remote File Inclusion')"
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - https://www.php.net/manual/en/function.extract.php
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — extract() runs before the path parameter is resolved:
+      #   function get_template( $name, $args = array(), ... ) {
+      #       extract( $args );                       // $name can be overwritten by $args['name']
+      #       $file = locate_template( $name, ... );   // now uses the attacker value
+      #       include $file;
+      #   }
+      #
+      # FALSE POSITIVE — path resolved before extract() runs:
+      #   function get_template( $name, $args = array(), ... ) {
+      #       $file = locate_template( $name, ... );   // resolved with the real parameter
+      #       extract( $args );                        // too late to affect $file/$name
+      #       include $file;
+      #   }
+      #
+      # FALSE POSITIVE — extract() with EXTR_SKIP:
+      #   extract( $args, EXTR_SKIP );  // cannot overwrite the existing $name variable
+    patterns:
+      - pattern-either:
+          # bare function resolver
+          - pattern: |
+              function $FUNC($NAME, $ARR = $DEF, ...) {
+                ...
+                extract($ARR);
+                ...
+                $LOCATED = $RESOLVE($NAME, ...);
+                ...
+                include $LOCATED;
+                ...
+              }
+          - pattern: |
+              function $FUNC($NAME, $ARR = $DEF, ...) {
+                ...
+                extract($ARR);
+                ...
+                $LOCATED = $RESOLVE($NAME, ...);
+                ...
+                include_once $LOCATED;
+                ...
+              }
+          - pattern: |
+              function $FUNC($NAME, $ARR = $DEF, ...) {
+                ...
+                extract($ARR);
+                ...
+                $LOCATED = $RESOLVE($NAME, ...);
+                ...
+                require $LOCATED;
+                ...
+              }
+          - pattern: |
+              function $FUNC($NAME, $ARR = $DEF, ...) {
+                ...
+                extract($ARR);
+                ...
+                $LOCATED = $RESOLVE($NAME, ...);
+                ...
+                require_once $LOCATED;
+                ...
+              }
+          # self:: static method resolver
+          - pattern: |
+              function $FUNC($NAME, $ARR = $DEF, ...) {
+                ...
+                extract($ARR);
+                ...
+                $LOCATED = self::$RESOLVE($NAME, ...);
+                ...
+                include $LOCATED;
+                ...
+              }
+          - pattern: |
+              function $FUNC($NAME, $ARR = $DEF, ...) {
+                ...
+                extract($ARR);
+                ...
+                $LOCATED = self::$RESOLVE($NAME, ...);
+                ...
+                include_once $LOCATED;
+                ...
+              }
+          - pattern: |
+              function $FUNC($NAME, $ARR = $DEF, ...) {
+                ...
+                extract($ARR);
+                ...
+                $LOCATED = self::$RESOLVE($NAME, ...);
+                ...
+                require $LOCATED;
+                ...
+              }
+          - pattern: |
+              function $FUNC($NAME, $ARR = $DEF, ...) {
+                ...
+                extract($ARR);
+                ...
+                $LOCATED = self::$RESOLVE($NAME, ...);
+                ...
+                require_once $LOCATED;
+                ...
+              }
+          # static:: late-bound resolver
+          - pattern: |
+              function $FUNC($NAME, $ARR = $DEF, ...) {
+                ...
+                extract($ARR);
+                ...
+                $LOCATED = static::$RESOLVE($NAME, ...);
+                ...
+                include $LOCATED;
+                ...
+              }
+          - pattern: |
+              function $FUNC($NAME, $ARR = $DEF, ...) {
+                ...
+                extract($ARR);
+                ...
+                $LOCATED = static::$RESOLVE($NAME, ...);
+                ...
+                include_once $LOCATED;
+                ...
+              }
+          - pattern: |
+              function $FUNC($NAME, $ARR = $DEF, ...) {
+                ...
+                extract($ARR);
+                ...
+                $LOCATED = static::$RESOLVE($NAME, ...);
+                ...
+                require $LOCATED;
+                ...
+              }
+          - pattern: |
+              function $FUNC($NAME, $ARR = $DEF, ...) {
+                ...
+                extract($ARR);
+                ...
+                $LOCATED = static::$RESOLVE($NAME, ...);
+                ...
+                require_once $LOCATED;
+                ...
+              }
+          # $obj-> instance method resolver
+          - pattern: |
+              function $FUNC($NAME, $ARR = $DEF, ...) {
+                ...
+                extract($ARR);
+                ...
+                $LOCATED = $OBJ->$RESOLVE($NAME, ...);
+                ...
+                include $LOCATED;
+                ...
+              }
+          - pattern: |
+              function $FUNC($NAME, $ARR = $DEF, ...) {
+                ...
+                extract($ARR);
+                ...
+                $LOCATED = $OBJ->$RESOLVE($NAME, ...);
+                ...
+                include_once $LOCATED;
+                ...
+              }
+          - pattern: |
+              function $FUNC($NAME, $ARR = $DEF, ...) {
+                ...
+                extract($ARR);
+                ...
+                $LOCATED = $OBJ->$RESOLVE($NAME, ...);
+                ...
+                require $LOCATED;
+                ...
+              }
+          - pattern: |
+              function $FUNC($NAME, $ARR = $DEF, ...) {
+                ...
+                extract($ARR);
+                ...
+                $LOCATED = $OBJ->$RESOLVE($NAME, ...);
+                ...
+                require_once $LOCATED;
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: "(?i)^\\$(template_name|template|tpl|view|partial|layout|slug|name|file)$"
+      - metavariable-regex:
+          metavariable: $ARR
+          regex: "^\\$(args|atts|attributes|data|params|vars|options)$"
+      # EXTR_SKIP refuses to overwrite a variable that already exists in
+      # scope - the standard, sufficient fix for this ordering bug.
+      - pattern-not: extract($ARR, EXTR_SKIP, ...)

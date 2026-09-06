@@ -1,0 +1,107 @@
+rules:
+  - id: claude.php.wordpress.access-control.meta-data-kv-array-unfiltered-key-write
+    languages: [php]
+    severity: HIGH
+    message: |
+      A request-derived array of key/value pairs (a common REST "meta_data"
+      style payload: [{key: ..., value: ...}, ...]) is iterated with each
+      item's own 'key' field passed straight into a CRUD entity's
+      update_meta_data()/add_meta_data() method, with no block-list check
+      on the key against WordPress' privileged meta keys before the write
+      is later persisted (e.g. via a save()/save_meta_data() call). Since
+      the meta key itself — not just its value — is attacker-controlled,
+      a Subscriber/Customer editing their OWN account/object can set
+      'wp_capabilities', 'capabilities', 'roles', 'wp_user_level', or
+      'session_tokens' and escalate to Administrator (CWE-266 — Incorrect
+      Privilege Assignment). This is distinct from an ownership/IDOR bug:
+      the target ID may legitimately be the caller's own — the flaw is
+      that ANY meta key the caller names is honored.
+
+      This sink shape is common in plugins that copy WooCommerce's CRUD
+      "Data" object architecture (Product/Order/Customer-style classes
+      exposing get_meta_data()/update_meta_data()/save_meta_data()), not
+      only in WooCommerce itself.
+
+      Fix: maintain an explicit block-list of privileged meta keys
+      (roles, role, capabilities, user_level, session_tokens, and the
+      $wpdb-prefixed capabilities/user_level variants for multisite) and
+      skip/continue when the caller-supplied key (compared via
+      sanitize_key()) matches one, unless the caller already holds
+      manage_options / promote_users.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - The source array plainly comes from the current HTTP request/JSON
+          body (e.g. a REST WP_REST_Request param, $_POST, $_REQUEST, or a
+          decoded php://input body) with no capability gate before the loop.
+        - The array item's key field is passed unmodified as the first
+          argument to update_meta_data()/add_meta_data() and the object is
+          later saved/persisted.
+
+      FALSE POSITIVE indicators:
+        - The loop body already checks the SAME item's key field (e.g. via
+          in_array()/isset()/array_key_exists() against a distinct,
+          non-request-derived block-list or allow-list array) before the
+          write — this is the fix shape and is machine-suppressed below.
+        - The source array is a hardcoded/local array, not request-derived.
+        - The key is remapped to a fixed, hardcoded string before the call
+          (no longer attacker-controlled).
+    metadata:
+      category: security
+      cwe:
+        - "CWE-266: Incorrect Privilege Assignment"
+        - "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+        - https://developer.wordpress.org/reference/functions/sanitize_key/
+        - https://cwe.mitre.org/data/definitions/266.html
+        - https://cwe.mitre.org/data/definitions/862.html
+    patterns:
+      - pattern-either:
+          - pattern: $OBJ->update_meta_data($ITEM['key'], ...)
+          - pattern: $OBJ->update_meta_data($ITEM["key"], ...)
+          - pattern: $OBJ->add_meta_data($ITEM['key'], ...)
+          - pattern: $OBJ->add_meta_data($ITEM["key"], ...)
+      - pattern-inside: |
+          foreach ($ARR as $ITEM) { ... }
+      - metavariable-regex:
+          metavariable: $ARR
+          regex: (?i).*(post|request|get|input|payload|params|fields|body|meta).*
+      - pattern-not-inside: |
+          foreach ($ARR as $ITEM) {
+            ...
+            if (<... in_array(sanitize_key($ITEM['key']), ...) ...>) { ... }
+            ...
+          }
+      - pattern-not-inside: |
+          foreach ($ARR as $ITEM) {
+            ...
+            if (<... in_array($ITEM['key'], ...) ...>) { ... }
+            ...
+          }
+      - pattern-not-inside: |
+          foreach ($ARR as $ITEM) {
+            ...
+            if (<... isset($ALLOWED[$ITEM['key']]) ...>) { ... }
+            ...
+          }
+      - pattern-not-inside: |
+          foreach ($ARR as $ITEM) {
+            ...
+            if (<... array_key_exists($ITEM['key'], $ALLOWED) ...>) { ... }
+            ...
+          }
+      - pattern-not-inside: |
+          foreach ($ARR as $ITEM) {
+            ...
+            if (<... ! in_array(sanitize_key($ITEM['key']), ...) ...>) { ... }
+            ...
+          }

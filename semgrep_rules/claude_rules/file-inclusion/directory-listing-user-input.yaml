@@ -1,0 +1,75 @@
+rules:
+  - id: claude.php.wordpress.file.directory-listing-user-input
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      User-controlled input flows into a directory listing function
+      (glob/scandir/opendir). An attacker can traverse to arbitrary
+      directories and enumerate their contents, revealing sensitive
+      filenames (backups, configs, logs) that enable targeted file-read
+      attacks (CWE-22 / CWE-548).
+      Canonicalize with realpath() and enforce a prefix check, or use
+      basename() to strip directory components from user input.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+        - "CWE-548: Exposure of Information Through Directory Listing"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: LOW
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — user input to scandir/glob:
+      #   $dir = $_GET['dir'];
+      #   $files = scandir($dir);
+      #   → Attacker enumerates any readable directory on the server.
+      #
+      # FALSE POSITIVE — user input is only a filename, not a path:
+      #   $name = sanitize_file_name($_GET['name']);
+      #   $files = scandir(PLUGIN_DIR . '/templates/' . $name);
+      #   → sanitize_file_name strips traversal sequences. Safe.
+      #
+      # CONTEXT CHECK:
+      #   1. Is the directory path user-controlled or just the leaf name?
+      #   2. Are the listing results returned to the user or used internally?
+      #   3. Does the code restrict to a base directory via prefix check?
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: glob($PATH, ...)
+              - pattern: scandir($PATH, ...)
+              - pattern: opendir($PATH)
+          - focus-metavariable: $PATH
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_file_name(...)
+          - pattern: basename(...)
+          - pattern: realpath(...)
+          - pattern: sanitize_key(...)
+          - pattern: validate_file(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          - pattern: sanitize_title(...)
+          - pattern: sanitize_html_class(...)

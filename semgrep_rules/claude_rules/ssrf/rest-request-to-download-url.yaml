@@ -1,0 +1,49 @@
+rules:
+  - id: claude.php.wordpress.ssrf.rest-request-to-download-url
+    mode: taint
+    languages: [php]
+    severity: WARNING
+    message: |
+      URL sourced from a WP REST API request parameter flows into download_url()
+      without explicit domain or IP-range validation. WP Core's wp_http_validate_url()
+      (called internally by download_url) does not block the link-local range
+      169.254.0.0/16; verify that the endpoint's permission_callback requires
+      adequate privilege and that the URL is constrained to trusted domains before use.
+    metadata:
+      category: security
+      cwe: "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp: "A10:2021 - Server-Side Request Forgery"
+      confidence: MEDIUM
+      likelihood: LOW
+      impact: MEDIUM
+      subcategory:
+        - vuln
+      vulnerability_class:
+        - Server-Side Request Forgery (SSRF)
+      technology:
+        - php
+        - wordpress
+      references:
+        - https://cwe.mitre.org/data/definitions/918.html
+        - https://owasp.org/www-project-top-ten/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: $REQUEST->get_query_params()
+    pattern-sanitizers:
+      - pattern-either:
+          # Integer/float values cannot be URLs
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          # sanitize_key() output is [a-z0-9_-] — cannot form a valid URL scheme or host
+          - pattern: sanitize_key(...)
+    pattern-sinks:
+      - patterns:
+          - pattern: download_url($URL, ...)
+          - focus-metavariable: $URL

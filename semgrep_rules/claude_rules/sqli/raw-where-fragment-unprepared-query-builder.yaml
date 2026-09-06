@@ -1,0 +1,95 @@
+rules:
+  - id: claude.php.wordpress.sqli.raw-where-fragment-unprepared-query-builder
+    languages: [php]
+    severity: HIGH
+    message: |
+      A non-literal (variable-derived) expression is passed as the first
+      argument of a custom query-builder's raw-fragment method
+      (whereRaw/havingRaw/rawWhere and snake_case equivalents), with no
+      allow-list gate anywhere in the enclosing block before the call. Unlike
+      a bound value passed alongside a %s/%d placeholder, this argument IS
+      the literal SQL template — per-value parameterization elsewhere in the
+      same call does not protect it. If this expression's value traces back
+      to request-controlled input (a common shape: a nested key read out of
+      a JSON-decoded POST/GET/REQUEST array), an attacker controls arbitrary
+      boolean conditions, UNION-based extraction, or subqueries in the
+      resulting query (CWE-89). Manually confirm the expression's origin —
+      this is a lead, not a proven data-flow finding (OSS Semgrep taint
+      tracking is intra-procedural and misses fragments assembled in one
+      method and consumed several calls later, the common shape for this
+      class).
+
+      Fix: never accept a raw WHERE/HAVING fragment as a request parameter.
+      Validate the fragment's exact (whitespace-normalized) text against an
+      allow-list of values legitimately declared elsewhere in the plugin's
+      own code, and splice only the matched canonical string — never the
+      attacker-supplied one — into the query.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+    patterns:
+      - pattern: $OBJ->$METHOD($COND, ...)
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: (?i)^(whereRaw|where_raw|havingRaw|having_raw|rawWhere|raw_where)$
+      - metavariable-pattern:
+          metavariable: $COND
+          patterns:
+            - pattern-not: "\"...\""
+            - pattern-not: "'...'"
+      # Fix-derived FP guard: an allow-list gate (isset($allowed[$key]) /
+      # in_array($val, $allowed, true)) anywhere earlier in the same
+      # enclosing function before this exact sink call. Anchored to a
+      # function skeleton (not a bare block) — a bare "{ ... }" pattern-
+      # not-inside is not scope-limited to one function in OSS Semgrep PHP
+      # and false-suppresses on guards located in unrelated methods.
+      - pattern-not-inside: |
+          function $F(...) {
+            ...
+            if (!isset($ALLOWED[$ANYKEY])) {
+              ...
+            }
+            ...
+            $OBJ->$METHOD($COND, ...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $F(...) {
+            ...
+            if (isset($ALLOWED[$ANYKEY])) {
+              ...
+              $OBJ->$METHOD($COND, ...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $F(...) {
+            ...
+            if (!in_array($ANYVAL, $ALLOWED, ...)) {
+              ...
+            }
+            ...
+            $OBJ->$METHOD($COND, ...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $F(...) {
+            ...
+            if (in_array($ANYVAL, $ALLOWED, ...)) {
+              ...
+              $OBJ->$METHOD($COND, ...);
+              ...
+            }
+            ...
+          }

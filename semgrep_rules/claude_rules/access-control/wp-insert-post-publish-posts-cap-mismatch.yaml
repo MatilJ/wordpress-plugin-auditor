@@ -1,0 +1,93 @@
+rules:
+  - id: claude.php.wordpress.access-control.wp-insert-post-publish-posts-cap-mismatch
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A function checks current_user_can('publish_posts') as its authorization gate
+      before calling wp_insert_post(). For custom post types that register a capability
+      map (e.g. 'capability_type' => ['my_cpt', 'my_cpts'] or explicit 'capabilities' array
+      mapping 'publish_posts' to a custom cap), the global primitive 'publish_posts' is
+      held by Authors, while the CPT-specific mapped capability is held only by Administrators.
+      wp_insert_post() does NOT enforce CPT-specific publish capabilities — it calls
+      wp_insert_post_data() and then inserts directly, bypassing the CPT's capability map.
+      An Author-level user can therefore publish CPT records that the CPT was intended to
+      restrict to administrators, bypassing the intended access control.
+
+      TRIAGE REQUIRED — FALSE POSITIVE INDICATORS:
+      1. The post_type argument to wp_insert_post() is 'post', 'page', or any CPT
+         registered WITHOUT a custom capability_type or capabilities map. For those CPTs,
+         'publish_posts' IS the correct capability and this hit is a false positive.
+      2. The function is only reachable via an admin screen or REST/AJAX endpoint that
+         additionally requires manage_options (the pattern-not below suppresses these,
+         but verify the full call chain).
+
+      TRUE POSITIVE INDICATORS:
+      1. A REST/AJAX handler accepts a post_type argument controlled by the caller.
+      2. The handler inserts into a CPT whose register_post_type() call includes a
+         'capabilities' array or non-default 'capability_type', meaning the CPT maps
+         'publish_posts' to a plugin-specific capability held only by Administrators.
+      3. 'publish_posts' is checked at the handler level (or in the REST permission_callback)
+         instead of the CPT-specific 'publish_<cpt>' capability.
+
+      Fix: replace current_user_can('publish_posts') with current_user_can('manage_options')
+      or with the CPT-specific publish capability (e.g., current_user_can('publish_emailkits')).
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: LOW
+      impact: MEDIUM
+      subcategory: [audit]
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      # Detects handler body using the global 'publish_posts' primitive (Author+) as the
+      # authorization gate before wp_insert_post(), where a CPT capability map may require
+      # a higher-privilege mapped capability that wp_insert_post() does not enforce.
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/functions/register_post_type/
+        - https://developer.wordpress.org/reference/functions/wp_insert_post/
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+    patterns:
+      # Match current_user_can('publish_posts') as an expression (any context).
+      - pattern-either:
+          - pattern: current_user_can('publish_posts')
+          - pattern: current_user_can("publish_posts")
+      # Restrict to functions that also call wp_insert_post() — the combined pattern is
+      # the vulnerability: Author-level gate + unconditional CPT post creation.
+      - pattern-inside:
+          pattern-either:
+            - pattern: |
+                function $HANDLER(...) {
+                  ...
+                  wp_insert_post(...);
+                  ...
+                }
+      # Exclude functions that also check manage_options (admin-gated, PR:H, OOS).
+      # Both standalone-call and if-condition forms covered.
+      - pattern-not-inside: |
+          function $HANDLER(...) {
+            ...
+            if (<... current_user_can('manage_options') ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $HANDLER(...) {
+            ...
+            if (<... current_user_can("manage_options") ...>) {
+              ...
+            }
+            ...
+          }
+      # Exclude functions that also check 'administrator' role — admin-gated.
+      - pattern-not-inside: |
+          function $HANDLER(...) {
+            ...
+            if (<... current_user_can('administrator') ...>) {
+              ...
+            }
+            ...
+          }

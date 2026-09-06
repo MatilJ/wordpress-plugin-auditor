@@ -1,0 +1,99 @@
+rules:
+  - id: claude.php.wordpress.access-control.crypt-result-unvalidated-comparison
+    languages: [php]
+    severity: HIGH
+    message: |
+      crypt()'s return value (optionally sliced with substr()) is compared
+      against request input using == with no check that crypt() actually
+      produced a well-formed hash first (CWE-703: Improper Check for Unusual
+      Conditions). PHP's crypt() does not throw or return false on a
+      malformed salt argument — under CRYPT_BLOWFISH in particular, a salt
+      containing any byte outside the algorithm's required alphabet makes
+      crypt() silently return a short or empty string instead of a real hash.
+      If any part of the salt argument is influenced by request input, an
+      attacker can force this degenerate output on demand and then submit a
+      matching value for the other side of the comparison, bypassing the
+      check with zero knowledge of the real secret being verified (CWE-697:
+      Incorrect Comparison / CWE-287: Improper Authentication).
+
+      Fix: validate the crypt() result's length and/or expected prefix (e.g.
+      $2y$, $1$, $6$) before trusting it in a comparison, use hash_equals()
+      for the comparison itself, or switch to password_hash()/
+      password_verify(), which validate hash format internally.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-703: Improper Check for Unusual Conditions"
+        - "CWE-697: Incorrect Comparison"
+        - "CWE-287: Improper Authentication"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: MEDIUM
+      likelihood: LOW
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/703.html
+        - https://cwe.mitre.org/data/definitions/697.html
+        - https://www.php.net/manual/en/function.crypt.php
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $CRYPTED = crypt($SECRET, $SALT);
+              ...
+              if ($INPUT == $CRYPTED) { ... }
+          - pattern: |
+              $CRYPTED = crypt($SECRET, $SALT);
+              ...
+              if ($CRYPTED == $INPUT) { ... }
+          - pattern: |
+              $CRYPTED = substr(crypt($SECRET, $SALT), $N);
+              ...
+              if ($INPUT == $CRYPTED) { ... }
+          - pattern: |
+              $CRYPTED = substr(crypt($SECRET, $SALT), $N);
+              ...
+              if ($CRYPTED == $INPUT) { ... }
+      - metavariable-pattern:
+          metavariable: $INPUT
+          patterns:
+            - pattern-either:
+                - pattern: $_GET[...]
+                - pattern: $_POST[...]
+                - pattern: $_REQUEST[...]
+                - pattern: $_COOKIE[...]
+      # FP guard — a length check on the crypt() result anywhere before the
+      # comparison is trusted (the actual, real-world fix for this class).
+      - pattern-not: |
+          $CRYPTED = crypt($SECRET, $SALT);
+          ...
+          if (<... strlen($CRYPTED) ...>) { ... }
+          ...
+          if ($INPUT == $CRYPTED) { ... }
+      - pattern-not: |
+          $CRYPTED = crypt($SECRET, $SALT);
+          ...
+          if (<... strlen($CRYPTED) ...>) { ... }
+          ...
+          if ($CRYPTED == $INPUT) { ... }
+      - pattern-not: |
+          $CRYPTED = substr(crypt($SECRET, $SALT), $N);
+          ...
+          if (<... strlen($CRYPTED) ...>) { ... }
+          ...
+          if ($INPUT == $CRYPTED) { ... }
+      - pattern-not: |
+          $CRYPTED = substr(crypt($SECRET, $SALT), $N);
+          ...
+          if (<... strlen($CRYPTED) ...>) { ... }
+          ...
+          if ($CRYPTED == $INPUT) { ... }
+    paths:
+      exclude:
+        - "**/node_modules/**"
+      # NOTE: bundled vendor/ PHP libraries are intentionally NOT excluded for
+      # this rule — a small bundled auth/license/cloud-service helper library
+      # is exactly where a custom crypt()-based challenge-response check like
+      # this recurs, and it is reachable through the plugin's own dispatch
+      # just like first-party code.

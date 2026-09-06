@@ -1,0 +1,125 @@
+rules:
+  # Sibling of rest-permission-method-logged-in-only: same missing-capability
+  # gap, but the gate is the WP Core 'wp_rest' nonce instead of
+  # is_user_logged_in(). wp_verify_nonce($X, 'wp_rest') proves the request
+  # carries a valid same-session token — it does NOT verify the caller's
+  # role or capability. The 'wp_rest' nonce is minted for every authenticated
+  # user regardless of role, so a permission_callback method whose entire
+  # decision is this check grants access to any authenticated user, including
+  # Subscribers, unless a current_user_can() gate is also present.
+  - id: claude.php.wordpress.access-control.rest-permission-method-nonce-only
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      Method's access decision is driven solely by wp_verify_nonce($X, 'wp_rest')
+      with no current_user_can() call anywhere in the method body. If used as a
+      REST route permission_callback, this only confirms the caller holds a valid
+      same-session 'wp_rest' nonce — WordPress Core mints that nonce for every
+      authenticated role including Subscriber, so it does not establish any
+      capability level (CWE-862).
+
+      TRIAGE: Search for register_rest_route() calls that reference this method
+      as a permission_callback (e.g., [$this, 'method_name'] or a base-class
+      method inherited by multiple route classes). Confirm the route's callback
+      performs an operation or discloses data that should require a higher
+      capability. Routes intentionally open to any authenticated user (e.g.,
+      self-scoped profile reads) are expected behavior, not a finding.
+
+      Remediation: add current_user_can('appropriate_capability') to the method
+      body alongside the nonce check, or move the capability check into this
+      shared method so every route using it inherits the gate.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/#permissions-callback
+        - https://developer.wordpress.org/apis/security/nonces/
+        - https://cwe.mitre.org/data/definitions/862.html
+    patterns:
+      - pattern-either:
+          # Bare-return shape: the function's entire output IS the nonce-check
+          # boolean — the clearest permission-gate signature.
+          - pattern: |
+              function $METHOD(...) {
+                ...
+                return wp_verify_nonce($NONCE, 'wp_rest');
+              }
+          # Guard-clause deny shape: reject on invalid nonce, fall through to an
+          # explicit `return true;` as the method's final statement — the same
+          # "gate function" shape as a bare-return, just spelled out with an
+          # early-exit deny branch (matches the WP_REST_Controller convention
+          # of returning a WP_Error on failure and true on success).
+          - pattern: |
+              function $METHOD(...) {
+                ...
+                if (! wp_verify_nonce($NONCE, 'wp_rest')) {
+                  ...
+                }
+                ...
+                return true;
+              }
+          # Guard-clause allow shape: accept on valid nonce inside the if-block,
+          # deny falls through below.
+          - pattern: |
+              function $METHOD(...) {
+                ...
+                if (wp_verify_nonce($NONCE, 'wp_rest')) {
+                  ...
+                  return true;
+                  ...
+                }
+                ...
+              }
+          # Assign-then-return shape: the nonce result is stored in a variable
+          # before being returned, rather than returned directly. Common when a
+          # plugin wraps the boolean in a local var for readability or logging.
+          - pattern: |
+              function $METHOD(...) {
+                ...
+                $NONCE_RESULT = wp_verify_nonce($NONCE, 'wp_rest');
+                ...
+                return $NONCE_RESULT;
+              }
+          # Assign-then-filter-then-return shape: the nonce result is passed
+          # through apply_filters() before being returned. The filter does not
+          # change the default (no-hook-registered) behavior, so a method whose
+          # only gate is this pattern is still nonce-only by default.
+          - pattern: |
+              function $METHOD(...) {
+                ...
+                $NONCE_RESULT = wp_verify_nonce($NONCE, 'wp_rest');
+                ...
+                return apply_filters($FILTER, $NONCE_RESULT, ...);
+              }
+      # Exclude: method carries a real capability gate anywhere in its body.
+      - pattern-not: |
+          function $METHOD(...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not: |
+          function $METHOD(...) {
+            ...
+            return current_user_can(...);
+            ...
+          }
+      - pattern-not: |
+          function $METHOD(...) {
+            ...
+            if (current_user_can(...)) { ... }
+            ...
+          }
+      - pattern-not: |
+          function $METHOD(...) {
+            ...
+            if (! current_user_can(...)) { ... }
+            ...
+          }

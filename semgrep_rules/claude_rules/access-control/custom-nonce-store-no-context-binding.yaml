@@ -1,0 +1,115 @@
+rules:
+  - id: claude.php.wordpress.access-control.custom-nonce-store-no-context-binding
+    languages: [php]
+    severity: HIGH
+    message: |
+      A request-supplied value is checked ONLY for membership in a
+      plugin-managed "issued tokens" store (isset()/array_key_exists()
+      against an array/property whose own name identifies it as a
+      nonce/token pool) — the check never also verifies WHICH action or
+      caller the matched entry was originally issued for. This differs from
+      WordPress's own wp_verify_nonce(), which always binds a token to a
+      specific action string and rejects it for any other use. A flat,
+      unscoped token pool means ANY token the plugin has ever legitimately
+      handed out — including one minted for a low-risk, frequently-rendered
+      action (e.g. a UI-state AJAX call embedded on every admin page) — is
+      accepted at every check site that only tests membership, letting an
+      attacker who has obtained (or, given weak generation, guessed) a
+      single valid token replay it to authorize a completely unrelated,
+      higher-impact operation (CWE-862). This is frequently compounded by
+      weak token generation (a hash of a timestamp rather than a CSPRNG
+      output), which makes tokens easier to obtain in the first place
+      (CWE-330).
+
+      TRIAGE REQUIRED:
+      1. Confirm the store is genuinely a flat pool of interchangeable
+         tokens — read where entries are written; if every entry already
+         carries a sub-field recording the action/purpose/context it was
+         issued for AND every consuming check site verifies that sub-field
+         (not just this one), the pool is scoped and this is a false
+         positive.
+      2. Confirm this membership check is the SOLE gate for the surrounding
+         sensitive operation, with no current_user_can() / capability check
+         also present.
+      3. Confirm the gated operation has real impact (file write/delete,
+         DB write, privileged data disclosure) and that some other,
+         lower-risk code path in the same plugin causes a token to be
+         issued to the same class of caller (proving cross-action replay is
+         achievable, not just theoretical).
+
+      Remediation: store the intended action (and, where relevant, the
+      issuing user's ID) alongside each token, and require every check site
+      to verify BOTH that the token exists AND that its stored action/user
+      matches the current request — or replace the custom implementation
+      with wp_create_nonce($action)/wp_verify_nonce($token, $action), which
+      already does this.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-330: Use of Insufficiently Random Values"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization / Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://cwe.mitre.org/data/definitions/330.html
+        - https://developer.wordpress.org/apis/security/nonces/
+    patterns:
+      # Anchor: bare membership check against a token/nonce store, keyed by
+      # a request-supplied value — the hit is reported on this expression.
+      - pattern-either:
+          - pattern: isset($STORE[$TOKEN])
+          - pattern: array_key_exists($TOKEN, $STORE)
+      - metavariable-regex:
+          metavariable: $STORE
+          regex: (?i).*(nonce|token)\w*
+      # $TOKEN must be the request-supplied value itself (optionally through
+      # one sanitizer/helper call) — NOT a string-literal sub-key such as
+      # "context"/"action", which is exactly the shape the real fix for this
+      # bug class introduces (see pattern-not-inside below).
+      - metavariable-pattern:
+          metavariable: $TOKEN
+          patterns:
+            - pattern-either:
+                - pattern: $_REQUEST[$K]
+                - pattern: $_GET[$K]
+                - pattern: $_POST[$K]
+                - pattern: $_COOKIE[$K]
+                - pattern: $FN($_REQUEST[$K])
+                - pattern: $FN($_GET[$K])
+                - pattern: $FN($_POST[$K])
+                - pattern: $FN($_COOKIE[$K])
+      # Exclude: the same store+token pair is ALSO checked against a
+      # sub-field (e.g. ["context"]/["action"]/["user"]) inside the same
+      # if-condition — the token pool is scoped, not flat. Mirrors the
+      # real fix: adding a second, sub-key membership check that must also
+      # pass before the bare membership check is treated as sufficient.
+      - pattern-not-inside: |
+          if (<... isset($STORE[$TOKEN][$SUB]) ...>) {
+            ...
+          }
+      # Exclude: the entry fetched via this membership check is also
+      # inspected for an action/owner-scoping sub-field ANYWHERE else in the
+      # same enclosing function (the common "fetch once, validate the
+      # fetched record's scope field afterward" refactor) — mirrors the
+      # real fix, which moves the ["context"]/["user"] check into a
+      # follow-up statement on the retrieved value rather than the same
+      # isset() call.
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $ENCFUNC(...) {
+                  ...
+                  if (<... isset($VAR[$SUBKEY]) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $SUBKEY
+                regex: (?i)^['\"](context|action|purpose|scope|owner|user|uid)['\"]$

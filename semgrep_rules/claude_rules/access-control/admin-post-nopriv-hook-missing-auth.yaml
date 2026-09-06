@@ -1,0 +1,96 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+
+  # admin_post_nopriv_* fires for non-logged-in visitors via /wp-admin/admin-post.php.
+  # A callback here with no capability or nonce check is reachable by any
+  # unauthenticated visitor. Functionally identical to wp_ajax_nopriv_* but
+  # developers are often misled by the "admin_" prefix into assuming admin context.
+
+  - id: claude.php.wordpress.access.admin-post-nopriv-hook-missing-auth
+    mode: join
+    languages: [php]
+    severity: HIGH
+    message: |
+      Callback registered on an admin_post_nopriv_ hook (unauthenticated) but
+      no capability check (current_user_can) or nonce check (wp_verify_nonce /
+      check_ajax_referer / check_admin_referer) was found in the callback body.
+      Any visitor can invoke this endpoint without authentication via
+      /wp-admin/admin-post.php?action=<action_name> (CWE-862).
+
+      Despite the "admin_" prefix in the hook name, admin_post_nopriv_ provides
+      NO admin-level protection. WordPress processes these handlers via
+      admin-post.php which loads wp-load.php but does NOT load the admin menu
+      or enforce any capability beyond what the handler itself checks.
+
+      Add current_user_can() for capability-gated operations, or
+      check_admin_referer() as a minimum CSRF guard.
+
+      TRIAGE:
+      1. Read the callback body for state-changing operations (update_option,
+         wp_insert_post, wp_update_user, $wpdb->insert/update/delete, file ops).
+      2. If write operations are present without auth, this is confirmed
+         Missing Authorization (CWE-862).
+      3. Even read-only handlers may be findings if they expose non-public data.
+    join:
+      rules:
+        - id: nopriv-admin-post-registration
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_action('$ACTION', [..., '$CALLBACK'], ...);
+                - pattern: add_action('$ACTION', '$CALLBACK', ...);
+                - pattern: add_action('$ACTION', array($OBJ, '$CALLBACK'), ...);
+            - metavariable-regex:
+                metavariable: $ACTION
+                regex: admin_post_nopriv_.*
+
+        - id: nopriv-no-auth-functions-results
+          languages: [php]
+          patterns:
+            - pattern: |
+                function $CALLBACK(...) {
+                  ...
+                }
+            - pattern-not:
+                patterns:
+                  - pattern: |
+                      function $CALLBACK(...) {
+                        ...
+                        if (<... $WP_VERIFY(...) ...>)
+                        {
+                          ...
+                        }
+                        ...
+                      }
+                  - metavariable-regex:
+                      metavariable: $WP_VERIFY
+                      regex: (current_user_can|wp_verify_nonce|check_ajax_referer|check_admin_referer)
+            - pattern-not: function $CALLBACK(...) { ... check_ajax_referer(...); ... }
+            - pattern-not: function $CALLBACK(...) { ... check_admin_referer(...); ... }
+            - pattern-not: function $CALLBACK(...) { ... $OBJ->checkAjaxReferer(...); ... }
+
+      on:
+        - 'nopriv-admin-post-registration.path == nopriv-no-auth-functions-results.path'
+        - 'nopriv-admin-post-registration.$CALLBACK == nopriv-no-auth-functions-results.$CALLBACK'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/hooks/admin_post_nopriv_action/

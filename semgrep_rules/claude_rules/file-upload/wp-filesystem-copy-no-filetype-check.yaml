@@ -1,0 +1,70 @@
+rules:
+  - id: claude.php.wordpress.upload.wp-filesystem-copy-no-filetype-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      $wp_filesystem->copy() or $wp_filesystem->move() persists a file to a
+      new destination inside a function with no WordPress file type
+      validation (wp_check_filetype, wp_check_filetype_and_ext, or
+      wp_handle_upload) anywhere in the same function body. When the source
+      path is even indirectly influenced by a prior upload/submission flow
+      and the destination sits in a web-accessible directory, an attacker
+      can persist a file with a dangerous extension (e.g. .php) that the
+      server will execute (CWE-434).
+
+      TRIAGE:
+        1. Confirm the source path traces back, even indirectly, to a file
+           an unauthenticated/low-privileged user previously supplied (not a
+           developer-hardcoded or admin-only path). If never attacker-
+           influenced, dismiss.
+        2. Confirm the destination directory is web-accessible.
+        3. Check for a non-WP filetype allowlist (pathinfo() extension
+           check, finfo_file()/mime_content_type()) elsewhere in the call
+           chain that excludes PHP-executable extensions. If a robust
+           allowlist is enforced before this call, dismiss.
+        4. Determine the authentication requirement to reach this code path.
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_check_filetype/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-inside: |
+          function $FN(...) {
+            ...
+          }
+      - pattern-either:
+          - pattern: $wp_filesystem->copy($SRC, $DST)
+          - pattern: $wp_filesystem->copy($SRC, $DST, $OVERWRITE)
+          - pattern: $wp_filesystem->move($SRC, $DST)
+          - pattern: $wp_filesystem->move($SRC, $DST, $OVERWRITE)
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            wp_check_filetype(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            wp_check_filetype_and_ext(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            wp_handle_upload(...);
+            ...
+          }

@@ -1,0 +1,64 @@
+rules:
+  - id: claude.php.wordpress.upload.wp-handle-upload-no-cap-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      wp_handle_upload() is called without a current_user_can() capability
+      check in the same function. wp_handle_upload() writes files to the
+      WordPress uploads directory and creates Media Library entries. Without
+      an explicit capability check, any user (including unauthenticated
+      visitors on wp_ajax_nopriv_ endpoints) may upload files (CWE-862 /
+      CWE-434).
+
+      Add current_user_can('upload_files') or a higher-privilege capability
+      check before calling wp_handle_upload(). A nonce check alone is
+      insufficient on publicly accessible endpoints because nonces embedded
+      in page output can be read by any site visitor.
+
+      TRIAGE — authentication may be enforced at the hook registration
+      level rather than inside this function. Confirm:
+        1. Is this function registered on wp_ajax_nopriv_* (unauthenticated)?
+           If yes → high-confidence finding requiring capability check.
+        2. Is this function called from a nopriv handler via add_filter() or
+           a similar indirect dispatch (e.g. brizy_form_submit_data filter)?
+           If yes → same risk; trace the call chain to the AJAX registration.
+        3. Is this function only reachable via admin hooks (admin_init,
+           admin_post_* with session) with no nopriv path?
+           If yes → likely FP; verify no unauthenticated path exists.
+
+      CONFIRMED TRUE POSITIVE PATTERN (Brizy 2.8.12):
+        handleFileTypeFields() called via add_filter('brizy_form_submit_data')
+        dispatched from wp_ajax_nopriv_brizy_submit_form → any visitor can
+        trigger wp_handle_upload() and upload allowed-MIME files to /uploads/.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_handle_upload/
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/
+    patterns:
+      - pattern: |
+          function $FN(...) {
+            ...
+            wp_handle_upload(...);
+            ...
+          }
+      # current_user_can is almost always used inside an if condition; match both
+      # negated (!current_user_can) and positive forms via deep expression syntax.
+      - pattern-not: function $FN(...) { ... if (<... current_user_can(...) ...>) { ... } ... }
+      # Also exclude standalone expression usage (e.g. current_user_can(...) || die())
+      - pattern-not: function $FN(...) { ... current_user_can(...); ... }
+    # Freemius SDK is always a bundled third-party library; OOS for Wordfence bounty.
+    paths:
+      exclude:
+        - "**/freemius/**"

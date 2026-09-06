@@ -1,0 +1,145 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.ajax-request-id-getter-no-status-check
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A function extracts a numeric ID directly from the request ($_REQUEST,
+      $_POST, $_GET, or a framework array-accessor such as Arr::get()) under
+      an "*_id" key, and passes it straight into a getter/settings/data-fetch
+      call whose result is later returned to the client via wp_send_json() —
+      with no call to get_post(), get_post_status(), or current_user_can()
+      anywhere in the function to confirm the referenced object exists,
+      belongs to the expected post type, and is in a publicly-viewable state
+      (post_status === 'publish').
+
+      When this function is registered on a public hook (wp_ajax_nopriv_*,
+      or a wp_ajax_* hook with no capability gate — reachable by any
+      logged-in role including Subscriber), any visitor can substitute an
+      arbitrary numeric ID and receive settings or row data belonging to
+      draft, private, pending, or trashed objects that were never meant to
+      be public (CWE-200).
+
+      Fix: verify the object before returning any derived data:
+        $post = get_post( $id );
+        if ( ! $post || $post->post_type !== 'expected_type' || $post->post_status !== 'publish' ) {
+            wp_send_json( [], 200 );
+        }
+
+      TRIAGE:
+      1. Confirm the handler is actually reachable by an unauthenticated or
+         low-privileged visitor — check the add_action()/addAction() hook
+         name in this file, or in an adjoining routes/bootstrap file, for
+         wp_ajax_nopriv_ or a bare wp_ajax_ hook with no capability check.
+      2. The getter's return value may be non-sensitive (a display label, a
+         public layout setting) — confirm the payload includes per-row or
+         per-record business data before treating this as high-impact.
+      3. If the getter is a plugin-defined wrapper function that itself
+         calls get_post()/get_post_status() internally, the gap is already
+         closed — trace the getter's own body when it lives in the same
+         plugin before confirming.
+    metadata:
+      category: security
+      cwe: "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Insecure Direct Object Reference / Sensitive Data Exposure"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/200.html
+        - https://developer.wordpress.org/reference/functions/get_post_status/
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+    patterns:
+      # Source: an "*_id"-keyed value is pulled directly from the request,
+      # in one of the two common shapes — a raw superglobal array access, or
+      # a framework array-accessor helper (Arr::get($request, 'x_id')/etc.)
+      # nested inside an optional cast. The deep-match operator finds the
+      # accessor regardless of what cast (intval/absint/(int)) wraps it.
+      - pattern-either:
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+                $ID = <... Arr::get($REQ, $KEY, ...) ...>;
+                ...
+              }
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+                $ID = <... $_REQUEST[$KEY] ...>;
+                ...
+              }
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+                $ID = <... $_POST[$KEY] ...>;
+                ...
+              }
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+                $ID = <... $_GET[$KEY] ...>;
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: "(?i)^[\"']\\w*_id[\"']$"
+      # Confirms this function is a JSON-response handler (an AJAX/REST-style
+      # responder), not an internal helper — wp_send_json() is used almost
+      # exclusively in that context.
+      - pattern-inside: |
+          function $FUNC(...) {
+            ...
+            wp_send_json(...);
+            ...
+          }
+      # Sink: the request-derived ID is passed as the first argument to a
+      # getter/settings/data-fetch call. Anchored at this call site.
+      - pattern: $GETTER($ID, ...)
+      - metavariable-regex:
+          metavariable: $GETTER
+          regex: "(?i).*(get|fetch|load|settings|columns|table|record|item).*"
+      # Exclude: the function verifies the object via get_post() anywhere in
+      # its body — the canonical defensive fix (existence + post_type +
+      # post_status check) added by real-world patches for this exact class.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            get_post(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... get_post(...) ...>) {
+              ...
+            }
+            ...
+          }
+      # Exclude: the function checks the post's publication status directly.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            get_post_status(...);
+            ...
+          }
+      # Exclude: a per-resource or role capability check gates the function.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can(...) ...>) {
+              ...
+            }
+            ...
+          }

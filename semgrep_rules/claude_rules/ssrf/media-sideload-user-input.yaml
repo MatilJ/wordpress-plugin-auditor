@@ -1,0 +1,73 @@
+rules:
+  - id: claude.php.wordpress.ssrf.media-sideload-user-input
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      User-controlled URL flows into media_sideload_image() or wp_remote_fopen().
+      media_sideload_image() calls download_url() which calls wp_safe_remote_get()
+      internally. wp_safe_remote_get() validates URLs via wp_http_validate_url(),
+      which blocks RFC-1918 private ranges but does NOT block 169.254.0.0/16
+      (AWS/GCP/Azure cloud metadata endpoints). wp_remote_fopen() also uses
+      wp_safe_remote_get() with the same gap (CWE-918).
+      Validate the URL with wp_http_validate_url() plus an explicit 169.254.x.x
+      check, or restrict to a domain allowlist before calling these functions.
+    metadata:
+      category: security
+      cwe: "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp: "A10:2021 - Server-Side Request Forgery"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Server-Side Request Forgery (SSRF)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/media_sideload_image/
+        - https://developer.wordpress.org/reference/functions/wp_remote_fopen/
+        - https://developer.wordpress.org/reference/functions/download_url/
+    pattern-propagators:
+      - pattern: wp_unslash($SRC)
+        from: $SRC
+        to: $RETURN
+      - pattern: json_decode($SRC, ...)
+        from: $SRC
+        to: $RETURN
+      # Propagate taint through array element reads — needed when get_params() return
+      # value is stored in a variable and then accessed via $params['key']
+      - pattern: $PARAMS[$KEY]
+        from: $PARAMS
+        to: $RETURN
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_params(...)
+          - pattern: $REQUEST->get_body_params(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_body()
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: wp_http_validate_url(...)
+          - pattern: urlencode(...)
+          - pattern: rawurlencode(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          - pattern: sanitize_key(...)
+          - pattern: sanitize_title(...)
+          - pattern: sanitize_html_class(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: media_sideload_image($URL, ...)
+              - pattern: wp_remote_fopen($URL, ...)
+          - focus-metavariable: $URL

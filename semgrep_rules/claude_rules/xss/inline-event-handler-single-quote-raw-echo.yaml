@@ -1,0 +1,93 @@
+rules:
+  - id: claude.php.wordpress.xss.inline-event-handler-single-quote-raw-echo
+    languages: [php]
+    severity: HIGH
+    message: |
+      An attacker-influenceable PHP value reaches a single-quote-delimited
+      JavaScript string nested inside a double-quoted inline HTML
+      event-handler attribute (onclick=, onchange=, onload=, etc.), without
+      esc_js(), wp_json_encode(), or json_encode() wrapping (CWE-79). Two
+      confirmed source/build shapes for the same unescaped-nested-string
+      sink:
+
+      (1) Templated form: add_query_arg()/remove_query_arg() is called with
+      a single bare array/string argument (no explicit base-URL argument),
+      and its result is echoed via `<?php echo ...; ?>` inside the nested
+      JS string. With no base-URL argument, add_query_arg()/
+      remove_query_arg() falls back to $_SERVER['REQUEST_URI'] and rebuilds
+      the query string WITHOUT urlencoding, so any extra query parameter an
+      attacker appends to the current request is reflected verbatim into
+      the echoed value.
+
+      (2) Plain-PHP-concatenation form: the attribute string is assembled
+      with `.`/`.=` (no HTML template, no `<?php echo ?>`) and a bare
+      variable or function-call return value is spliced directly between
+      the JS string's quote delimiters — e.g.
+      `... . 'onclick="fn(\'' . $VALUE . '\');"' . ...`. This is the common
+      case of a request-derived value that was only run through a
+      strip-tags-style sanitizer (sanitize_text_field()) or a URL/HTML
+      output escaper (esc_attr(), esc_html(), esc_url(), esc_url_raw()) —
+      or no sanitizer at all — somewhere upstream, then reused unmodified
+      inside this JS-string-in-attribute context.
+
+      esc_url()/esc_url_raw()/esc_attr()/esc_html()/sanitize_text_field()
+      are NOT sufficient to neutralize a value in this specific nested
+      context, even though they look like proper escaping/sanitization:
+        - sanitize_text_field() only strips tags and trims whitespace — it
+          does not touch quote characters at all.
+        - esc_url_raw() never encodes quote characters at all.
+        - esc_url()/esc_attr()/esc_html()'s entity-encoding of a literal '
+          to &#039; does not help either: browsers HTML-entity-decode ALL
+          attribute values (including on*= event-handler attributes) BEFORE
+          compiling them as JavaScript. The decoded string still contains a
+          literal ' at that position, so the JS string breaks exactly as if
+          no encoding had been applied at all.
+      Only a real JS-string/JSON escaper closes this: esc_js(), or
+      wp_json_encode()/json_encode() (mind the outer quote style if using
+      the latter two — their output is itself double-quoted).
+
+      Fix: for shape (1), pass an explicit, static, non-attacker-influenced
+      base URL as add_query_arg()'s second argument (e.g.
+      admin_url('admin.php?page=...')) so $_SERVER['REQUEST_URI'] is never
+      consulted; for shape (2), wrap $VALUE in esc_js() at the point it is
+      spliced in. Either way, still avoid interpolating the result into an
+      inline event handler's JS string with anything but a JS-string-safe
+      escaper — or better, drop the inline handler entirely in favor of
+      wp_localize_script()/wp_add_inline_script() plus an external
+      addEventListener().
+
+      TRIAGE: false positive only if the array/string argument passed to
+      add_query_arg()/remove_query_arg() is followed by a second (base-URL)
+      argument elsewhere in the call; the spliced-in expression is a
+      hardcoded literal, an int-cast, or already wrapped in
+      esc_js()/wp_json_encode()/json_encode(); or the value is
+      independently proven non-attacker-influenceable (e.g. it must already
+      match an existing DB record's ID/hash before reaching this code).
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/esc_js/
+        - https://developer.wordpress.org/reference/functions/add_query_arg/
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/vendor_prefixed/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    # Two independent sink shapes for the same nested-JS-string-in-attribute problem:
+    # a templated `<?php echo ?>` form (original), and a plain-PHP-concatenation form
+    # (added) where a bare variable/call is spliced between the JS string's quotes
+    # with no esc_js()/wp_json_encode()/json_encode() wrapping.
+    pattern-either:
+      - pattern-regex: "(?:add|remove)_query_arg\\s*\\(\\s*(?:\\[[\\s\\S]{0,400}?\\]|'[^'\\n]{0,120}'|\"[^\"\\n]{0,120}\")\\s*\\)\\s*;[\\s\\S]{0,300}?on[a-zA-Z]+\\s*=\\s*\"[^\"]{0,250}?'<\\?php\\s*echo\\s+(?!esc_js\\(|wp_json_encode\\(|json_encode\\()[^;]{1,200};\\s*\\?>'"
+      - pattern-regex: "(?<![\\$\\w])on[a-zA-Z]+\\s*=\\s*\\\\?\"[^\"]{0,300}?\\\\?[\\'\"]\\s*\\.\\s*(?!esc_js\\s*\\(|wp_json_encode\\s*\\(|json_encode\\s*\\(|esc_attr\\s*\\(|esc_html\\s*\\(|esc_url\\s*\\(|esc_url_raw\\s*\\(|sanitize_text_field\\s*\\(|intval\\s*\\(|absint\\s*\\(|floatval\\s*\\()(?:\\$[A-Za-z_]\\w*(?:->\\w+|\\[[^\\]\\n]{0,60}\\]|\\([^()\\n]{0,120}\\))*|[A-Za-z_][\\w:]*\\s*\\([^()\\n]{0,200}\\))\\s*\\.\\s*\\\\?[\\'\"][^\"]{0,300}?\\\\?\""

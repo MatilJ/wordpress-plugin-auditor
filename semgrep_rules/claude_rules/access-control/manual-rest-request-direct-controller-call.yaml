@@ -1,0 +1,93 @@
+rules:
+  - id: claude.php.wordpress.access-control.manual-rest-request-direct-controller-call
+    languages: [php]
+    severity: HIGH
+    message: |
+      A WP_REST_Request object is constructed manually and the resulting
+      object is handed straight to a controller method call, instead of being
+      dispatched through WordPress's own REST routing machinery
+      (rest_do_request() or the internal server that invokes
+      register_rest_route()'s permission_callback before its handler runs).
+      Because the request object is built and consumed entirely within this
+      function, the route's own registered permission_callback — normally
+      bound only when WordPress itself routes a matching incoming HTTP
+      request — never executes for this call path. Any capability, nonce, or
+      CSRF check that callback would otherwise enforce is silently skipped
+      (CWE-862 / CWE-352).
+
+      This is especially dangerous when the enclosing function is itself
+      reachable from an unauthenticated-accessible hook (init, wp_loaded,
+      template_redirect, admin_post_nopriv_*, an unauthenticated AJAX
+      action) — capability enforcement that exists elsewhere in the codebase
+      for the route's normal REST path provides zero protection on this
+      alternate dispatch.
+
+      Fix: route the request through the same permission_callback the REST
+      route itself registers (call it directly and check its return value
+      before invoking the handler), or dispatch via
+      rest_do_request()/$wp_rest_server->dispatch() so WordPress's own
+      permission enforcement actually runs.
+
+      TRIAGE:
+        1. Confirm the enclosing function is reachable without the normal
+           REST route's own permission_callback running — i.e. it is NOT
+           itself the route's registered callback.
+        2. Search the enclosing function for an equivalent capability/nonce
+           check performed inline before the controller method call — if
+           present and its failure path halts execution, this is a FP.
+        3. Confirm the hook this function is registered on (grep for its
+           name in add_action()/add_filter()) to establish the real
+           reachable auth floor.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-352: Cross-Site Request Forgery (CSRF)"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: LOW
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://cwe.mitre.org/data/definitions/352.html
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $REQ = new WP_REST_Request(...);
+              ...
+              $OBJ->$METHOD($REQ);
+          - pattern: |
+              $REQ = new WP_REST_Request(...);
+              ...
+              $OBJ->$METHOD($REQ, ...);
+          - pattern: |
+              $REQ = new \WP_REST_Request(...);
+              ...
+              $OBJ->$METHOD($REQ);
+          - pattern: |
+              $REQ = new \WP_REST_Request(...);
+              ...
+              $OBJ->$METHOD($REQ, ...);
+      # The WP-sanctioned way to manually build-then-dispatch a REST request
+      # (rest_do_request()/$server->dispatch()) DOES enforce the route's own
+      # permission_callback — only the direct-method-call bypass is the sink.
+      - pattern-not: |
+          $REQ = new WP_REST_Request(...);
+          ...
+          rest_do_request($REQ);
+      - pattern-not: |
+          $REQ = new WP_REST_Request(...);
+          ...
+          $SERVER->dispatch($REQ);
+      - pattern-not: |
+          $REQ = new \WP_REST_Request(...);
+          ...
+          rest_do_request($REQ);
+      - pattern-not: |
+          $REQ = new \WP_REST_Request(...);
+          ...
+          $SERVER->dispatch($REQ);

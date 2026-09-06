@@ -1,0 +1,122 @@
+rules:
+  - id: claude.php.wordpress.upload.wp-handle-upload-test-type-false
+    languages: [php]
+    severity: HIGH
+    message: |
+      wp_handle_upload() or wp_handle_sideload() is called with
+      'test_type' => false, which disables WordPress's built-in MIME type
+      validation. This allows uploading files with dangerous extensions
+      (e.g. .php) that will be executed by the web server (CWE-434).
+      Remove test_type override or set it to true. If custom file types
+      are needed, use the 'upload_mimes' filter to add specific allowed
+      MIME types instead of disabling the check entirely.
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_handle_upload/
+        - https://developer.wordpress.org/reference/functions/wp_handle_sideload/
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — reachable by low-privilege user:
+      #   Verify the upload endpoint is reachable by non-admin users
+      #   (Subscriber, Customer, Contributor, Author, or unauthenticated).
+      #   If test_type=false AND no separate extension allowlist is enforced,
+      #   this allows PHP file upload → RCE.
+      #
+      # FALSE POSITIVE — admin-only endpoint:
+      #   If the upload handler is gated by current_user_can('manage_options')
+      #   or current_user_can('upload_files') with admin-only registration,
+      #   this is admin-only (PR:H, out of scope for Wordfence bounty).
+      #
+      # FALSE POSITIVE — separate extension validation present:
+      #   Some plugins disable test_type but enforce their own extension
+      #   allowlist before or after wp_handle_upload(). Check for:
+      #   - pathinfo($file, PATHINFO_EXTENSION) against an allowlist
+      #   - wp_check_filetype() after upload
+      #   - Custom regex on filename
+      #   If a robust allowlist exists, test_type=false is defense-in-depth
+      #   loss but not exploitable.
+      #
+      # FALSE POSITIVE — test_form override only:
+      #   'test_form' => false is different from 'test_type' => false.
+      #   test_form disables the form submission check (safe).
+      #   Verify the rule matched test_TYPE, not test_FORM.
+    patterns:
+      - pattern-either:
+          - pattern: wp_handle_upload($FILE, array(..., 'test_type' => false, ...))
+          - pattern: wp_handle_upload($FILE, [..., 'test_type' => false, ...])
+          - pattern: wp_handle_sideload($FILE, array(..., 'test_type' => false, ...))
+          - pattern: wp_handle_sideload($FILE, [..., 'test_type' => false, ...])
+      # An earlier wp_check_filetype() call whose result is enforced with an
+      # exit/die branch is a manual allow-list gate that substitutes for the
+      # disabled built-in check; match both unqualified and namespace-qualified
+      # (\wp_check_filetype) call forms since namespaced plugins mix styles.
+      - pattern-not-inside: |
+          $VALIDATE = wp_check_filetype(...);
+          ...
+          if (...) {
+            ...
+            die(...);
+          }
+          ...
+      - pattern-not-inside: |
+          $VALIDATE = \wp_check_filetype(...);
+          ...
+          if (...) {
+            ...
+            die(...);
+          }
+          ...
+
+  - id: claude.php.wordpress.upload.wp-handle-upload-test-type-false-variable
+    languages: [php]
+    severity: HIGH
+    message: |
+      An overrides array with 'test_type' set to false is passed to
+      wp_handle_upload() or wp_handle_sideload(). This disables MIME type
+      validation, allowing dangerous file types to be uploaded (CWE-434).
+      See triage guidance in the companion rule for context checks.
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $OVERRIDES['test_type'] = false;
+              ...
+              wp_handle_upload($FILE, $OVERRIDES);
+          - pattern: |
+              $OVERRIDES['test_type'] = false;
+              ...
+              wp_handle_sideload($FILE, $OVERRIDES);
+          - pattern: |
+              $OVERRIDES = array(..., 'test_type' => false, ...);
+              ...
+              wp_handle_upload($FILE, $OVERRIDES);
+          - pattern: |
+              $OVERRIDES = array(..., 'test_type' => false, ...);
+              ...
+              wp_handle_sideload($FILE, $OVERRIDES);
+          - pattern: |
+              $OVERRIDES = [..., 'test_type' => false, ...];
+              ...
+              wp_handle_upload($FILE, $OVERRIDES);
+          - pattern: |
+              $OVERRIDES = [..., 'test_type' => false, ...];
+              ...
+              wp_handle_sideload($FILE, $OVERRIDES);

@@ -1,0 +1,147 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+  # template_redirect fires on every front-end request after the main query is
+  # parsed but before template rendering. Handlers on this hook are reachable by
+  # unauthenticated visitors. A callback performing state-changing operations
+  # without current_user_can() is exploitable by any visitor.
+
+  - id: claude.php.wordpress.access-control.template-redirect-no-auth-state-change
+    mode: join
+    languages: [php]
+    severity: HIGH
+    message: |
+      A callback on the 'template_redirect' hook performs a state-changing
+      operation (option write, post write, database write, user modification,
+      file deletion) without calling current_user_can(). The template_redirect
+      hook fires on every front-end request for unauthenticated visitors (CWE-862).
+
+      Handlers on this hook commonly implement custom routing by checking
+      $_GET['action'] or query vars to dispatch to sub-functions. The dispatch
+      check itself is NOT an authorization gate — it only determines which code
+      path runs. Any visitor who knows the action parameter can trigger the write.
+
+      TRIAGE:
+      1. Read the callback body to determine what state-changing operation is
+         performed and whether input is attacker-controlled.
+      2. Check for is_user_logged_in() — if present without current_user_can(),
+         the auth floor is Subscriber+ (any logged-in user).
+      3. If no auth check exists at all, the endpoint is unauthenticated.
+      4. Verify the operation has real CIA impact (option/post/user writes vs.
+         notice dismissals or UI toggles).
+
+      Fix: add current_user_can() with the appropriate capability before the
+      state-changing operation.
+    join:
+      rules:
+        - id: template-redirect-registration
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_action('template_redirect', [..., '$CALLBACK'], ...);
+                - pattern: add_action('template_redirect', '$CALLBACK', ...);
+                - pattern: add_action('template_redirect', array($OBJ, '$CALLBACK'), ...);
+
+        - id: no-auth-state-change
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      update_option(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      delete_option(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_insert_post(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_update_post(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_delete_post(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_update_user(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      $WPDB->insert(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      $WPDB->update(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      $WPDB->delete(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      unlink(...);
+                      ...
+                    }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+
+      on:
+        - 'template-redirect-registration.path == no-auth-state-change.path'
+        - 'template-redirect-registration.$CALLBACK == no-auth-state-change.$CALLBACK'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/hooks/template_redirect/

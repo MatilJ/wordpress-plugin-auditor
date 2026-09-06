@@ -1,0 +1,78 @@
+rules:
+  - id: claude.php.wordpress.file-upload.download-url-no-filetype-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      A file fetched from a remote URL via download_url() is moved to a permanent
+      location without validating the file type or extension (CWE-434). If an
+      attacker can influence the source URL (e.g., via a user-settable avatar URL,
+      a get_avatar filter, or any URL derived from attacker-controlled input), they
+      can cause a .php file to be saved in a web-accessible directory such as
+      wp-content/cache/, enabling Remote Code Execution.
+      Validate the final extension against an allowlist using wp_check_filetype()
+      or wp_check_filetype_and_ext() before moving the downloaded temp file to its
+      permanent destination. Only allow extensions appropriate for the file type
+      being cached (e.g., jpg/jpeg/png/gif/webp for avatar images).
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/download_url/
+        - https://developer.wordpress.org/reference/functions/wp_check_filetype/
+        - https://developer.wordpress.org/reference/functions/wp_check_filetype_and_ext/
+    patterns:
+      - pattern-either:
+          # WP Filesystem API move — most common pattern (Breeze, plugin updaters, media importers)
+          - pattern: |
+              $TMPFILE = download_url(...);
+              ...
+              $WP_FS->move($TMPFILE, $DEST, ...);
+          # WP Filesystem API copy
+          - pattern: |
+              $TMPFILE = download_url(...);
+              ...
+              $WP_FS->copy($TMPFILE, $DEST, ...);
+          # PHP rename() — used when WP_Filesystem is not initialised
+          - pattern: |
+              $TMPFILE = download_url(...);
+              ...
+              rename($TMPFILE, $DEST);
+          # PHP copy() — less common but valid alternative
+          - pattern: |
+              $TMPFILE = download_url(...);
+              ...
+              copy($TMPFILE, $DEST);
+      # Suppress when wp_check_filetype / wp_check_filetype_and_ext appears
+      # between download_url() and the file-store call in the same control flow.
+      # This covers the most common safe pattern: check → download → move.
+      - pattern-not: |
+          $TMPFILE = download_url(...);
+          ...
+          wp_check_filetype(...);
+          ...
+          $WP_FS->move($TMPFILE, $DEST, ...);
+      - pattern-not: |
+          $TMPFILE = download_url(...);
+          ...
+          wp_check_filetype_and_ext(...);
+          ...
+          $WP_FS->move($TMPFILE, $DEST, ...);
+      - pattern-not: |
+          $TMPFILE = download_url(...);
+          ...
+          wp_check_filetype(...);
+          ...
+          rename($TMPFILE, $DEST);
+      - pattern-not: |
+          $TMPFILE = download_url(...);
+          ...
+          wp_check_filetype_and_ext(...);
+          ...
+          rename($TMPFILE, $DEST);

@@ -1,0 +1,132 @@
+rules:
+  - id: claude.php.wordpress.file.request-param-filename-concat-no-int-cast
+    languages: [php]
+    severity: HIGH
+    message: |
+      A value read directly from $_GET/$_POST/$_REQUEST (no cast or
+      sanitizer applied) is concatenated into a string that builds a
+      filename or file path (CWE-22). The hardcoded literal fragments
+      around it make this look contained, but the user-controlled segment
+      still accepts '../' traversal sequences unless it is coerced to a
+      number or otherwise validated first. The fopen()/file_get_contents()/
+      readfile()/include() call that ultimately consumes the built path is
+      often in a different function or class method than this concatenation
+      (a front-controller script handing the path to a helper class is a
+      common shape), which plain single-function taint tracking will not
+      connect. Cast the value with (int)/absint()/intval() or sanitize it
+      with sanitize_file_name()/basename() immediately after reading it
+      from the request, before it is used to build any path.
+    metadata:
+      category: security
+      cwe: "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - "https://cwe.mitre.org/data/definitions/22.html"
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — id-like GET param concatenated straight into a log
+      # filename, consumed by fopen() inside a different function/method:
+      #   $id = $_GET['historyID'];
+      #   $log = 'DE_clMemoryUsage.' . $id . '.txt';
+      #   new Chart($dir . '/' . $log);   // -> fopen() several calls deep
+      #
+      # FALSE POSITIVE — cast/sanitized before the concatenation:
+      #   $id = absint($_GET['historyID']);
+      #   $log = 'DE_clMemoryUsage.' . $id . '.txt';
+      #
+      # CONTEXT CHECK:
+      #   1. Is the built string actually used as/within a filesystem path
+      #      later (fopen/file_get_contents/readfile/include/require), not
+      #      just echoed or used as a cache/nonce key?
+      #   2. Does the endpoint require no auth, or only a low-privilege
+      #      auth level, to reach the code that reads the request param?
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $VAR = $_GET[$KEY];
+              ...
+              $STR = $A . $VAR . $B;
+          - pattern: |
+              $VAR = $_POST[$KEY];
+              ...
+              $STR = $A . $VAR . $B;
+          - pattern: |
+              $VAR = $_REQUEST[$KEY];
+              ...
+              $STR = $A . $VAR . $B;
+      - metavariable-regex:
+          metavariable: $A
+          regex: "^['\"]"
+      - pattern-not: |
+          $VAR = (int) $_GET[$KEY];
+          ...
+      - pattern-not: |
+          $VAR = (int) $_POST[$KEY];
+          ...
+      - pattern-not: |
+          $VAR = (int) $_REQUEST[$KEY];
+          ...
+      - pattern-not: |
+          $VAR = absint($_GET[$KEY]);
+          ...
+      - pattern-not: |
+          $VAR = absint($_POST[$KEY]);
+          ...
+      - pattern-not: |
+          $VAR = absint($_REQUEST[$KEY]);
+          ...
+      - pattern-not: |
+          $VAR = intval($_GET[$KEY]);
+          ...
+      - pattern-not: |
+          $VAR = sanitize_file_name($_GET[$KEY]);
+          ...
+      - pattern-not: |
+          $VAR = basename($_GET[$KEY]);
+          ...
+      - pattern-not: |
+          $VAR = $_GET[$KEY];
+          $VAR = (int) $VAR;
+          ...
+      - pattern-not: |
+          $VAR = $_GET[$KEY];
+          $VAR = abs( (int) $VAR );
+          ...
+      - pattern-not: |
+          $VAR = $_GET[$KEY];
+          $VAR = absint($VAR);
+          ...
+      - pattern-not: |
+          $VAR = $_GET[$KEY];
+          $VAR = intval($VAR);
+          ...
+      - pattern-not: |
+          $VAR = $_GET[$KEY];
+          $VAR = sanitize_file_name($VAR);
+          ...
+      - pattern-not: |
+          $VAR = $_GET[$KEY];
+          $VAR = basename($VAR);
+          ...
+      - pattern-not: |
+          $VAR = $_POST[$KEY];
+          $VAR = (int) $VAR;
+          ...
+      - pattern-not: |
+          $VAR = $_POST[$KEY];
+          $VAR = absint($VAR);
+          ...
+      - pattern-not: |
+          $VAR = $_REQUEST[$KEY];
+          $VAR = (int) $VAR;
+          ...
+      - pattern-not: |
+          $VAR = $_REQUEST[$KEY];
+          $VAR = absint($VAR);
+          ...

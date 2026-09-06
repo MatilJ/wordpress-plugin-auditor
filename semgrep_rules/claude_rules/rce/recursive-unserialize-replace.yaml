@@ -1,0 +1,30 @@
+rules:
+  - id: claude.php.wordpress.rce.recursive-unserialize-replace
+    languages: [php]
+    severity: HIGH
+    message: |
+      Call to recursive_unserialize_replace() or recursive_unserialized_replace()
+      detected. These functions internally call unserialize() on serialized data
+      during import/export/migration operations without allowed_classes restriction.
+      If the import endpoint is reachable without admin credentials, this becomes
+      PHP Object Injection (CWE-502).
+      Verify: (1) auth floor of the calling endpoint, (2) whether the serialized
+      data originates from an uploaded file or user-controlled parameter.
+    metadata:
+      category: security
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+      owasp: "A08:2021 - Software and Data Integrity Failures"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Insecure Deserialization"
+      technology: [php, wordpress]
+      references:
+        - https://www.cve.org/CVERecord?id=CVE-2024-10957
+        - https://www.cve.org/CVERecord?id=CVE-2024-10932
+    pattern-either:
+      - pattern: recursive_unserialize_replace(...)
+      - pattern: recursive_unserialized_replace(...)
+      - pattern: $OBJ->recursive_unserialize_replace(...)
+      - pattern: $OBJ->recursive_unserialized_replace(...)

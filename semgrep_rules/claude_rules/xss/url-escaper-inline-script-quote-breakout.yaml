@@ -1,0 +1,68 @@
+rules:
+  - id: claude.php.wordpress.xss.url-escaper-inline-script-quote-breakout
+    languages: [php]
+    severity: HIGH
+    message: |
+      A value sanitized only with a URL-context escaper (esc_url_raw(),
+      esc_url(), admin_url(), site_url(), home_url(), or a similar WP
+      `*_url()` helper) is echoed directly inside a quote-delimited
+      JavaScript string literal in an inline <script> block — e.g.
+      `var x = '<?php echo esc_url_raw( $x ); ?>';` or
+      `document.location = "<?php echo admin_url( $path ); ?>";` — with no
+      JS-string-safe escaping applied (CWE-79).
+
+      URL-context escapers do not neutralize the character delimiting the
+      enclosing JS string. esc_url_raw()/sanitize_url() are documented for
+      "database or redirect usage" and explicitly skip the display-context
+      step that would encode a literal quote; their allowed-character class
+      passes a raw `'` through untouched. esc_url()'s HTML-entity encoding of
+      quotes only matters inside an HTML attribute value — inside a <script>
+      block the browser never HTML-decodes the text, so an attacker-supplied
+      quote reaches the JS source unescaped and terminates the string early,
+      letting arbitrary JavaScript follow.
+
+      Fix: wrap the value in json_encode()/wp_json_encode() instead (it
+      supplies its own delimiting quotes and properly escapes quote/backslash
+      characters for JS-string context — drop the surrounding `'`/`"`), or
+      use esc_js() if the surrounding quote characters must be preserved.
+
+      TRIAGE: confirm the echoed value can be influenced by a non-admin
+      actor (a stored/configurable redirect, callback, or thank-you URL —
+      option, post meta, or a form/field setting) and that no
+      esc_js()/json_encode()/wp_json_encode() wraps it before the enclosing
+      quote closes. Safe if the value is a hardcoded literal or already
+      wrapped by one of those JS-string-safe functions.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/esc_js/
+        - https://developer.wordpress.org/reference/functions/wp_json_encode/
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/vendor_prefixed/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    # AST pattern matching does not reliably span mixed inline-HTML/JS/PHP
+    # template text, so the JS-string-quote context is matched with
+    # pattern-regex instead (same approach used by sibling inline-<script>/
+    # inline-event-handler rules in this directory). Two branches cover the
+    # single-quote and double-quote JS string delimiter cases separately —
+    # a backreference to "whichever quote opened" is not reliably supported
+    # by semgrep's pattern-regex engine. A mandatory whitespace character
+    # before the `=` (JS assignment style, e.g. `var x = '...'`) disambiguates
+    # from HTML attribute syntax (`attr="..."`, no space before `=`), where
+    # esc_url()/esc_url_raw() are the CORRECT escaper and must not be flagged.
+    pattern-either:
+      - pattern-regex: '\s=\s*''<\?php\s*echo\s+(?!esc_js\(|wp_json_encode\(|json_encode\(|\\esc_js\(|\\wp_json_encode\(|\\json_encode\()(?:\\?esc_url_raw|\\?esc_url|\\?admin_url|\\?site_url|\\?home_url|\\?network_admin_url|\\?content_url|\\?plugins_url|\\?wp_login_url|\\?wp_logout_url|\\?wp_nonce_url|\\?get_permalink|\\?includes_url)\s*\([^;]{0,250}?\)\s*;\s*\?>'''
+      - pattern-regex: '\s=\s*"<\?php\s*echo\s+(?!esc_js\(|wp_json_encode\(|json_encode\(|\\esc_js\(|\\wp_json_encode\(|\\json_encode\()(?:\\?esc_url_raw|\\?esc_url|\\?admin_url|\\?site_url|\\?home_url|\\?network_admin_url|\\?content_url|\\?plugins_url|\\?wp_login_url|\\?wp_logout_url|\\?wp_nonce_url|\\?get_permalink|\\?includes_url)\s*\([^;]{0,250}?\)\s*;\s*\?>"'

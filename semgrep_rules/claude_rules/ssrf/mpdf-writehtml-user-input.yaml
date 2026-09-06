@@ -1,0 +1,68 @@
+rules:
+  - id: claude.php.wordpress.ssrf.mpdf-writehtml-user-input
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: >
+      User-controlled HTML flows into mPDF's WriteHTML() without img/iframe tag
+      removal. mPDF fetches any <img src="..."> URL via cURL, triggering a
+      server-side request to the attacker-supplied URL (SSRF, CWE-918). An
+      attacker can probe internal services or cloud metadata endpoints
+      (e.g., http://169.254.169.254/). Fix: sanitize with strip_tags() or
+      wp_kses() before passing user data into the HTML template given to
+      WriteHTML().
+    metadata:
+      category: security
+      cwe: "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp: "A10:2021 - Server-Side Request Forgery"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory:
+        - vuln
+      vulnerability_class:
+        - Server-Side Request Forgery (SSRF)
+      technology:
+        - php
+        - wordpress
+      references:
+        - https://cwe.mitre.org/data/definitions/918.html
+        - https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/
+    pattern-propagators:
+      # str_replace can relay tainted $REPLACE into the returned string
+      - pattern: str_replace($SEARCH, $REPLACE, $SUBJECT)
+        from: $REPLACE
+        to: $RETURN
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_params(...)
+    pattern-sinks:
+      # mPDF renders any <img src="..."> it encounters via cURL fetch
+      - pattern: $MPDF->WriteHTML($HTML, ...)
+    pattern-sanitizers:
+      - pattern-either:
+          # Tag-stripping sanitizers prevent <img>/<iframe> injection
+          - pattern: strip_tags(...)
+          - pattern: wp_strip_all_tags(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          # HTML entity encoding — note: esc_html alone is NOT reliable because
+          # mPDF's HTML parser decodes entities at render time; included here to
+          # suppress hits where a developer wraps with esc_html before DB write
+          # and the rendered value is confirmed to be tag-free
+          - pattern: esc_html(...)
+          - pattern: esc_attr(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          # Numeric — cannot contain HTML tags
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: (int) $X

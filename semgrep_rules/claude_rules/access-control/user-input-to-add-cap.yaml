@@ -1,0 +1,58 @@
+rules:
+  - id: claude.php.wordpress.access.user-input-to-add-cap
+    mode: taint
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      User-controlled input flows into the capability name argument of
+      add_cap(). An attacker can grant themselves arbitrary capabilities
+      including manage_options (CWE-269 — Improper Privilege Management).
+
+      WP Core: add_cap($cap, $grant) at class-wp-user.php:718 stores the
+      capability in $this->caps and writes to usermeta. sanitize_key()
+      still allows valid capability names like 'manage_options'.
+
+      Fix: hardcode the capability name, or require
+      current_user_can('promote_users') before granting capabilities.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - Capability name comes from POST/GET/REQUEST
+        - Handler lacks current_user_can('promote_users') check
+        - No allowlist validation on the capability string
+
+      FALSE POSITIVE indicators:
+        - Handler has current_user_can('manage_options') check
+        - Capability name is hardcoded (e.g., add_cap('read'))
+    metadata:
+      category: security
+      cwe: "CWE-269: Improper Privilege Management"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/classes/wp_user/add_cap/
+        - https://patchstack.com/academy/wordpress/vulnerabilities/privilege-escalation/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: $REQUEST->get_body()
+    pattern-sinks:
+      - patterns:
+          - pattern: $USER->add_cap($CAP, ...)
+          - focus-metavariable: $CAP

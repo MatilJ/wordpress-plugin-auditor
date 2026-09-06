@@ -1,0 +1,66 @@
+rules:
+  # Detects get_the_time() / get_the_modified_time() called with a variable format
+  # argument where the call is not wrapped in an output-escaping function.
+  # PHP's date formatting passes non-format-code characters through literally,
+  # so a user-controlled format string containing HTML metacharacters produces
+  # unescaped HTML output (CWE-79).
+  #
+  # Common FP: variable format is always a safe constant at runtime (e.g., passed
+  # from a plugin option with a pre-validated allowlist). Verify the format source
+  # before escalating.
+  - id: claude.php.wordpress.xss.unescaped-date-function-output
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      get_the_time() / get_the_modified_time() is called with a variable format
+      argument and the result is not wrapped in esc_html() / esc_attr(). PHP's
+      date() formatting passes non-format-code characters through literally
+      ('<' and '>' are not date codes), so a user-controlled format string can
+      produce raw HTML tags in the output (CWE-79).
+
+      Fix — escape at point of use:
+        return ' ' . esc_html(get_the_modified_time($this->params['dateformat'], $post));
+        return ' ' . esc_html(get_the_time($format, $post));
+
+      Safe sibling pattern (correct):
+        esc_html(get_the_time($format, $post))
+
+      Note: static literal formats (e.g., 'Y-m-d') are not exploitable because
+      they are developer-controlled. This rule fires only when the format argument
+      is a variable, which may be user-controlled.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    pattern-either:
+      - patterns:
+          - pattern: get_the_modified_time($FORMAT, ...)
+          - metavariable-regex:
+              metavariable: $FORMAT
+              regex: '^\$'
+          - pattern-not-inside: esc_html(...)
+          - pattern-not-inside: esc_attr(...)
+          - pattern-not-inside: wp_kses(...)
+          - pattern-not-inside: wp_kses_post(...)
+          - pattern-not-inside: htmlspecialchars(...)
+          - pattern-not-inside: htmlentities(...)
+      - patterns:
+          - pattern: get_the_time($FORMAT, ...)
+          - metavariable-regex:
+              metavariable: $FORMAT
+              regex: '^\$'
+          - pattern-not-inside: esc_html(...)
+          - pattern-not-inside: esc_attr(...)
+          - pattern-not-inside: wp_kses(...)
+          - pattern-not-inside: wp_kses_post(...)
+          - pattern-not-inside: htmlspecialchars(...)
+          - pattern-not-inside: htmlentities(...)

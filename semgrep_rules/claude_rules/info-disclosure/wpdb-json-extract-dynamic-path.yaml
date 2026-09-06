@@ -1,0 +1,80 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.wpdb-json-extract-dynamic-path
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A $wpdb query using JSON_EXTRACT()/JSON_UNQUOTE() binds a JSON path
+      built by string concatenation rather than a hardcoded literal path.
+      If the concatenated segment originates from request input (e.g. a key
+      taken from a foreach over $_POST/$_GET/$_REQUEST), an attacker may
+      query arbitrary keys within the JSON column rather than only the
+      field the endpoint intends (CWE-639 — Authorization Bypass Through
+      User-Controlled Key). If the surrounding query is not additionally
+      scoped to the requesting user's own record (e.g. matches across all
+      rows for a shared parent ID), this becomes a boolean existence/value
+      oracle over other users' stored JSON data (CWE-203/CWE-200).
+
+      TRIAGE REQUIRED — this rule cannot trace the concatenated variable's
+      origin or the query's row-scoping across function/file boundaries:
+      1. Confirm the concatenated variable is reachable from request input
+         (trace it back to $_POST/$_GET/$_REQUEST/a REST param), not a
+         hardcoded/developer-defined key.
+      2. Confirm the endpoint does not additionally verify the resolved key
+         against a per-record allowlist (e.g. the set of fields the record
+         owner actually configured) before running the query.
+      3. Confirm the WHERE clause does not already scope the row set to the
+         requesting user/session (e.g. `user_id = get_current_user_id()`) —
+         if it does, this is self-disclosure only, not cross-user.
+      4. Confirm the auth floor of the endpoint (PR:N/Subscriber/Customer
+         required for Wordfence bounty scope) and the CIA impact of exact-
+         value existence disclosure to that floor before reporting.
+
+      Confirmed TP pattern: an unauthenticated AJAX "field uniqueness"
+      validator building `'$."' . $field_key . '"'` from a $_POST key and
+      binding it into `JSON_UNQUOTE(JSON_EXTRACT(form_data, %s)) = %s`
+      against a table holding every past submitter's entries, with no
+      check that $field_key matches a field the form owner actually
+      flagged unique.
+    metadata:
+      category: security
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Information Disclosure"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/639.html
+        - https://cwe.mitre.org/data/definitions/203.html
+        - https://cwe.mitre.org/data/definitions/200.html
+        - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+    patterns:
+      - pattern-either:
+          # Two-step: path assigned via concatenation, then bound in a later prepare() call
+          - pattern: |
+              $PATH = $A . $VAR . $B;
+              ...
+              $wpdb->prepare($QUERY, ..., $PATH, ...);
+          - pattern: |
+              $PATH = $A . $VAR;
+              ...
+              $wpdb->prepare($QUERY, ..., $PATH, ...);
+          - pattern: |
+              $PATH = $VAR . $B;
+              ...
+              $wpdb->prepare($QUERY, ..., $PATH, ...);
+          # Inline: concatenation expression passed directly as a bind argument
+          - pattern: $wpdb->prepare($QUERY, ..., $A . $VAR . $B, ...)
+          - pattern: $wpdb->prepare($QUERY, ..., $A . $VAR, ...)
+          - pattern: $wpdb->prepare($QUERY, ..., $VAR . $B, ...)
+      - metavariable-regex:
+          metavariable: $QUERY
+          regex: (?s).*(JSON_EXTRACT|JSON_UNQUOTE).*
+      # Exclude the trivial case where the "dynamic" piece is itself a quoted
+      # literal (e.g. $path = '$."' . 'fixed_key' . '"'; — no runtime variable
+      # is actually involved, so there is no user-controlled-key angle at all).
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: ^(?!['"]).*

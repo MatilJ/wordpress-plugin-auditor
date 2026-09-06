@@ -1,0 +1,50 @@
+rules:
+  - id: claude.php.wordpress.upload.wp-check-filetype-and-ext-override
+    languages: [php]
+    severity: HIGH
+    message: |
+      A callback on the 'wp_check_filetype_and_ext' filter forces the ext
+      and/or type values in the return array. This filter fires inside
+      WordPress Core's wp_check_filetype_and_ext() function and can
+      override ALL file type validation results (CWE-434).
+
+      When the callback unconditionally sets $data['ext'] and $data['type']
+      to non-empty values, any file type passes WordPress validation —
+      including .php files — enabling Remote Code Execution.
+
+      TRIAGE:
+        1. Read the callback body — does it force values unconditionally
+           or only for specific extensions (e.g., SVG, JSON)?
+        2. If scoped to a safe type (SVG): check for SVG content
+           sanitization (e.g., simplexml_load_file, DOMDocument parsing).
+        3. If unconditional: CRITICAL — all WP type checking is bypassed.
+        4. Check if the callback runs for all users or only admins.
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_check_filetype_and_ext/
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+    # Match functions whose name suggests they are wp_check_filetype_and_ext
+    # filter callbacks, and that force $data['ext'] or $data['type'] values.
+    patterns:
+      - pattern-either:
+          - pattern: $DATA['ext'] = $EXT;
+          - pattern: $DATA['type'] = $TYPE;
+      - pattern-inside: |
+          function $FN($DATA, ...) {
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $FN
+          regex: ".*(?i)(filetype|file_type|mime_type|mime|check_filetype|fix_mime|update_mime|allow_mime|real_mime).*"

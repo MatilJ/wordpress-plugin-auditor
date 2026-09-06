@@ -1,0 +1,34 @@
+rules:
+  - id: claude.php.wordpress.access-control.shortcode-user-can-post-author-auth-bypass
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      user_can($post->post_author, ...) checks the PAGE/POST AUTHOR's capabilities,
+      not the current visitor's. When used as an authorization gate in a
+      content-rendering function (shortcode, widget, hook callback), this exposes
+      gated content to every visitor of an admin-authored page regardless of the
+      visitor's own authentication status (CWE-862).
+
+      Root cause: $post->post_author is the user ID of whoever wrote the page, not
+      the user currently viewing it. On pages authored by an administrator the check
+      always passes because the admin has the required capability — any unauthenticated
+      or low-privilege visitor silently inherits that approval.
+
+      Fix: replace user_can($post->post_author, $cap) with current_user_can($cap) to
+      evaluate the requesting user's own permissions.
+
+    pattern: user_can($POST->post_author, ...)
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/user_can/
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/

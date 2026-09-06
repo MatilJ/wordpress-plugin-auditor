@@ -1,0 +1,102 @@
+rules:
+  - id: claude.php.wordpress.access-control.file-download-handler-no-capability-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function sets file-download headers (Content-Disposition / octet-stream)
+      and serves file content via readfile() or file_get_contents(), but the
+      function's own body contains no current_user_can() / wp_verify_nonce() /
+      check_ajax_referer() / check_admin_referer() / is_user_logged_in() call.
+      The code that decides WHETHER to invoke this method (typically a
+      request-parameter equality/isset check) commonly lives in a different
+      function or class — that check only selects WHICH file to serve, it is
+      not an identity or privilege check. Any visitor, including an
+      unauthenticated one, who can reach the dispatch point and supply the
+      routing parameter can retrieve the served file's contents, regardless of
+      whether the file path itself is attacker-controlled (CWE-862, CWE-200).
+
+      TRIAGE REQUIRED:
+      1. Confirm no capability/nonce/login check exists anywhere in the real
+         call chain — including a wrapper/dispatch function this rule cannot
+         see, since the check may live in a sibling function rather than this
+         one (the rule only inspects this function's own body).
+      2. Confirm the function is reachable pre-authentication: hooked on
+         init/wp_loaded/template_redirect, a wp_ajax_nopriv_* callback, a
+         standalone script with no WordPress bootstrap, or a REST route with
+         permission_callback => '__return_true'.
+      3. Confirm the served file is sensitive (debug/error logs, configuration
+         export, credentials, private uploads) — a handler that intentionally
+         serves public assets is a false positive.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - "https://cwe.mitre.org/data/definitions/862.html"
+        - "https://cwe.mitre.org/data/definitions/200.html"
+        - "https://developer.wordpress.org/apis/security/user-capabilities-and-roles/"
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    patterns:
+      # Anchor: a file-download response (headers + readfile/file_get_contents)
+      # built entirely inside one function — the hit is reported at the sink call.
+      - pattern-either:
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                header(...);
+                ...
+                readfile($PATH);
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                header(...);
+                ...
+                echo file_get_contents($PATH);
+                ...
+              }
+      # Exclude: a real authorization/authentication check exists anywhere in
+      # the function. Deep-match (<... X ...>;) because the idiom is almost
+      # always a guard nested inside an if-condition, not a bare top-level call.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... current_user_can(...) ...>;
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... wp_verify_nonce(...) ...>;
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... check_ajax_referer(...) ...>;
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... check_admin_referer(...) ...>;
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... is_user_logged_in(...) ...>;
+            ...
+          }

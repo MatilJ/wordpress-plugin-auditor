@@ -1,0 +1,130 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.localize-script-sensitive-data
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A value from a secrets-related option or settings/data array (matching key
+      pattern: secret, api_key, private_key, password, auth_token, access_token,
+      client_secret), OR the direct return value of a credential/secret-retrieval
+      function or method (name matching the same pattern, e.g. a getApiKey()/
+      get_app_password()-style call), flows into wp_localize_script(),
+      wp_add_inline_script(), or a direct echo/print statement, embedding it in
+      frontend-rendered HTML or JavaScript visible to all page visitors. If the
+      value is a secret API key, authentication token, application password, or
+      other private credential, any unauthenticated user can extract it from the
+      page source (CWE-200) — and if that credential is independently valid for
+      authenticating as a privileged account, disclosure escalates to
+      unauthenticated privilege escalation. Wrapping the value in an output
+      escaper (esc_attr(), wp_json_encode()) prevents XSS but does NOT prevent the
+      secret itself from being disclosed.
+
+      Only pass public/client-side values (nonces, site keys, publishable keys)
+      to wp_localize_script()/wp_add_inline_script() or raw output. Keep
+      server-side secrets out of frontend-rendered code entirely.
+    metadata:
+      category: security
+      cwe: "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Sensitive Data Exposure"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_localize_script/
+        - https://cwe.mitre.org/data/definitions/200.html
+    pattern-sources:
+      - patterns:
+          - pattern: get_option($KEY)
+          - metavariable-regex:
+              metavariable: $KEY
+              # Excludes Google Maps JS API key names (public, domain-restricted, not secret) and "password"-named UI copy fields (label/placeholder text, not a credential value).
+              regex: "(?i)^(?!.*(?:google|gmap|maps)[a-z_]*api[_-]?key)(?!.*password_?(?:text|label|placeholder|desc|description|message|msg|title|html|hint|tooltip)).*(secret|api_key|private_key|password|auth_token|access_token|client_secret).*$"
+      - patterns:
+          - pattern: $ARR[$KEY]
+          - metavariable-regex:
+              metavariable: $KEY
+              # Excludes Google Maps JS API key names (public, domain-restricted, not secret) and "password"-named UI copy fields (label/placeholder text, not a credential value).
+              regex: "(?i)^(?!.*(?:google|gmap|maps)[a-z_]*api[_-]?key)(?!.*password_?(?:text|label|placeholder|desc|description|message|msg|title|html|hint|tooltip)).*(secret|api_key|private_key|password|auth_token|access_token|client_secret).*$"
+          # Excludes re-storing the value under a different array's key: OSS Semgrep's
+          # coarse (non-field-sensitive) array taint model would otherwise mark that
+          # WHOLE second array tainted, false-flagging every unrelated sibling key
+          # read from it later.
+          - pattern-not-inside: $OTHERARR[$OTHERKEY] = $ARR[$KEY];
+      - patterns:
+          - pattern-either:
+              - pattern: $OBJ::$METHOD(...)
+              - pattern: $OBJ->$METHOD(...)
+          - metavariable-regex:
+              # Excludes URL/link getters whose name merely pairs a credential
+              # keyword with "url"/"link" (e.g. a lost-password-page getter, or an
+              # OAuth get_..._access_token_link()-style authorize-URL builder) —
+              # these return a page/redirect URL, not the credential value itself,
+              # despite matching the naming pattern. Also excludes getters whose
+              # name signals a masking/redaction transform (e.g.
+              # mask_secret_key_for_html(), get_html_escaped_masked_secret_key()) —
+              # a function that explicitly masks a secret in its own name cannot,
+              # by definition, be returning the raw unmasked value.
+              metavariable: $METHOD
+              regex: "(?i)^(?!.*mask)(?!.*(?:secret|api_?key|private_?key|password|auth_?token|access_?token|client_?secret|credential).*(?:url|link))(?!.*(?:url|link).*(?:secret|api_?key|private_?key|password|auth_?token|access_?token|client_?secret|credential)).*(secret|api_?key|private_?key|password|auth_?token|access_?token|client_?secret|credential).*$"
+      # Plain (non-OOP) function call with the same credential-getter naming,
+      # for procedural-style plugins.
+      - patterns:
+          - pattern: $FUNC(...)
+          # Requires $FUNC to be a syntactically valid bare PHP identifier —
+          # guards against Semgrep's PHP parser occasionally binding this
+          # metavariable to a stray HTML/text fragment in heavily
+          # HTML-interspersed .php template files (e.g. a CSS class or label
+          # string containing a credential keyword substring), which is not
+          # a real function call.
+          - metavariable-regex:
+              metavariable: $FUNC
+              regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+          - metavariable-regex:
+              # Excludes the same URL/link-getter shape, plus WP Core's own
+              # check_password_reset_key() — a reset-key validator returning
+              # WP_User|WP_Error, not a credential-value getter. Also excludes
+              # masking/redaction-named getters (see $METHOD regex above for
+              # rationale).
+              metavariable: $FUNC
+              regex: "(?i)^(?!.*mask)(?!.*check_password_reset_key)(?!.*(?:secret|api_?key|private_?key|password|auth_?token|access_?token|client_?secret|credential).*(?:url|link))(?!.*(?:url|link).*(?:secret|api_?key|private_?key|password|auth_?token|access_?token|client_?secret|credential)).*(secret|api_?key|private_?key|password|auth_?token|access_?token|client_?secret|credential).*$"
+    pattern-sinks:
+      - pattern-either:
+          - pattern: wp_localize_script($HANDLE, $NAME, $DATA)
+          - pattern: wp_add_inline_script($HANDLE, $SCRIPT, ...)
+          - pattern: echo $DATA;
+          - pattern: print $DATA;
+    pattern-sanitizers:
+      # A secret used server-side to authenticate an outbound HTTP request is not
+      # itself disclosed by echoing the response body of that request.
+      - pattern-either:
+          - pattern: wp_remote_get(...)
+          - pattern: wp_remote_post(...)
+          - pattern: wp_remote_request(...)
+          - pattern: wp_remote_head(...)
+          - pattern: wp_remote_retrieve_body(...)
+          - pattern: json_decode(...)
+      # A positional slice extracted from a shared settings/config array is a
+      # distinct item value, not the container's original (possibly tainted)
+      # sibling key — prevents coarse whole-array taint from a secret stored
+      # under one key spreading to unrelated items read via another key.
+      - pattern-either:
+          - pattern: array_splice(...)
+          - pattern: array_slice(...)
+      # A presence/boolean check (e.g. "hasApiKey" => !empty(get_option('x_api_key')))
+      # reduces the secret to a true/false signal — the return value of these
+      # functions can never carry the original secret content, regardless of how
+      # the input value was obtained. Also closes the coarse-array-taint gap: a
+      # single boolean-checked key inside a large localized array should not taint
+      # the whole array literal passed to wp_localize_script().
+      - pattern-either:
+          - pattern: empty($X)
+          - pattern: isset($X)
+          - pattern: is_null($X)
+          - pattern: boolval($X)
+          - pattern: (bool) $X
+      # WP_Error message text is developer-authored generic text, not the
+      # underlying sensitive record, even when derived from a tainted lookup.
+      - pattern: $ERR->get_error_message()

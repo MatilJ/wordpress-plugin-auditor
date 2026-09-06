@@ -1,0 +1,49 @@
+rules:
+  - id: claude.php.wordpress.xss.do-shortcode-user-input
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      User-controlled input flows into do_shortcode()/apply_shortcodes() without
+      validation. These functions execute ANY registered shortcode found in the
+      input string. apply_shortcodes() is a WP Core alias (shortcodes.php:223).
+      An attacker can invoke arbitrary shortcodes (XSS, SSRF, data leak chains).
+      sanitize_text_field() does NOT prevent this — it preserves [ and ] brackets.
+      wp_kses_post() also does NOT strip shortcode syntax.
+      Use a shortcode name allowlist, strip_shortcodes(), or wp_strip_all_tags().
+    metadata:
+      category: security
+      cwe: "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Arbitrary Shortcode Execution"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/do_shortcode/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+    pattern-sinks:
+      - pattern-either:
+          - pattern: do_shortcode($X)
+          - pattern: do_shortcode($X, ...)
+          - pattern: apply_shortcodes($X)
+          - pattern: apply_shortcodes($X, ...)
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: strip_shortcodes(...)
+          - pattern: wp_strip_all_tags(...)
+          - pattern: strip_tags(...)
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: (int) $X
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"

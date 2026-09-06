@@ -1,0 +1,76 @@
+rules:
+  - id: claude.php.wordpress.access.user-input-to-wp-set-current-user
+    mode: taint
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      User-controlled input flows into the $id argument of
+      wp_set_current_user(). An attacker can impersonate any user —
+      all subsequent current_user_can() checks pass for the spoofed
+      user (CWE-287 — Improper Authentication).
+
+      WP Core: wp_set_current_user($id) at pluggable.php:27 creates
+      new WP_User($id) and assigns it to the global $current_user.
+      No authorization check. After this call, the attacker has full
+      capabilities of the target user for the duration of the request.
+
+      CVE-2024-28000 (LiteSpeed Cache, 5M+ installs, CVSS 9.8):
+      weak 6-char hash protecting role simulation allowed brute-force
+      → wp_set_current_user($admin_id) → create admin via REST API.
+
+      Fix: never derive the user ID from user input without
+      cryptographically strong verification. Use wp_validate_auth_cookie()
+      or similar secure token validation.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - ID comes from POST/GET/REQUEST/COOKIE
+        - Verification uses a weak or brute-forceable hash/token
+        - No cryptographic token validation before the call
+
+      FALSE POSITIVE indicators:
+        - ID derived from wp_validate_auth_cookie() (standard WP auth)
+        - ID is get_current_user_id() (no-op context switch)
+        - Strong HMAC/JWT verification before wp_set_current_user()
+    metadata:
+      category: security
+      cwe: "CWE-287: Improper Authentication"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_set_current_user/
+        - https://www.wordfence.com/blog/2024/08/over-5000000-site-owners-affected-by-critical-privilege-escalation-vulnerability-patched-in-litespeed-cache-plugin/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: $REQUEST->get_body()
+    pattern-sanitizers:
+      # wp_insert_user()/wc_create_new_customer() return the ID of an account
+      # the SAME request just created — not an attacker-chosen arbitrary user
+      # ID. Passing that return value to wp_set_current_user() is the standard
+      # auto-login-after-registration pattern, not impersonation of an
+      # existing account. Confirmed FP source: woo-stripe-payment 4.0.7
+      # CartCheckout::create_customer() — $result is wc_create_new_customer()'s
+      # own return value, re-used to auto-log-in the account it just made.
+      - pattern: wp_insert_user(...)
+      - pattern: wc_create_new_customer(...)
+    pattern-sinks:
+      - patterns:
+          - pattern: wp_set_current_user($ID, ...)
+          - focus-metavariable: $ID

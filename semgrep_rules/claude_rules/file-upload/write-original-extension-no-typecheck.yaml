@@ -1,0 +1,229 @@
+rules:
+  - id: claude.php.wordpress.file-upload.write-original-extension-no-typecheck
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function writes content to disk via $wp_filesystem->put_contents(),
+      file_put_contents(), a same-purpose save/write delegate call, or the
+      raw fopen()+fwrite() handle API, using a destination filename whose
+      extension is taken from an original/caller-supplied filename — either
+      extracted via basename()/pathinfo() (which strip directory components
+      or split the extension but do not restrict it), or read as-is from a
+      request-derived array key such as 'org'/'orig'/'original' (the
+      client-side original-filename field a base64/data-URI upload widget,
+      e.g. an image cropper, posts alongside the encoded content) — and the
+      function contains no early-return guard based on a file-type/MIME
+      validation call before the write (CWE-434). Alternatively, the write
+      is fed by a base64_decode()'d data-URI payload (`data:<mime>;base64,
+      <payload>`) written via fopen()/fwrite() with no matching content or
+      path-containment check — the shape used by form-builder/PDF-generator
+      "save this decoded upload" branches. If the filename or content is
+      attacker-influenced, a dangerous extension (e.g. .php) is preserved
+      and written unfiltered to disk, potentially enabling Remote Code
+      Execution.
+
+      Validate the extracted extension against a fixed allow-list AND the
+      real MIME type of the content (e.g. via finfo), returning/aborting
+      before the write on failure — basename() or sanitize_file_name()
+      alone do not restrict file type. A realpath()-based containment check
+      confirming the resolved destination stays inside the intended upload
+      directory is also an accepted guard for the fopen()/fwrite() shape.
+
+      TRIAGE:
+        1. Confirm the filename/content reaching this sink is attacker-
+           influenced (request, import, attachment, or remote-fetch data),
+           not a hardcoded developer-controlled name.
+        2. Confirm the destination directory is web-accessible.
+        3. Determine the auth level required to reach the calling code path.
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/434.html
+        - https://developer.wordpress.org/reference/functions/wp_check_filetype_and_ext/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          # Arm 1: extension/name traced back to an original caller-supplied
+          # filename, reaching a put_contents()/file_put_contents()/named
+          # save-delegate sink (the shape this rule was originally seeded from).
+          - patterns:
+              - pattern-either:
+                  # Source A: extension extracted via pathinfo(), original name kept via basename().
+                  - patterns:
+                      - pattern-inside: |
+                          function $FN(...) {
+                            ...
+                            $EXT = <... pathinfo($ORIG, PATHINFO_EXTENSION) ...>;
+                            ...
+                          }
+                      - pattern-inside: |
+                          function $FN(...) {
+                            ...
+                            $NEWNAME = <... basename($ORIG) ...>;
+                            ...
+                          }
+                  # Source B: original filename read as-is from a request-derived array
+                  # key — no pathinfo()/basename() extraction step at all — the shape
+                  # used by base64/data-URI "save cropped image" upload widgets.
+                  - pattern-inside: |
+                      function $FN(...) {
+                        ...
+                        $FILENAME = <... $ARR['org'] ...>;
+                        ...
+                      }
+                  - pattern-inside: |
+                      function $FN(...) {
+                        ...
+                        $FILENAME = <... $ARR['orig'] ...>;
+                        ...
+                      }
+                  - pattern-inside: |
+                      function $FN(...) {
+                        ...
+                        $FILENAME = <... $ARR['original'] ...>;
+                        ...
+                      }
+              - pattern-either:
+                  - pattern: $FS->put_contents($DST, $CONTENT, ...)
+                  - pattern: file_put_contents($DST, $CONTENT, ...)
+                  # A same-purpose save/write delegate call (any name) invoked one
+                  # function-call hop from the source, passed the request-derived
+                  # filename directly — common when "save the decoded/cropped image"
+                  # logic lives in a separate helper rather than inline.
+                  - patterns:
+                      - pattern-either:
+                          - pattern: $SAVEFUNC($DATA, $FILENAME, ...)
+                          - pattern: $OBJ->$SAVEFUNC($DATA, $FILENAME, ...)
+                      - metavariable-regex:
+                          metavariable: $SAVEFUNC
+                          regex: (?i).*(save|write|store).*(image|photo|picture|crop|data_url|dataurl).*
+          # Arm 2: a base64/data-URI-decoded payload is written straight to
+          # disk via the low-level fopen()+fwrite() handle API instead of
+          # file_put_contents()/put_contents() — same missing-typecheck
+          # class, just the lower-level write API an unauthenticated form
+          # submit / PDF-generator "save this decoded upload" branch uses
+          # (CVE-2026-14894 class: no extraction function at all is called
+          # on the destination-name component — it is used exactly as
+          # submitted, and the decoded bytes are never content-checked).
+          - patterns:
+              - pattern-inside: |
+                  function $FN(...) {
+                    ...
+                    $IMGDATA = base64_decode(...);
+                    ...
+                  }
+              - pattern: |
+                  $FH = fopen($DST, ...);
+                  ...
+                  fwrite($FH, ...);
+      # Fix pattern: a negated guard-clause call (any name) that takes the
+      # extracted extension as an argument and returns before the write —
+      # this is how the real patch (a private allow-list+MIME check helper)
+      # neutralizes the bug, regardless of the helper's specific name.
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            if (! $OBJ->$METHOD($EXT, ...)) {
+              return $RET;
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            if (! $METHOD($EXT, ...)) {
+              return $RET;
+            }
+            ...
+          }
+      # Well-known WP/PHP file-type validation entry points, if called inline.
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            wp_check_filetype(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            wp_check_filetype_and_ext(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            wp_handle_upload(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            wp_handle_sideload(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            finfo_file(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            new finfo(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            getimagesize(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            exif_imagetype(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            mime_content_type(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            in_array($EXT, $ALLOWED, true);
+            ...
+          }
+      # realpath()-based containment check on the resolved destination —
+      # the accepted guard for the fopen()/fwrite() Arm 2 shape (confirming
+      # the write stays inside the intended upload directory) even when no
+      # extension/MIME allow-list call is present. Scoped to the enclosing
+      # try{} block (the real-world shape this bug class is written in —
+      # decode-and-write wrapped in error handling) rather than the whole
+      # enclosing function: a function-wide scope would also (wrongly) be
+      # satisfied by an unrelated realpath() call anywhere else in a large
+      # real-world function that has nothing to do with this write, masking
+      # the very finding it exists to gate.
+      - pattern-not-inside: |
+          try {
+            ...
+            <... realpath(...) ...>;
+            ...
+          } catch ($ETYPE $EVAR) {
+            ...
+          }

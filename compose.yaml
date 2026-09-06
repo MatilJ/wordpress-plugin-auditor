@@ -1,0 +1,121 @@
+name: wordpress-plugin-auditor
+
+services:
+  wordpress:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:80"
+    restart: always
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wordpress
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DEBUG: 1
+      # All wp_mail() output is routed to the Mailpit sink (see mailpit.php mu-plugin).
+      MAILPIT_SMTP_HOST: mailpit
+      MAILPIT_SMTP_PORT: 1025
+      PHP_IDE_CONFIG: "serverName=wordpress-docker"
+      WORDPRESS_CONFIG_EXTRA: |
+        define('WP_DEBUG_LOG', true);
+        define('WP_DEBUG_DISPLAY', true);
+        define('SAVEQUERIES', true);
+        define('SCRIPT_DEBUG', true);
+    volumes:
+      - wp_data:/var/www/html:rw
+      - ./xdebug.ini:/usr/local/etc/php/conf.d/xdebug.ini
+      - ./upload.ini:/usr/local/etc/php/conf.d/uploads.ini
+      - ./audit-helpers.php:/var/www/html/wp-content/mu-plugins/audit-helpers.php:ro
+      - ./mailpit.php:/var/www/html/wp-content/mu-plugins/mailpit.php:ro
+    command: ["apache2-with-perms-fix"]
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/ -o /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 15s
+
+  setup:
+    image: wordpress:cli-php8.3
+    user: root
+    depends_on:
+      wordpress:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wordpress
+      WORDPRESS_DB_NAME: wordpress
+      PLUGIN_SLUG: ${PLUGIN_SLUG:-}
+    volumes:
+      - wp_data:/var/www/html
+      - ./setup.sh:/setup.sh:ro
+    entrypoint: ["/bin/sh", "/setup.sh"]
+    restart: "no"
+
+  fix-perms:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: root
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    volumes:
+      - wp_data:/var/www/html
+    entrypoint: ["chown", "-R", "www-data:www-data", "/var/www/html/wp-content"]
+    restart: "no"
+
+  adminer:
+    image: adminer:latest
+    ports:
+      - "8080:8080"
+    restart: always
+    depends_on:
+      - db
+
+  # Mail sink for audits: captures any email the site sends so outbound mail
+  # never leaves the sandbox and can be inspected. WordPress wp_mail() is routed
+  # here automatically by the mailpit.php mu-plugin. Plugins that use their own
+  # SMTP client instead of wp_mail() can be pointed at host "mailpit" port 1025
+  # (no encryption; any/empty credentials are accepted).
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: always
+    ports:
+      - "8025:8025"                   # web UI → http://localhost:8025
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: 1      # accept any SMTP username/password …
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1  # … and allow AUTH over a plaintext connection
+      MP_MAX_MESSAGES: 5000           # ring buffer; oldest messages auto-pruned
+
+  db:
+    image: mariadb:10.6.4-focal
+    command: '--default-authentication-plugin=mysql_native_password'
+    volumes:
+      - db_data:/var/lib/mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: somewordpress
+      MYSQL_DATABASE: wordpress
+      MYSQL_USER: wordpress
+      MYSQL_PASSWORD: wordpress
+    expose:
+      - 3306
+      - 33060
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "wordpress", "-pwordpress"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  db_data:
+  wp_data:

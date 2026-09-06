@@ -1,0 +1,55 @@
+rules:
+  - id: claude.php.wordpress.sqli.rest-validate-callback-returns-closure
+    languages: [php]
+    severity: HIGH
+    message: |
+      A REST API argument's 'validate_callback' is a zero-parameter closure whose
+      only action is to return another closure, instead of validating $value
+      directly (CWE-89 when the "validated" value later reaches a raw SQL
+      fragment such as an ORDER BY column, LIMIT, or table/column name).
+
+      WordPress core invokes validate_callback as
+      callable($value, $request, $param) and only rejects the argument when the
+      return value is a WP_Error; any other return value (including a Closure
+      object, which is always truthy) is treated as "validation passed". Because
+      the outer closure here ignores its arguments and returns the inner closure
+      object itself rather than calling it, the real validator is NEVER executed
+      -- the argument passes validation unconditionally regardless of its value.
+
+      Fix: declare validate_callback with the $value parameter directly
+      (function ($value) { ... }) and return the validation result (bool or
+      WP_Error) itself, without wrapping it in another closure.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/register_rest_route/
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/schema/#validation-and-sanitization
+        - https://cwe.mitre.org/data/definitions/89.html
+    # Structural (non-taint) pattern: the vulnerable shape is a zero-arg outer
+    # closure whose body returns an inner closure, in either array-literal or
+    # direct-assignment form. The fix collapses this to a single closure that
+    # takes $value directly, which cannot match either branch below -- the
+    # negative space of this pattern IS the patch, so no extra pattern-not is
+    # needed.
+    patterns:
+      - pattern-either:
+          - pattern: |
+              [
+                  ...,
+                  'validate_callback' => function () {
+                      return function ($VALUE) { ... };
+                  },
+                  ...
+              ]
+          - pattern: |
+              $ARGS['validate_callback'] = function () {
+                  return function ($VALUE) { ... };
+              };

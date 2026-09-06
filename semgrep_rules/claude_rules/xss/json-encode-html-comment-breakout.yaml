@@ -1,0 +1,143 @@
+rules:
+  - id: claude.php.wordpress.xss.json-encode-html-comment-breakout
+    languages: [php]
+    severity: HIGH
+    message: |
+      json_encode() or wp_json_encode() output is embedded inside a string that is
+      wrapped in literal HTML comment delimiters (<!-- ... -->) — either directly
+      in the same expression, or indirectly via an array of parts that is later
+      joined with implode() and wrapped in the comment markers.
+
+      PHP's json_encode()/wp_json_encode() does NOT escape "-" or ">" by default
+      (JSON_HEX_TAG is opt-in and not the default). If any encoded field can
+      contain the literal three-byte sequence "-->", it prematurely closes the
+      HTML comment. Per the WHATWG HTML5 tree-construction algorithm, this holds
+      even when the comment is placed after the closing </html> tag — tokens
+      encountered there are reprocessed as if inside <body> ("after after body"
+      insertion mode) and still parse/execute normally. Any HTML/script markup
+      that follows in the encoded value is then parsed as live content by the
+      browser (CWE-79).
+
+      TRIAGE REQUIRED: Confirm at least one field reaching json_encode()/
+      wp_json_encode() originates from user-controllable input (a REST/AJAX
+      parameter, request-derived data, or DB-stored content written from such a
+      source) rather than purely server-computed values (fixed enums, timing
+      metrics, internal IDs).
+
+      Fix: strip "--" from the encoded string before embedding
+      (str_replace('--', '', $encoded)), or entity-encode the closing sequence
+      with esc_html() (">" becomes "&gt;", which breaks the literal "-->" match
+      inside a raw-text comment node), or pass JSON_HEX_TAG to encode "<"/">" as
+      </>.
+
+      Confirmed TP: optimole-wp 4.2.10 — inc/v2/PageProfiler/Profile.php:485
+      (Profile::get_current_profile_html_comment()). Unauthenticated REST write
+      (inc/rest.php, above_fold_images param, no sanitize_callback) stores an
+      attacker-controlled string that is later json_encode()'d into an array of
+      comment parts, joined with implode(), and wrapped in '<!-- ' / ' -->', then
+      spliced after </html> — comment-breakout + <img onerror> execution for any
+      unauthenticated visitor. CVSS 6.1.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      # Confidence is LOW for the same reason as the sibling attribute-context rule
+      # (json-encode-return-html-string): the rule detects the structural pattern
+      # (json_encode output reaching literal HTML comment delimiters) but cannot by
+      # itself confirm the encoded data originates from user-controllable input —
+      # every hit requires manual provenance tracing back to the source.
+      vulnerability_class: "Stored Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/esc_html/
+        - https://www.php.net/manual/en/function.json-encode.php
+        - https://html.spec.whatwg.org/#comments
+        - https://cwe.mitre.org/data/definitions/79.html
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+        - "**/freemius/**"
+    pattern-either:
+      # Form A: array-of-parts indirection — a part containing json_encode()/
+      # wp_json_encode() is pushed into an array somewhere earlier in the same
+      # function, and that array is later implode()'d and wrapped in literal
+      # HTML comment delimiters. Matches the exact optimole-wp shape:
+      #   $parts[] = '...' . json_encode($data);
+      #   ...
+      #   return '<!-- ' . implode(' ', $parts) . ' -->';
+      - patterns:
+          - pattern-inside: |
+              function $FN(...) {
+                ...
+                $ARR[] = <... json_encode(...) ...>;
+                ...
+              }
+          - pattern-either:
+              - pattern: return $PREFIX . implode($SEP, $ARR) . $SUFFIX;
+              - pattern: echo $PREFIX . implode($SEP, $ARR) . $SUFFIX;
+          - metavariable-regex:
+              metavariable: $PREFIX
+              regex: "(?s).*<!--.*"
+          - metavariable-regex:
+              metavariable: $SUFFIX
+              regex: "(?s).*-->.*"
+          - pattern-not: return $PREFIX . esc_html(implode($SEP, $ARR)) . $SUFFIX;
+          - pattern-not: echo $PREFIX . esc_html(implode($SEP, $ARR)) . $SUFFIX;
+      - patterns:
+          - pattern-inside: |
+              function $FN(...) {
+                ...
+                $ARR[] = <... wp_json_encode(...) ...>;
+                ...
+              }
+          - pattern-either:
+              - pattern: return $PREFIX . implode($SEP, $ARR) . $SUFFIX;
+              - pattern: echo $PREFIX . implode($SEP, $ARR) . $SUFFIX;
+          - metavariable-regex:
+              metavariable: $PREFIX
+              regex: "(?s).*<!--.*"
+          - metavariable-regex:
+              metavariable: $SUFFIX
+              regex: "(?s).*-->.*"
+          - pattern-not: return $PREFIX . esc_html(implode($SEP, $ARR)) . $SUFFIX;
+          - pattern-not: echo $PREFIX . esc_html(implode($SEP, $ARR)) . $SUFFIX;
+      # Form B: direct inline concatenation — no array/implode indirection,
+      # json_encode()/wp_json_encode() reached straight from the comment-wrapped
+      # expression. Broader net for simpler variants of the same idiom.
+      - patterns:
+          - pattern-either:
+              - pattern: return $PREFIX . <... json_encode(...) ...> . $SUFFIX;
+              - pattern: echo $PREFIX . <... json_encode(...) ...> . $SUFFIX;
+          - metavariable-regex:
+              metavariable: $PREFIX
+              regex: "(?s).*<!--.*"
+          - metavariable-regex:
+              metavariable: $SUFFIX
+              regex: "(?s).*-->.*"
+          - pattern-not: return $PREFIX . <... esc_html(json_encode(...)) ...> . $SUFFIX;
+          - pattern-not: echo $PREFIX . <... esc_html(json_encode(...)) ...> . $SUFFIX;
+          - pattern-not: return $PREFIX . <... str_replace("--", "", json_encode(...)) ...> . $SUFFIX;
+          - pattern-not: echo $PREFIX . <... str_replace("--", "", json_encode(...)) ...> . $SUFFIX;
+          - pattern-not: return $PREFIX . <... json_encode($DATA, <... JSON_HEX_TAG ...>) ...> . $SUFFIX;
+          - pattern-not: echo $PREFIX . <... json_encode($DATA, <... JSON_HEX_TAG ...>) ...> . $SUFFIX;
+      - patterns:
+          - pattern-either:
+              - pattern: return $PREFIX . <... wp_json_encode(...) ...> . $SUFFIX;
+              - pattern: echo $PREFIX . <... wp_json_encode(...) ...> . $SUFFIX;
+          - metavariable-regex:
+              metavariable: $PREFIX
+              regex: "(?s).*<!--.*"
+          - metavariable-regex:
+              metavariable: $SUFFIX
+              regex: "(?s).*-->.*"
+          - pattern-not: return $PREFIX . <... esc_html(wp_json_encode(...)) ...> . $SUFFIX;
+          - pattern-not: echo $PREFIX . <... esc_html(wp_json_encode(...)) ...> . $SUFFIX;
+          - pattern-not: return $PREFIX . <... str_replace("--", "", wp_json_encode(...)) ...> . $SUFFIX;
+          - pattern-not: echo $PREFIX . <... str_replace("--", "", wp_json_encode(...)) ...> . $SUFFIX;
+          - pattern-not: return $PREFIX . <... wp_json_encode($DATA, <... JSON_HEX_TAG ...>) ...> . $SUFFIX;
+          - pattern-not: echo $PREFIX . <... wp_json_encode($DATA, <... JSON_HEX_TAG ...>) ...> . $SUFFIX;

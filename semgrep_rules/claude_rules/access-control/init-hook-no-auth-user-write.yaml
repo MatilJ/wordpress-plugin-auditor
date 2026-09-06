@@ -1,0 +1,161 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+  # The 'init', 'wp_loaded', and 'parse_request' hooks fire on every request —
+  # including unauthenticated visitors. A callback performing user modification
+  # operations (wp_update_user, wp_set_auth_cookie, wp_insert_user, set_role, etc.)
+  # without any auth check allows unauthenticated privilege escalation to admin.
+  # This is the CVE-2026-23550 / CVE-2025-5947 class — unauthenticated user
+  # modification leading to admin account takeover.
+
+  - id: claude.php.wordpress.access-control.init-hook-no-auth-user-write
+    mode: join
+    languages: [php]
+    severity: HIGH
+    message: |
+      A callback on the 'init', 'wp_loaded', or 'parse_request' hook performs a
+      user modification operation (wp_update_user, wp_set_auth_cookie,
+      wp_set_current_user, wp_insert_user, wp_create_user, set_role,
+      wp_set_password, update_user_meta) without calling current_user_can() or
+      any nonce verification function. These hooks fire for every request
+      including unauthenticated visitors (CWE-862).
+
+      An attacker can create admin accounts, set auth cookies for existing users,
+      change user roles, reset passwords, or write a privileged user-meta value
+      (e.g. a plugin-defined account-type/role-like field) for whichever user is
+      currently loaded, by crafting request parameters.
+
+      TRIAGE:
+      1. Read the callback body to confirm user writes depend on user-supplied
+         input ($_GET, $_POST, $_REQUEST, $_COOKIE).
+      2. Verify the user ID or role parameter is attacker-controlled.
+      3. Confirm no auth check exists anywhere in the call chain.
+      4. If wp_set_auth_cookie() is called with an attacker-supplied user ID,
+         this is a critical authentication bypass (CVSS 9.8).
+
+      Fix: add current_user_can() with the appropriate capability immediately
+      before the user write, returning early on failure.
+    join:
+      rules:
+        - id: init-hook-registration
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_action('$HOOK', [..., '$CALLBACK'], ...);
+                - pattern: add_action('$HOOK', '$CALLBACK', ...);
+                - pattern: add_action('$HOOK', array($OBJ, '$CALLBACK'), ...);
+            - metavariable-regex:
+                metavariable: $HOOK
+                regex: (init|wp_loaded|parse_request)
+
+        - id: no-auth-user-write
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_update_user(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_set_auth_cookie(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_set_current_user(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_insert_user(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_create_user(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_set_password(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      $USER->set_role(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      update_user_meta(...);
+                      ...
+                    }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  wp_verify_nonce(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  check_ajax_referer(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  check_admin_referer(...);
+                  ...
+                }
+
+      on:
+        - 'init-hook-registration.path == no-auth-user-write.path'
+        - 'init-hook-registration.$CALLBACK == no-auth-user-write.$CALLBACK'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/hooks/init/
+        - https://developer.wordpress.org/reference/functions/wp_set_auth_cookie/
+        - https://developer.wordpress.org/reference/functions/wp_update_user/

@@ -1,0 +1,92 @@
+rules:
+  - id: claude.php.wordpress.sqli.raw-where-key-concat-no-sanitizer
+    languages: [php]
+    severity: HIGH
+    message: |
+      A value read from a caller-supplied arguments array under a key whose
+      name signals it carries a raw SQL WHERE/HAVING fragment (a naming
+      pattern combining "where" with "sql" or "raw", e.g. an
+      "append_where_sql"-style escape hatch) is concatenated directly onto a
+      query-condition accumulator with no sanitizer, cast, or
+      $wpdb->prepare() call applied to it anywhere in the concatenation
+      itself (CWE-89). Unlike a bound value passed alongside a %s/%d
+      placeholder, this value IS spliced into the SQL text itself — whatever
+      it contains becomes executable SQL verbatim, with no quote character
+      needed to break out of anything.
+
+      This is a recurring WordPress custom-ORM/query-builder anti-pattern: a
+      "build the WHERE clause" method accepts an arguments array and treats
+      one particular key as an opt-in raw-SQL passthrough for trusted,
+      code-level callers, without gating whether that same key can also be
+      populated directly from a request array ($_GET/$_POST/$_REQUEST)
+      upstream.
+
+      Fix: never accept a raw SQL fragment as a request-controlled parameter.
+      If the key is legitimately used by trusted, code-level callers only,
+      explicitly reject a request-supplied value for that same key name
+      (e.g. `empty($_REQUEST['key_name'])`) before honoring it, or replace
+      the passthrough entirely with an allow-listed set of pre-built
+      condition strings.
+
+      TRIAGE GUIDANCE
+      ───────────────────────────────────────────────────────────────────
+      TRUE POSITIVE indicators:
+        - The same array key name is never excluded from direct
+          $_GET/$_POST/$_REQUEST population before this code runs.
+        - No allow-list of permitted fragment values exists anywhere in the
+          enclosing method.
+
+      FALSE POSITIVE indicators:
+        - The enclosing condition already rejects a request-supplied value
+          for this exact key (`empty($_REQUEST[$KEY])` /
+          `!isset($_REQUEST[$KEY])`) before the concatenation runs — confirm
+          this guard is not itself reachable with attacker-controlled input
+          through a different call path.
+        - A prior line already reassigned the value through
+          $wpdb->prepare()/esc_sql()/a numeric cast before this
+          concatenation — this rule cannot see a same-variable reassignment
+          on an earlier line.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              foreach ($ARGS[$KEY] as $FRAG) {
+                $WHERE .= $FRAG;
+              }
+          - pattern: $WHERE .= $ARGS[$KEY];
+          - pattern: $WHERE = $WHERE . $ARGS[$KEY];
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: "(?i)^['\"][a-z_]*(?:where[a-z_]*(?:sql|raw)|(?:sql|raw)[a-z_]*where)[a-z_]*['\"]$"
+      # Fix-derived FP guard: the confirmed patch for this class rejects a
+      # request-supplied value under the exact same array key before
+      # honoring it as a raw fragment, leaving only trusted code-level
+      # callers able to reach the concatenation.
+      - pattern-not-inside: |
+          function $F(...) {
+            ...
+            if (<... empty($_REQUEST[$KEY]) ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $F(...) {
+            ...
+            if (<... !isset($_REQUEST[$KEY]) ...>) {
+              ...
+            }
+            ...
+          }

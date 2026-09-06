@@ -1,0 +1,88 @@
+rules:
+  - id: claude.php.wordpress.xss.personalization-tag-resolver-unescaped-getter
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A personalization-tag / merge-tag resolver method returns a raw entity
+      getter value directly, with no output escaping (CWE-79). Merge-tag /
+      template-tag engines typically splice the resolver's return value
+      verbatim into rendered HTML several call frames away — the engine's
+      own responsibility is usually limited to substituting the tag
+      placeholder, not HTML-encoding the resolved value. This will not
+      surface via a simple superglobal-to-echo taint rule: the source here
+      is stored/DB-backed entity data (e.g. a subscriber/contact/user
+      record), not a request superglobal.
+      Confirmed TP: mailpoet 5.34.0 — Subscriber::getFirstName()/getLastName()
+      (PersonalizationTags/Subscriber.php) return $subscriber->getFirstName()
+      raw; the sibling getCustomField() in the same class correctly wraps its
+      return in htmlspecialchars(), confirming the omission is a genuine gap.
+      Fix: wrap the return value in htmlspecialchars()/esc_html().
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Stored Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    patterns:
+      # Deep-match the return expression rather than enumerating every wrapping
+      # shape (bare call, ternary, null-coalesce, etc.) — a real resolver method
+      # commonly resolves its subject on a preceding statement (e.g.
+      # $subscriber = $this->getSubscriber($context);) and returns a ternary-
+      # or null-coalesce-guarded expression, not a bare single-statement
+      # passthrough. Confirmed against mailpoet 5.34.0's actual
+      # `return ($subscriber && $subscriber->getFirstName()) ? $subscriber->getFirstName() : $args['default'] ?? '';`
+      # shape, which an exact-ternary pattern (no deep match) failed to match
+      # because of how `??` combines with the outer `?:` in semgrep's PHP grammar.
+      - pattern: |
+          function $METHOD(...) {
+            ...
+            return <... $OBJ->$GETTER() ...>;
+          }
+      - metavariable-regex:
+          metavariable: $GETTER
+          regex: '^get[A-Z]\w*$'
+      - pattern-not-inside: |
+          function $METHOD(...) {
+            ...
+            return <... esc_html($OBJ->$GETTER()) ...>;
+          }
+      - pattern-not-inside: |
+          function $METHOD(...) {
+            ...
+            return <... esc_attr($OBJ->$GETTER()) ...>;
+          }
+      - pattern-not-inside: |
+          function $METHOD(...) {
+            ...
+            return <... htmlspecialchars($OBJ->$GETTER(), $...ARGS) ...>;
+          }
+      - pattern-not-inside: |
+          function $METHOD(...) {
+            ...
+            return <... sanitize_text_field($OBJ->$GETTER()) ...>;
+          }
+    # Scope to the directory-naming convention shared across WP plugins that
+    # implement a merge-tag / personalization-tag / dynamic-tag resolver engine
+    # (a class per data category, one getter method per tag) — restricting the
+    # rule to this convention avoids firing on the vast, generally-benign
+    # population of unrelated single-statement getter-passthrough methods
+    # elsewhere in a codebase (e.g. REST controllers returning entity data to
+    # be JSON-serialized, where escaping is not applicable).
+    paths:
+      include:
+        - "**/PersonalizationTag*/**"
+        - "**/MergeTag*/**"
+        - "**/SmartTag*/**"
+        - "**/DynamicTag*/**"
+        - "**/Shortcodes/Categor*/**"
+      exclude:
+        - "**/vendor/**"
+        - "**/vendor-prefixed/**"
+        - "**/node_modules/**"

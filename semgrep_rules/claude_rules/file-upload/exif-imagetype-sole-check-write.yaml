@@ -1,0 +1,68 @@
+rules:
+  - id: claude.php.wordpress.file-upload.exif-imagetype-sole-check-write
+    languages: [php]
+    severity: HIGH
+    message: |
+      exif_imagetype() is used as the sole gate before writing fetched/uploaded
+      content to disk (CWE-434). exif_imagetype() only inspects the first bytes
+      of the source for a known image signature (e.g. GIF89a) — it does not
+      validate the actual saved filename/extension. A remote source whose
+      content starts with a valid image magic number but whose name ends in
+      an executable extension (e.g. a URL ending in .php) will pass this check
+      and be written to a web-accessible directory unchanged, enabling Remote
+      Code Execution.
+      Derive the saved file's extension from a verified MIME type against an
+      explicit image allowlist (e.g. getimagesize()'s 'mime' key checked with
+      in_array() against image/png, image/jpeg, image/gif) rather than trusting
+      the source's original filename/extension, and additionally confirm the
+      extension with wp_check_filetype_and_ext() before the write.
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/434.html
+        - https://developer.wordpress.org/reference/functions/wp_check_filetype_and_ext/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              if (<... exif_imagetype($URL) ...>) {
+                ...
+                file_put_contents($DEST, ...);
+                ...
+              }
+          - pattern: |
+              if (<... exif_imagetype($URL) ...>) {
+                ...
+                $FH = fopen($DEST, ...);
+                ...
+                fwrite($FH, ...);
+                ...
+              }
+      # The extension/name actually saved must trace back to the same
+      # unvalidated source — otherwise the destination name is fixed/trusted
+      # and the weak content sniff alone is a lower-impact issue.
+      - pattern-inside: |
+          if (<... exif_imagetype($URL) ...>) {
+            ...
+            basename($URL);
+            ...
+          }
+      # Fix pattern: an explicit extension/mime allowlist check (in_array
+      # against a fixed list, in any conditional form) between the sniff
+      # and the write neutralizes the bypass even though exif_imagetype()
+      # is still present.
+      - pattern-not-inside: |
+          if (<... exif_imagetype($URL) ...>) {
+            ...
+            if (<... in_array($EXT, $ALLOWED) ...>) {
+              ...
+            }
+            ...
+          }

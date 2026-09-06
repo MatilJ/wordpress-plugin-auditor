@@ -1,0 +1,210 @@
+rules:
+  - id: claude.php.wordpress.auth.unauthenticated-plugin-theme-install
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      A function instantiates Plugin_Upgrader/Theme_Upgrader, or calls
+      activate_plugins() / switch_theme(), without checking an install/activate
+      capability (current_user_can('install_plugins' | 'activate_plugins' |
+      'install_themes' | 'switch_themes' | ...)) in the same function body.
+
+      If this function is reachable from an unauthenticated or low-privilege
+      endpoint (AJAX nopriv, REST with a weak permission_callback, a
+      Subscriber-reachable wp_ajax_ handler, or admin_post), an attacker can
+      install or activate an arbitrary plugin/theme. Installing a malicious
+      plugin yields remote code execution and full site takeover (CWE-862).
+
+      This rule COMPLEMENTS claude.php.wordpress.auth.unauthenticated-plugin-activation
+      (which covers activate_plugin()/deactivate_plugins()); it targets the
+      install/activate sinks that rule does not: the WP_Upgrader classes,
+      activate_plugins() (plural), and switch_theme().
+
+      A nonce check is NOT a substitute for the capability check: if the nonce
+      is reachable by the low-privilege role, the missing capability check is
+      still the vulnerability (CVE-2025-64374 Motors, CVE-2025-1562 FunnelKit).
+
+      TRIAGE:
+      1. Confirm reachability: is the function a wp_ajax_nopriv_ callback, a REST
+         callback with permission_callback => __return_true, or a
+         Subscriber-reachable wp_ajax_ / admin_post handler?
+      2. Capability check at add_*_page() registration is invisible to Semgrep —
+         find the menu/registration and check its capability argument (FP).
+      3. Capability check in a wrapper/dispatcher is invisible here — trace the
+         call chain (FP).
+      4. If the target plugin/theme slug or package is hardcoded (a bundled
+         companion), it is not attacker-controlled (FP).
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/classes/plugin_upgrader/
+        - https://developer.wordpress.org/reference/functions/switch_theme/
+        - https://developer.wordpress.org/reference/functions/activate_plugins/
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    pattern-either:
+      # ---- Plugin_Upgrader / Theme_Upgrader instantiation (with/without namespace backslash) ----
+      - patterns:
+          - pattern-either:
+              - pattern: |
+                  function $FUNC(...) { ... new Plugin_Upgrader(...); ... }
+              - pattern: |
+                  function $FUNC(...) { ... new \Plugin_Upgrader(...); ... }
+              - pattern: |
+                  function $FUNC(...) { ... new Theme_Upgrader(...); ... }
+              - pattern: |
+                  function $FUNC(...) { ... new \Theme_Upgrader(...); ... }
+          - pattern-not:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) { ... current_user_can($CAP); ... }
+                - metavariable-regex:
+                    # Also accepts a bare ALL-CAPS constant (a define()'d capability
+                    # constant is fixed at development time, not attacker-influenceable,
+                    # so it carries the same non-attacker-controlled guarantee as a literal).
+                    metavariable: $CAP
+                    regex: "^(['\"](install_plugins|activate_plugins|update_plugins|delete_plugins|install_themes|switch_themes|update_themes|delete_themes|manage_options|administrator)['\"]|[A-Z][A-Z0-9_]{2,})$"
+          - pattern-not:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) { ... if (<... current_user_can($CAP) ...>) { ... } ... }
+                - metavariable-regex:
+                    # Also accepts a bare ALL-CAPS constant (a define()'d capability
+                    # constant is fixed at development time, not attacker-influenceable,
+                    # so it carries the same non-attacker-controlled guarantee as a literal).
+                    metavariable: $CAP
+                    regex: "^(['\"](install_plugins|activate_plugins|update_plugins|delete_plugins|install_themes|switch_themes|update_themes|delete_themes|manage_options|administrator)['\"]|[A-Z][A-Z0-9_]{2,})$"
+          - pattern-not: |
+              function $FUNC(...) { ... is_super_admin(); ... }
+          - pattern-not: |
+              function $FUNC(...) { ... if (<... is_super_admin() ...>) { ... } ... }
+          # Exclude: call to a custom capability-wrapper function whose name follows
+          # common WP plugin capability-check naming conventions. Semgrep cannot
+          # resolve a wrapper that internally calls current_user_can() without
+          # cross-file inlining (same FP driver confirmed on the sibling rule
+          # unauthenticated-plugin-activation — 102 of 246 lifetime hits, 0 TP).
+          - pattern-not:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) { ... $WRAPCHECK(...); ... }
+                - metavariable-regex:
+                    metavariable: $WRAPCHECK
+                    regex: "(?i).*(user_can_manage|can_manage_|has_access|has_capability|check_permission|verify_access|validate_access_rights|is_admin_user|is_current_user_allowed|hascapability|usercan).*"
+          - pattern-not:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) { ... if (<... $WRAPCHECK(...) ...>) { ... } ... }
+                - metavariable-regex:
+                    metavariable: $WRAPCHECK
+                    regex: "(?i).*(user_can_manage|can_manage_|has_access|has_capability|check_permission|verify_access|validate_access_rights|is_admin_user|is_current_user_allowed|hascapability|usercan).*"
+      # ---- activate_plugins() (plural) ----
+      - patterns:
+          - pattern: |
+              function $FUNC(...) { ... activate_plugins(...); ... }
+          - pattern-not:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) { ... current_user_can($CAP); ... }
+                - metavariable-regex:
+                    # See rationale on the Plugin_Upgrader branch above: bare ALL-CAPS
+                    # constants are also accepted as non-attacker-controlled.
+                    metavariable: $CAP
+                    regex: "^(['\"](install_plugins|activate_plugins|manage_options|administrator)['\"]|[A-Z][A-Z0-9_]{2,})$"
+          - pattern-not:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) { ... if (<... current_user_can($CAP) ...>) { ... } ... }
+                - metavariable-regex:
+                    # See rationale on the Plugin_Upgrader branch above: bare ALL-CAPS
+                    # constants are also accepted as non-attacker-controlled.
+                    metavariable: $CAP
+                    regex: "^(['\"](install_plugins|activate_plugins|manage_options|administrator)['\"]|[A-Z][A-Z0-9_]{2,})$"
+          - pattern-not: |
+              function $FUNC(...) { ... is_super_admin(); ... }
+          - pattern-not: |
+              function $FUNC(...) { ... if (<... is_super_admin() ...>) { ... } ... }
+          # hardcoded plugin slug (string literal, ALL_CAPS constant, or array() of literals)
+          - pattern-not:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) { ... activate_plugins($SLUG, ...); ... }
+                - metavariable-regex:
+                    metavariable: $SLUG
+                    regex: "^(['\"]|[A-Z][A-Z0-9_]+$|array\\()"
+          # Exclude: custom capability-wrapper function call (see rationale above).
+          - pattern-not:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) { ... $WRAPCHECK(...); ... }
+                - metavariable-regex:
+                    metavariable: $WRAPCHECK
+                    regex: "(?i).*(user_can_manage|can_manage_|has_access|has_capability|check_permission|verify_access|validate_access_rights|is_admin_user|is_current_user_allowed|hascapability|usercan).*"
+          - pattern-not:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) { ... if (<... $WRAPCHECK(...) ...>) { ... } ... }
+                - metavariable-regex:
+                    metavariable: $WRAPCHECK
+                    regex: "(?i).*(user_can_manage|can_manage_|has_access|has_capability|check_permission|verify_access|validate_access_rights|is_admin_user|is_current_user_allowed|hascapability|usercan).*"
+      # ---- switch_theme() ----
+      - patterns:
+          - pattern: |
+              function $FUNC(...) { ... switch_theme(...); ... }
+          - pattern-not:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) { ... current_user_can($CAP); ... }
+                - metavariable-regex:
+                    # See rationale on the Plugin_Upgrader branch above: bare ALL-CAPS
+                    # constants are also accepted as non-attacker-controlled.
+                    metavariable: $CAP
+                    regex: "^(['\"](switch_themes|install_themes|update_themes|delete_themes|edit_theme_options|manage_options|administrator)['\"]|[A-Z][A-Z0-9_]{2,})$"
+          - pattern-not:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) { ... if (<... current_user_can($CAP) ...>) { ... } ... }
+                - metavariable-regex:
+                    # See rationale on the Plugin_Upgrader branch above: bare ALL-CAPS
+                    # constants are also accepted as non-attacker-controlled.
+                    metavariable: $CAP
+                    regex: "^(['\"](switch_themes|install_themes|update_themes|delete_themes|edit_theme_options|manage_options|administrator)['\"]|[A-Z][A-Z0-9_]{2,})$"
+          - pattern-not: |
+              function $FUNC(...) { ... is_super_admin(); ... }
+          - pattern-not: |
+              function $FUNC(...) { ... if (<... is_super_admin() ...>) { ... } ... }
+          # hardcoded theme slug (string literal or ALL_CAPS constant)
+          - pattern-not:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) { ... switch_theme($SLUG, ...); ... }
+                - metavariable-regex:
+                    metavariable: $SLUG
+                    regex: "^(['\"]|[A-Z][A-Z0-9_]+$)"
+          # Exclude: custom capability-wrapper function call (see rationale above).
+          - pattern-not:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) { ... $WRAPCHECK(...); ... }
+                - metavariable-regex:
+                    metavariable: $WRAPCHECK
+                    regex: "(?i).*(user_can_manage|can_manage_|has_access|has_capability|check_permission|verify_access|validate_access_rights|is_admin_user|is_current_user_allowed|hascapability|usercan).*"
+          - pattern-not:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) { ... if (<... $WRAPCHECK(...) ...>) { ... } ... }
+                - metavariable-regex:
+                    metavariable: $WRAPCHECK
+                    regex: "(?i).*(user_can_manage|can_manage_|has_access|has_capability|check_permission|verify_access|validate_access_rights|is_admin_user|is_current_user_allowed|hascapability|usercan).*"

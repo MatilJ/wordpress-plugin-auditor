@@ -1,0 +1,103 @@
+rules:
+  - id: claude.php.wordpress.sqli.raw-sql-clause-quoted-variable-interpolation
+    languages: [php]
+    severity: HIGH
+    message: |
+      A local variable is assigned (or appended to, via .=) a double-quoted
+      PHP string that builds a raw SQL clause fragment (a SELECT/FROM/JOIN/
+      WHERE-shaped snippet) with another variable interpolated directly
+      inside single quotes ('$VAR'), instead of being built with
+      $wpdb->prepare() and a %s/%d/%i placeholder or escaped with esc_sql().
+      Whatever the interpolated value contains is spliced into the SQL text
+      verbatim — a single embedded quote character breaks out of the string
+      literal and injects arbitrary SQL (CWE-89).
+
+      This shape is easy for both scanners and reviewers to miss because the
+      raw-fragment variable is often built inside one small helper function
+      (e.g. a "get_X_for_page()" query-condition builder) and only reaches an
+      actual $wpdb call several calls later, inside a completely different,
+      custom query-builder/ORM wrapper method — so detection or triage that
+      only looks at the final $wpdb->query()/get_results() call argument
+      passes right over the real vulnerable line, which is this assignment.
+
+      CVE evidence: CVE-2026-2413 (Ally – Web Accessibility & Usability
+      <= 4.0.3) built a LEFT JOIN clause with the current page's URL path
+      interpolated raw (`"... page_url = '$url'"`), where $url derived from
+      $_SERVER['REQUEST_URI'] via wp_parse_url()/home_url() with no SQL
+      escaping applied anywhere along the path — an unauthenticated SQL
+      injection reachable on every front-end page view. URL-path-derived
+      values (REQUEST_URI, PATH_INFO, a rewrite/routing segment) are commonly
+      treated as "internal" plumbing and passed into query-condition helpers
+      without the scrutiny given to $_GET/$_POST — check that possibility
+      first when triaging a match here.
+
+      Fix: build the fragment with $wpdb->prepare() using a %s/%d/%i
+      placeholder for the value, or apply esc_sql() to the value before
+      interpolating it.
+
+      TRIAGE GUIDANCE
+      ───────────────────────────────────────────────────────────────────
+      TRUE POSITIVE indicators:
+        - The interpolated variable (or an alias of it) traces back to
+          $_SERVER['REQUEST_URI']/['PATH_INFO'], $_GET/$_POST/$_REQUEST, a
+          REST request parameter, or any other request-controlled source,
+          with no $wpdb->prepare()/esc_sql()/numeric cast applied anywhere
+          between the source and this assignment.
+        - The resulting fragment variable is later handed to $wpdb-> or to a
+          custom query-builder/ORM wrapper method as a raw WHERE/JOIN/
+          ORDER-BY argument.
+
+      FALSE POSITIVE indicators:
+        - The interpolated variable was already passed through esc_sql(),
+          an (int)/(float) cast, intval()/absint()/floatval(),
+          sanitize_key(), or sanitize_sql_orderby() earlier in the same
+          function — this pattern cannot see that guard on a prior line;
+          confirm manually.
+        - The variable is a plugin-defined constant or table/column name that
+          is never request-influenced.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+      # KNOWN LIMITATION — same-function prior-line sanitization:
+      #   This is a pattern-mode (non-taint) rule. It cannot see that the
+      #   interpolated variable was already run through esc_sql()/absint() on
+      #   an earlier line in the same function, and will still fire on:
+      #     $safe = esc_sql($url);
+      #     $join = "... page_url = '$safe'";
+      #   Manually verify prior-line sanitization before reporting.
+      #
+      #   It also intentionally does NOT require the fragment variable to be
+      #   traced into a $wpdb call — the vulnerable line for this class is
+      #   the string assignment itself, which is frequently several function
+      #   calls (and sometimes another file) away from the eventual $wpdb
+      #   execution inside a custom ORM/query-builder wrapper. Requiring that
+      #   full chain would reproduce the cross-file taint blind spot this
+      #   rule exists to cover (see wpdb-query-user-input-taint.yaml's
+      #   KNOWN LIMITATION note for the general form of this gap).
+    patterns:
+      - pattern-either:
+          - pattern: $VAR = $S;
+          - pattern: $VAR .= $S;
+      - metavariable-regex:
+          metavariable: $S
+          regex: "(?is).*\\b(select|from|join|where)\\b.*=\\s*'\\$[a-z_][a-z0-9_]*'.*"
+      # Fix-derived FP guard: the patch for CVE-2026-2413 replaced the raw
+      # interpolated assignment with $wpdb->prepare()/$wrapper->prepare()
+      # using a %s placeholder — no PHP variable is ever embedded literally
+      # inside single quotes in that shape, so the regex above already
+      # excludes it; these pattern-not clauses make the exclusion explicit
+      # and robust to prepare() calls whose formatted argument also happens
+      # to contain an unrelated quoted-variable substring elsewhere.
+      - pattern-not: $VAR = $OBJ->prepare(...);
+      - pattern-not: $VAR .= $OBJ->prepare(...);
+      - pattern-not: $VAR = esc_sql(...);

@@ -1,0 +1,87 @@
+rules:
+  - id: claude.php.wordpress.xss.wp-json-encode-unescaped-slashes-script-breakout
+    languages: [php]
+    severity: HIGH
+    message: |
+      wp_json_encode() is echoed with JSON_UNESCAPED_SLASHES, which removes PHP's
+      default forward-slash escaping (/ → \/). That escaping is the only native guard
+      preventing </script> in a JSON string value from terminating an enclosing
+      <script> block and enabling Stored XSS (CWE-79).
+
+      Exploitable when any string in the serialized data was decoded from HTML-entity
+      form before JSON serialization — e.g. via wp_specialchars_decode(),
+      html_entity_decode(), or htmlspecialchars_decode(). WordPress stores user-submitted
+      content with HTML entities via wp_filter_kses() on title_save_pre. If the plugin
+      calls wp_specialchars_decode() at render time to recover the decoded string and
+      then passes it through wp_json_encode(..., JSON_UNESCAPED_SLASHES) into a
+      <script> block, an attacker with write access can craft a title such as
+      &lt;/script&gt;&lt;img src=x onerror=...&gt;: KSES stores the entity form,
+      wp_specialchars_decode() decodes to literal </script>, and JSON_UNESCAPED_SLASHES
+      allows the / to appear unescaped.
+
+      TRIAGE: Confirm the echo falls inside a <script> block. Identify whether any
+      string field in the data array passes through wp_specialchars_decode(),
+      html_entity_decode(), or a custom entity-decode wrapper before reaching this call.
+      If data comes exclusively from numeric values, sanitize_text_field() output, or
+      WP options stored with wp_kses() — this is a false positive.
+
+      Fix: remove JSON_UNESCAPED_SLASHES, or add JSON_HEX_TAG to hex-encode < and >
+      before serialization.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://www.php.net/manual/en/json.constants.php
+        - https://developer.mozilla.org/en-US/docs/Web/HTML/Element/script#notes
+        - https://owasp.org/www-community/attacks/xss/
+    paths:
+      exclude:
+        - "**/freemius/**"
+    pattern-either:
+      # Form A: direct echo of wp_json_encode with JSON_UNESCAPED_SLASHES as flags arg.
+      - patterns:
+          - pattern: echo wp_json_encode($DATA, <... JSON_UNESCAPED_SLASHES ...>);
+          # JSON_HEX_TAG re-encodes < > to </> — script breakout impossible.
+          - pattern-not: echo wp_json_encode($DATA, <... JSON_HEX_TAG ...>);
+      # Form B: concatenation echo with JSON_UNESCAPED_SLASHES.
+      - patterns:
+          - pattern: echo $PREFIX . wp_json_encode($DATA, <... JSON_UNESCAPED_SLASHES ...>) . $SUFFIX;
+          - pattern-not: echo $PREFIX . wp_json_encode($DATA, <... JSON_HEX_TAG ...>) . $SUFFIX;
+      # Form C: assigned variable echoed in concatenation.
+      - patterns:
+          - pattern: |
+              $ENCODED = wp_json_encode($DATA, <... JSON_UNESCAPED_SLASHES ...>);
+              ...
+              echo <... $ENCODED ...>;
+          - pattern-not: |
+              $ENCODED = wp_json_encode($DATA, <... JSON_HEX_TAG ...>);
+              ...
+              echo <... $ENCODED ...>;
+      # Form D: flags stored in variable then passed to wp_json_encode echo.
+      # Catches: $opts = JSON_UNESCAPED_SLASHES | ...; ... echo wp_json_encode($data, $opts);
+      - patterns:
+          - pattern: |
+              $OPTIONS = <... JSON_UNESCAPED_SLASHES ...>;
+              ...
+              echo wp_json_encode($DATA, $OPTIONS);
+          - pattern-not: |
+              $OPTIONS = <... JSON_HEX_TAG ...>;
+              ...
+              echo wp_json_encode($DATA, $OPTIONS);
+      # Form E: flags-variable, concatenation echo form.
+      - patterns:
+          - pattern: |
+              $OPTIONS = <... JSON_UNESCAPED_SLASHES ...>;
+              ...
+              echo $PREFIX . wp_json_encode($DATA, $OPTIONS) . $SUFFIX;
+          - pattern-not: |
+              $OPTIONS = <... JSON_HEX_TAG ...>;
+              ...
+              echo $PREFIX . wp_json_encode($DATA, $OPTIONS) . $SUFFIX;

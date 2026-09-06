@@ -1,0 +1,102 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.htaccess-missing-deny-directive
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      PHP code programmatically writes a `.htaccess` file into a directory
+      that stores plugin-generated artifacts (backup archives, database
+      dumps, log files, export output), but the written content either (a)
+      only sets `Options -Indexes` — which merely disables directory
+      listing — with no directive that denies direct HTTP requests to
+      files inside the directory, or (b) sets a deny directive using ONLY
+      the legacy Apache 2.2 `mod_access` syntax (`Order deny,allow` /
+      `Deny from all`) with no Apache 2.4 `mod_authz_core` fallback
+      (`Require all denied`). Shape (b) looks protected at a glance but is
+      silently inert on Apache 2.4 without `mod_access_compat` loaded
+      (unrecognized `Order`/`Deny` directives are a hard config error or
+      are ignored depending on config) and on nginx, which never reads
+      `.htaccess` at all. Because the directory still lives inside the web
+      root, an unauthenticated visitor who learns or guesses a stored
+      filename (a backup ZIP, a `.sql` dump, a `.log` file) can fetch it
+      directly over HTTP — the web server serves the file before
+      WordPress, and any plugin-level capability/nonce check on the
+      admin-facing download endpoint is never reached. This is the same
+      "restricted directory with insufficient access limitation" pattern
+      classed by Wordfence as Path Traversal / Information Disclosure for
+      backup/migration/logging plugins whose archive or log directory
+      relies solely on a directory-listing toggle or legacy-only syntax
+      for protection.
+
+      Fix: the `.htaccess` payload must include an unconditional deny for
+      both Apache 2.4 (`Require all denied`) and 2.2 (`Order Allow,Deny` /
+      `Deny from all`), and any existing weak `.htaccess` left over from a
+      prior plugin version must be actively rewritten/upgraded on load,
+      not just created `if (!file_exists(...))`.
+
+      TRIAGE:
+        1. Confirm the target path is inside the web root (a subdirectory
+           of `wp_upload_dir()`, `WP_CONTENT_DIR`, `WP_PLUGIN_DIR`, or a
+           plugin-owned directory under wp-content), not outside-webroot
+           storage.
+        2. Confirm the directory is used to hold generated content with
+           real confidentiality value (backup/export archives, DB dumps,
+           debug/error logs) rather than already-public assets.
+        3. Confirm no other layer already blocks direct access (e.g. a
+           `nginx` deployment where `.htaccess` is inert — still worth
+           flagging, since Apache remains the common case, but downgrade
+           confidence if the codebase targets nginx-only hosting).
+    metadata:
+      category: security
+      cwe: "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/22.html
+    patterns:
+      - pattern-inside: |
+          $CONTENTVAR = $CONTENT;
+          ...
+      - metavariable-regex:
+          metavariable: $CONTENT
+          # Shape (a) [first alternative]: directory-listing toggle only, no
+          # deny directive at all. Shape (b) [second alternative]: legacy
+          # Apache 2.2 Order/Deny syntax present with no Apache 2.4
+          # Require-all-denied fallback — reads as protected but is inert on
+          # Apache 2.4 (without mod_access_compat) and on nginx.
+          regex: "(?is)^(?:(?!.*(?:deny from all|require all denied)).*options\\s*-indexes|(?!.*require\\s+all\\s+denied).*(?:deny\\s+from\\s+all|order\\s+(?:deny\\s*,\\s*allow|allow\\s*,\\s*deny)))"
+      - pattern-either:
+          # Variant 1: path pre-assigned to a variable before the write —
+          # the common backup/export-archive idiom.
+          - patterns:
+              - pattern-inside: |
+                  $PATHVAR = $PATH;
+                  ...
+              - metavariable-regex:
+                  metavariable: $PATH
+                  regex: "(?i).*\\.htaccess"
+              - pattern-either:
+                  - pattern: file_put_contents($PATHVAR, $CONTENTVAR, ...)
+                  - patterns:
+                      - pattern-inside: |
+                          $FP = fopen($PATHVAR, ...);
+                          ...
+                      - pattern: fwrite($FP, $CONTENTVAR)
+                  - patterns:
+                      - pattern-inside: |
+                          $FP = @fopen($PATHVAR, ...);
+                          ...
+                      - pattern: fwrite($FP, $CONTENTVAR)
+          # Variant 2: path built inline at the call site (e.g.
+          # $log_dir . '.htaccess') rather than pre-assigned to its own
+          # variable — the shape used by File_Logger-style class-based
+          # loggers that only pre-assign the CONTENT, not the path.
+          - patterns:
+              - pattern: file_put_contents($PATH, $CONTENTVAR, ...)
+              - metavariable-regex:
+                  metavariable: $PATH
+                  regex: "(?i).*\\.htaccess.*"

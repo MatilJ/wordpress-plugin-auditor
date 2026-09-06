@@ -1,0 +1,85 @@
+rules:
+  - id: claude.php.wordpress.xss.filename-metadata-unescaped-output
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A filename or file metadata value flows into an HTML output sink
+      (echo/print/printf) without escaping. Filenames from user uploads
+      ($_FILES['name'], basename() of uploaded paths, attachment metadata)
+      can contain HTML/JavaScript characters that execute when rendered
+      in admin file lists, media library views, or download pages.
+
+      Real-world CVE: CVE-2024-11605 (WP Publications) — uploaded
+      filenames rendered without escaping in admin HTML.
+
+      TRIAGE: WP Core's media_handle_upload() passes filenames through
+      sanitize_text_field() + title_save_pre → wp_filter_kses(), which
+      strips HTML tags. Only custom upload handlers that bypass the WP
+      media pipeline are vulnerable. Check whether the upload uses
+      wp_handle_upload()/media_handle_upload() (likely safe) or
+      move_uploaded_file()/wp_upload_bits() directly (likely vulnerable).
+
+      Fix: escape with esc_html() for text content, esc_attr() for
+      attribute values. sanitize_file_name() restricts to [a-zA-Z0-9._-]
+      and is also safe.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: LOW
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/sanitize_file_name/
+        - https://developer.wordpress.org/apis/security/escaping/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_FILES[$K]['name']
+          - pattern: $_FILES[$K]["name"]
+          - pattern: basename(...)
+          - pattern: wp_get_attachment_metadata(...)
+          - pattern: get_attached_file(...)
+          - pattern: wp_get_attachment_url(...)
+    pattern-sinks:
+      - pattern-either:
+          - pattern: echo $X;
+          - pattern: print $X;
+          - pattern: print($X);
+          - pattern: printf($F, ...)
+          - patterns:
+              - pattern: echo "...$X...";
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: esc_html(...)
+          - pattern: esc_attr(...)
+          - pattern: esc_url(...)
+          - pattern: esc_textarea(...)
+          - pattern: esc_html__(...)
+          - pattern: esc_attr__(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          - pattern: sanitize_file_name(...)
+          - pattern: sanitize_text_field(...)
+          - pattern: sanitize_textarea_field(...)
+          - pattern: strip_tags(...)
+          - pattern: wp_strip_all_tags(...)
+          - pattern: (int) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: wp_json_encode(...)
+          - pattern: json_encode(...)
+          - pattern: wp_send_json(...)
+          - pattern: wp_send_json_success(...)
+          - pattern: wp_send_json_error(...)
+          - pattern: pathinfo(...)

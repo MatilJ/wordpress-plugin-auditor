@@ -1,0 +1,171 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+# Join rules are validated by scanning real/crafted code, not `semgrep --test`.
+
+rules:
+
+  # wp_ajax_nopriv_ and admin_post_nopriv_ handlers fire for unauthenticated
+  # visitors. A callback that installs or activates a plugin/theme without any
+  # capability or nonce check lets any visitor install a malicious plugin and
+  # achieve remote code execution / full site takeover. This is the
+  # GutenKit (CVE-2024-9234) / Hunk Companion (CVE-2024-9707) /
+  # FunnelKit (CVE-2025-1562) class when exposed via a nopriv hook.
+  #
+  # Higher-signal refinement of admin-post-nopriv-hook-missing-auth: it
+  # specifically requires a plugin/theme install or activation sink in the
+  # callback body, making every match CRITICAL.
+
+  - id: claude.php.wordpress.auth.nopriv-plugin-theme-install
+    mode: join
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      A callback registered on a wp_ajax_nopriv_ or admin_post_nopriv_ hook
+      installs or activates a plugin/theme (activate_plugin, activate_plugins,
+      Plugin_Upgrader/Theme_Upgrader, switch_theme, do_plugin_install, or
+      download_url+unzip_file into the plugins dir) without any capability check
+      (current_user_can) or nonce verification. Any UNAUTHENTICATED visitor can
+      invoke this endpoint and install an arbitrary plugin — installing a
+      malicious plugin yields remote code execution and full site takeover
+      (CWE-862).
+
+      TRIAGE:
+      1. Confirm the install package / plugin slug is attacker-influenced
+         ($_GET, $_POST, $_REQUEST, php://input, $request->get_param()).
+      2. Check for auth checks in sub-functions — this rule inspects only the
+         direct callback body.
+      3. A hardcoded bundled-companion slug limits impact (still Missing
+         Authorization, but not attacker-chosen).
+
+      Fix: add current_user_can('install_plugins'|'activate_plugins'|
+      'switch_themes') before the sink, or remove the nopriv hook registration.
+    join:
+      rules:
+        - id: nopriv-hook-registration
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_action('$ACTION', [..., '$CALLBACK'], ...);
+                - pattern: add_action('$ACTION', '$CALLBACK', ...);
+                - pattern: add_action('$ACTION', array($OBJ, '$CALLBACK'), ...);
+            - metavariable-regex:
+                metavariable: $ACTION
+                regex: (wp_ajax_nopriv_.*|admin_post_nopriv_.*)
+
+        - id: no-auth-install-sink
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      activate_plugin(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      activate_plugins(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      new Plugin_Upgrader(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      new \Plugin_Upgrader(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      new Theme_Upgrader(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      new \Theme_Upgrader(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      switch_theme(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      unzip_file(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      do_plugin_install(...);
+                      ...
+                    }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  wp_verify_nonce(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  check_ajax_referer(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  check_admin_referer(...);
+                  ...
+                }
+
+      on:
+        - 'nopriv-hook-registration.path == no-auth-install-sink.path'
+        - 'nopriv-hook-registration.$CALLBACK == no-auth-install-sink.$CALLBACK'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/hooks/wp_ajax_nopriv_action/
+        - https://www.wordfence.com/blog/2024/10/

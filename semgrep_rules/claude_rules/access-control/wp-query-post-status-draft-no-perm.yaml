@@ -1,0 +1,185 @@
+rules:
+  - id: claude.php.wordpress.access-control.wp-query-post-status-draft-no-perm
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      WP_Query (or get_posts) is constructed with post_status containing
+      'draft' or 'any' without restricting results to the current user via
+      an 'author' key or equivalent ownership check (CWE-862 / CWE-200).
+
+      WordPress Core WP_Query restricts 'private'-status posts to the current
+      user's own posts when 'perm' => 'readable' is set. However, the 'draft'
+      status is NOT classified as 'private' in WP_Query's internal status
+      taxonomy — it is placed in $r_status, for which WP_Query applies NO
+      per-author restriction regardless of 'perm'. The 'any' status includes
+      all registered statuses (publish, draft, private, pending, future,
+      trash) — WP_Query applies no per-author restriction for any of these
+      when 'perm' is absent.
+
+      Effect: a query with post_status including 'draft' or 'any' and no
+      'author' key returns posts from ALL authors without filtering by
+      post_author. Any low-privilege user who can invoke the handler receives
+      other authors' unpublished content — including Administrator drafts.
+
+      Fix: add 'author' => get_current_user_id() to restrict results to the
+      current user, or verify via get_post() + ownership check that the
+      caller owns each post before returning it.
+
+      TRIAGE:
+        1. Confirm the calling function is accessible to low-privilege users
+           (Contributor / Subscriber) — if admin-only (manage_options gate),
+           dismiss as PR:H (out of scope for bounty).
+        2. Confirm $status is not already hardcoded to 'publish' only. If the
+           post_status argument resolves to 'publish' alone, no disclosure.
+        3. For 'any': check if a conditional branch sets post_status to 'any'
+           only under certain user-controlled conditions (e.g., widget type,
+           class parameter) — the safe default may be overridden dynamically.
+        4. Verify the query result is actually returned to the caller without
+           per-post ownership filtering in the calling code.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/classes/wp_query/
+        - https://cwe.mitre.org/data/definitions/862.html
+    pattern-either:
+      # ── post_status='draft' assigned to $ARGS, consumed by new WP_Query($ARGS) ──
+      # Match the assignment and fire there. Exclude via pattern-not-inside when
+      # 'author', 'perm', or 'author__in' also assigned to $ARGS in the same function.
+      - patterns:
+          - pattern: |
+              $ARGS['post_status'] = 'draft';
+              ...
+              new WP_Query($ARGS);
+          - pattern-not-inside: |
+              function $FN(...) {
+                ...
+                $ARGS['author'] = $AUTHOR_VAL;
+                ...
+              }
+          - pattern-not-inside: |
+              function $FN(...) {
+                ...
+                $ARGS['author__in'] = $AUTHOR_LIST;
+                ...
+              }
+          - pattern-not-inside: |
+              function $FN(...) {
+                ...
+                $ARGS['perm'] = $PERM_VAL;
+                ...
+              }
+
+      # ── post_status=array containing 'draft' assigned to $ARGS, WP_Query ──────
+      - patterns:
+          - pattern: |
+              $ARGS['post_status'] = array(..., 'draft', ...);
+              ...
+              new WP_Query($ARGS);
+          - pattern-not-inside: |
+              function $FN(...) {
+                ...
+                $ARGS['author'] = $AUTHOR_VAL;
+                ...
+              }
+          - pattern-not-inside: |
+              function $FN(...) {
+                ...
+                $ARGS['author__in'] = $AUTHOR_LIST;
+                ...
+              }
+          - pattern-not-inside: |
+              function $FN(...) {
+                ...
+                $ARGS['perm'] = $PERM_VAL;
+                ...
+              }
+
+      # ── post_status='draft' in $ARGS, consumed by get_posts($ARGS) ────────────
+      - patterns:
+          - pattern: |
+              $ARGS['post_status'] = 'draft';
+              ...
+              get_posts($ARGS);
+          - pattern-not-inside: |
+              function $FN(...) {
+                ...
+                $ARGS['author'] = $AUTHOR_VAL;
+                ...
+              }
+          - pattern-not-inside: |
+              function $FN(...) {
+                ...
+                $ARGS['author__in'] = $AUTHOR_LIST;
+                ...
+              }
+
+      # ── post_status=array containing 'draft' in $ARGS, get_posts($ARGS) ───────
+      - patterns:
+          - pattern: |
+              $ARGS['post_status'] = array(..., 'draft', ...);
+              ...
+              get_posts($ARGS);
+          - pattern-not-inside: |
+              function $FN(...) {
+                ...
+                $ARGS['author'] = $AUTHOR_VAL;
+                ...
+              }
+          - pattern-not-inside: |
+              function $FN(...) {
+                ...
+                $ARGS['author__in'] = $AUTHOR_LIST;
+                ...
+              }
+
+      # ── post_status='any' assigned to $ARGS, consumed by new WP_Query($ARGS) ──
+      - patterns:
+          - pattern: |
+              $ARGS['post_status'] = 'any';
+              ...
+              new WP_Query($ARGS);
+          - pattern-not-inside: |
+              function $FN(...) {
+                ...
+                $ARGS['author'] = $AUTHOR_VAL;
+                ...
+              }
+          - pattern-not-inside: |
+              function $FN(...) {
+                ...
+                $ARGS['author__in'] = $AUTHOR_LIST;
+                ...
+              }
+          - pattern-not-inside: |
+              function $FN(...) {
+                ...
+                $ARGS['perm'] = $PERM_VAL;
+                ...
+              }
+
+      # ── post_status='any' assigned to $ARGS, consumed by get_posts($ARGS) ─────
+      - patterns:
+          - pattern: |
+              $ARGS['post_status'] = 'any';
+              ...
+              get_posts($ARGS);
+          - pattern-not-inside: |
+              function $FN(...) {
+                ...
+                $ARGS['author'] = $AUTHOR_VAL;
+                ...
+              }
+          - pattern-not-inside: |
+              function $FN(...) {
+                ...
+                $ARGS['author__in'] = $AUTHOR_LIST;
+                ...
+              }

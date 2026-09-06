@@ -1,0 +1,153 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+  # REST routes using is_user_logged_in() as the sole permission check allow
+  # any authenticated user (Subscriber+) to access the endpoint regardless of
+  # their actual capabilities. When the route callback performs state-changing
+  # operations, this is Missing Authorization — any Subscriber can trigger
+  # admin-level writes. CVE-2025-24000 (Post SMTP) demonstrated this pattern:
+  # Subscribers could read admin password reset emails via REST endpoints
+  # gated only by is_user_logged_in().
+
+  - id: claude.php.wordpress.access-control.rest-logged-in-only-with-state-change
+    mode: join
+    languages: [php]
+    severity: HIGH
+    message: |
+      A REST API route uses is_user_logged_in() as its sole permission check
+      (no current_user_can() call), and the route callback performs state-changing
+      operations. Any authenticated user (Subscriber+) can trigger these writes
+      regardless of their actual capabilities (CWE-862).
+
+      is_user_logged_in() verifies authentication status only — it does NOT
+      check authorization level. A Subscriber who can register on the site has
+      the same access as an Administrator to this endpoint.
+
+      TRIAGE:
+      1. Confirm the permission_callback contains is_user_logged_in() without
+         current_user_can(). Named methods may wrap both — read the method body.
+      2. Identify what the route callback writes (options, posts, user data, DB).
+      3. Determine CIA impact — admin-level writes by Subscriber = HIGH.
+      4. Check if the route also exposes sensitive data (email logs, API keys,
+         user PII) — information disclosure is equally reportable.
+
+      Fix: replace is_user_logged_in() with current_user_can('appropriate_cap')
+      in the permission_callback.
+    join:
+      rules:
+        - id: rest-route-logged-in-only
+          languages: [php]
+          patterns:
+            - pattern: |
+                register_rest_route(..., ..., array(..., 'permission_callback' => '$PERM_CALLBACK', ...), ...);
+            - metavariable-regex:
+                metavariable: $PERM_CALLBACK
+                regex: is_user_logged_in
+
+        - id: state-change-callback-no-cap
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      update_option(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      delete_option(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_insert_post(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_update_post(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_delete_post(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_update_user(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      update_post_meta(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      update_user_meta(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      $WPDB->insert(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      $WPDB->update(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      $WPDB->delete(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_set_auth_cookie(...);
+                      ...
+                    }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+
+      on:
+        - 'rest-route-logged-in-only.path == state-change-callback-no-cap.path'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/
+        - https://developer.wordpress.org/reference/functions/is_user_logged_in/

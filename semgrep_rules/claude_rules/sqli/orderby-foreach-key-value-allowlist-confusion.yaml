@@ -1,0 +1,100 @@
+rules:
+  - id: claude.php.wordpress.sqli.orderby-foreach-key-value-allowlist-confusion
+    languages: [php]
+    severity: HIGH
+    message: |
+      An allow-list helper iterates a caller-supplied `$key => $value` array
+      (typically column/field names for an ORDER BY / GROUP BY builder) and
+      validates entries with TWO different checks against the SAME allow-list
+      array: an earlier branch checks the loop VALUE (`in_array($value,
+      $allowed)`), while a sibling branch falls back to checking the loop KEY
+      (`array_key_exists($key, $allowed)`) — intended to support a legacy
+      "shortcut-name => real-column" associative-array calling convention.
+
+      This is unsafe whenever the allow-list array itself is a plain
+      sequential/list array (built via `array_keys()`, `array_merge()`, or
+      literal `array(...)` without string keys), because such an array always
+      has integer keys `0..N-1`. If the caller-supplied structure is instead a
+      plain indexed array (which is exactly what happens when a request
+      parameter is submitted using array syntax, e.g. `field[]=payload`, or
+      `field[0]=payload` — PHP auto-assigns sequential integer keys), the
+      loop's own KEY will almost always exist in the allow-list array's
+      indices regardless of what the VALUE is. The key-based branch then
+      passes the raw, unvalidated VALUE through untouched, completely
+      bypassing the allow-list. When that value later builds an ORDER BY /
+      GROUP BY clause (which cannot use `$wpdb->prepare()` placeholders for
+      identifiers) the result is SQL injection (CWE-89).
+
+      Fix: reject numeric keys before treating the key-based branch as a
+      legitimate shortcut lookup, e.g. `!is_numeric($key) &&
+      array_key_exists($key, $allowed)`, or drop the key-based fallback
+      entirely and validate only the value with a strict allow-list /
+      `sanitize_sql_orderby()`.
+
+      TRIAGE GUIDANCE
+      ───────────────────────────────────────────────────────────────────
+      TRUE POSITIVE indicators:
+        - The allow-list array (`$allowed` here) is built from `array_keys()`,
+          `array_merge()` of `array_keys()` results, or any construct that
+          yields plain integer indices rather than a hand-written associative
+          map of shortcut-name => real-column.
+        - The value that survives this branch (the loop's `$value`) is later
+          concatenated or interpolated into a raw SQL string (ORDER BY, GROUP
+          BY, LIMIT) without `$wpdb->prepare()`.
+        - The array being iterated can be populated from `$_GET`/`$_POST`/
+          `$_REQUEST` using array syntax, or from a REST parameter that
+          accepts an array.
+
+      FALSE POSITIVE indicators:
+        - The allow-list array is a genuinely associative, hand-written map
+          (e.g. `array('id' => 'event_id', 'name' => 'event_name')`) with no
+          risk of colliding integer keys — confirm by reading its definition.
+        - The key-based branch already rejects numeric keys before checking
+          membership (the fix for this class).
+        - The surviving value is cast to int/float or re-validated against a
+          strict allow-list before reaching any SQL sink.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: LOW
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/functions/sanitize_sql_orderby/
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+    patterns:
+      - pattern-inside: |
+          foreach ($ARR as $KEY => $VAL) {
+            ...
+          }
+      - pattern: |
+          if (in_array($VAL, $ALLOWED, ...)) {
+            ...
+          } elseif (array_key_exists($KEY, $ALLOWED)) {
+            ...
+          }
+      # Fix-derived FP guard: the confirmed patch for this class rejects a
+      # numeric key before treating it as a legitimate associative shortcut.
+      - pattern-not: |
+          if (in_array($VAL, $ALLOWED, ...)) {
+            ...
+          } elseif (!is_numeric($KEY) && array_key_exists($KEY, $ALLOWED)) {
+            ...
+          }
+      - pattern-not: |
+          if (in_array($VAL, $ALLOWED, ...)) {
+            ...
+          } elseif (array_key_exists($KEY, $ALLOWED) && !is_numeric($KEY)) {
+            ...
+          }
+      - pattern-not: |
+          if (in_array($VAL, $ALLOWED, ...)) {
+            ...
+          } elseif (is_string($KEY) && array_key_exists($KEY, $ALLOWED)) {
+            ...
+          }

@@ -1,0 +1,63 @@
+rules:
+  - id: claude.php.wordpress.sqli.sprintf-sql-build
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      sprintf() is used to build a SQL fragment or full query string that
+      reaches a $wpdb query method, bypassing $wpdb->prepare(). Unlike
+      prepare(), sprintf() does NOT apply mysqli_real_escape_string() to %s
+      arguments, so string values are interpolated raw — enabling SQL
+      injection if any argument is user-controlled (CWE-89).
+
+      This covers both a direct inline sprintf() call passed as the query
+      argument, and the "sprintf() result assigned to a variable, then that
+      variable spliced into a separately-built query string" idiom (the
+      sprintf() output is not itself the query text — it is a fragment that
+      gets concatenated or interpolated into a larger query string one or
+      more statements later).
+
+      Triage: if all format specifiers are %d or %f and arguments are
+      verified numeric, this may be safe. If %s is used with any
+      user-controlled (including second-order, previously-stored) value,
+      this is exploitable.
+      Fix: replace sprintf() with $wpdb->prepare().
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+        - https://cwe.mitre.org/data/definitions/89.html
+      # KNOWN ENGINE LIMITATION (recent Semgrep): a fully-qualified boolean
+      # literal (\true or \false, as emitted by vendor-prefixing tools like
+      # php-scoper) anywhere in the file silently zeroes out every taint-mode
+      # finding in that file, even in an unrelated function; \null does not
+      # trigger it. This is a taint-engine parsing artifact, not a pattern
+      # gap in this rule — manually re-check taint-mode results on any file
+      # containing \true/\false literals.
+    pattern-sources:
+      # The sprintf() call itself is the source: its output carries whatever
+      # its arguments carried, with zero escaping applied by sprintf().
+      # Taint mode only reports when this reaches a $wpdb sink below, so
+      # marking every sprintf() call tainted does not by itself cause noise.
+      - pattern: sprintf(...)
+    pattern-sanitizers:
+      - pattern: $WPDB->prepare(...)
+      - pattern: esc_sql(...)
+      - pattern: (int) $X
+      - pattern: (float) $X
+      - pattern: intval(...)
+      - pattern: absint(...)
+    pattern-sinks:
+      - patterns:
+          - pattern: $WPDB->$METHOD(...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(query|get_results|get_row|get_var|get_col)$

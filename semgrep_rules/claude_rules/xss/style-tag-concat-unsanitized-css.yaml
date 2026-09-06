@@ -1,0 +1,238 @@
+rules:
+  - id: claude.php.wordpress.xss.style-tag-concat-unsanitized-css
+    languages: [php]
+    severity: HIGH
+    message: |
+      Either (a) a variable is concatenated directly between a literal
+      <style> opening tag and a literal </style> closing tag, or (b) a
+      value built from apply_filters() output is written to a static file
+      via a file-persistence sink (file_put_contents(), fwrite(), a
+      ::save()/->save() wrapper) — in both cases with no
+      wp_strip_all_tags(), strip_tags(), esc_html(), or CSS-safe sanitizer
+      (safecss_filter_attr(), sanitize_hex_color()) applied to it. Browsers
+      treat the content of a <style> element as raw text up to the first
+      literal "</style>" sequence, so a stored/fetched value containing
+      </style><script>...</script> breaks out of CSS context and executes
+      as HTML/JavaScript (CWE-79). This shape is common in "critical CSS" /
+      custom-CSS / cache-optimization features that persist CSS content
+      obtained from an external service, callback, or admin-settable field
+      to a static file and later echo that file's content verbatim inside
+      a <style> wrapper on every page load — sanitizing at either the
+      persistence step or the echo step closes the same hole.
+
+      TRIAGE: confirm the variable's value can be influenced by something
+      other than the plugin's own hardcoded developer output (an external
+      API/service response, a stored option/meta value, request data) and
+      that no sanitizer wraps it anywhere between storage/receipt and this
+      concatenation or file write. A hit is a false positive only if the
+      variable is a hardcoded literal or already passed through one of the
+      listed sanitizers.
+
+      Fix: apply wp_strip_all_tags() (or safecss_filter_attr() for
+      attribute-style CSS values) to the value before it is persisted or
+      echoed inside the <style> tag.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/79.html
+        - https://developer.wordpress.org/reference/functions/wp_strip_all_tags/
+        - https://developer.wordpress.org/reference/functions/safecss_filter_attr/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    pattern-either:
+      # Branch 1: '<style ...>' . $VAR . '</style>' — the whole expression is
+      # exactly the open tag, the value, and the close tag (chains of 3+
+      # terms collapse to this shape at the outermost node since PHP's `.`
+      # is left-associative: $LEFT may itself be a nested concatenation,
+      # e.g. an inserted attribute fragment before the value).
+      - patterns:
+          - pattern: $LEFT . $VAR . $RIGHT
+          - metavariable-regex:
+              metavariable: $LEFT
+              regex: "(?is).*<style\\b.*"
+          - metavariable-regex:
+              metavariable: $RIGHT
+              regex: "(?is).*</style.*"
+          # $VAR and $RIGHT must each be a single leaf expression, not a
+          # further concatenation. Without this, Semgrep's matcher can bind
+          # $RIGHT to a compound tail (e.g. "$other_var.'</style>'") and
+          # $VAR to an unrelated earlier variable in the same chain, which
+          # (a) reports the wrong variable as the tainted one and (b) lets
+          # a same-named sanitizer-reassignment guard below miss the real
+          # value entirely because it never binds to it.
+          - metavariable-pattern:
+              metavariable: $VAR
+              patterns:
+                - pattern-not: $A . $B
+          - metavariable-pattern:
+              metavariable: $RIGHT
+              patterns:
+                - pattern-not: $A . $B
+          # Exclude: $VAR is directly a call to a CSS/HTML sanitizer.
+          - metavariable-pattern:
+              metavariable: $VAR
+              patterns:
+                - pattern-not: wp_strip_all_tags(...)
+                - pattern-not: strip_tags(...)
+                - pattern-not: esc_html(...)
+                - pattern-not: esc_attr(...)
+                - pattern-not: safecss_filter_attr(...)
+                - pattern-not: sanitize_hex_color(...)
+                - pattern-not: htmlspecialchars(...)
+                - pattern-not: htmlentities(...)
+                - pattern-not: intval(...)
+                - pattern-not: absint(...)
+                - pattern-not: (int) $X
+                - pattern-not: (float) $X
+          # Exclude: $VAR was sanitized earlier in the same function — an
+          # assign-then-use idiom the concat-site check alone cannot see.
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = wp_strip_all_tags(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = strip_tags(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = safecss_filter_attr(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = esc_html(...);
+                ...
+              }
+      # Branch 2: same shape but with trailing content appended after the
+      # closing tag — '<style ...>' . $VAR . '</style>' . $TAIL. Common in
+      # head-buffer/accumulator code: $html_head = '<style>' . $css .
+      # '</style>' . $html_head;
+      - patterns:
+          - pattern: $LEFT . $VAR . $RIGHT . $TAIL
+          - metavariable-regex:
+              metavariable: $LEFT
+              regex: "(?is).*<style\\b.*"
+          - metavariable-regex:
+              metavariable: $RIGHT
+              regex: "(?is).*</style.*"
+          - metavariable-pattern:
+              metavariable: $VAR
+              patterns:
+                - pattern-not: $A . $B
+          - metavariable-pattern:
+              metavariable: $RIGHT
+              patterns:
+                - pattern-not: $A . $B
+          - metavariable-pattern:
+              metavariable: $VAR
+              patterns:
+                - pattern-not: wp_strip_all_tags(...)
+                - pattern-not: strip_tags(...)
+                - pattern-not: esc_html(...)
+                - pattern-not: esc_attr(...)
+                - pattern-not: safecss_filter_attr(...)
+                - pattern-not: sanitize_hex_color(...)
+                - pattern-not: htmlspecialchars(...)
+                - pattern-not: htmlentities(...)
+                - pattern-not: intval(...)
+                - pattern-not: absint(...)
+                - pattern-not: (int) $X
+                - pattern-not: (float) $X
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = wp_strip_all_tags(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = strip_tags(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = safecss_filter_attr(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = esc_html(...);
+                ...
+              }
+      # Branch 3: double-quoted string interpolation — "<style>{$var}</style>"
+      # or "<style>$var</style>". PHP desugars this to a single interpolated
+      # string node rather than a chain of `.` operators, so it needs a
+      # separate text-level check on the assigned/appended string.
+      - patterns:
+          - pattern-either:
+              - pattern: $DEST = $STR
+              - pattern: $DEST .= $STR
+          - metavariable-regex:
+              metavariable: $STR
+              regex: "(?is).*<style\\b[^>]*>\\s*\\{?\\$[A-Za-z_][A-Za-z0-9_]*.*</style.*"
+      # Branch 4: the persistence-side counterpart of branches 1-3. A value
+      # built from apply_filters() output (the common "let integrations
+      # modify this content" idiom) is written to a static file through a
+      # file-persistence sink, with no tag-stripping sanitizer applied in
+      # between. The file is typically re-read and echoed raw inside a
+      # <style> wrapper elsewhere (branches 1-3's shape) — sanitizing here,
+      # before the value ever reaches disk, is the equally valid fix point
+      # the same class of plugin (cache/critical-CSS optimizers) actually
+      # uses.
+      - patterns:
+          - pattern-either:
+              - pattern: file_put_contents($PATH, $VAR)
+              - pattern: fwrite($FH, $VAR)
+              - pattern: $CLS::save($PATH, $VAR, ...)
+              - pattern: $OBJ->save($PATH, $VAR, ...)
+          - pattern-inside: |
+              function $F(...) {
+                ...
+                $VAR = apply_filters(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = wp_strip_all_tags(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = strip_tags(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = esc_html(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = safecss_filter_attr(...);
+                ...
+              }

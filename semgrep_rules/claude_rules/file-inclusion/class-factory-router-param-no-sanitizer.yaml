@@ -1,0 +1,103 @@
+rules:
+  - id: claude.php.wordpress.lfi.class-factory-router-param-no-sanitizer
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A request value is read through a custom request-getter wrapper —
+      a static or instance helper method whose name signals it fetches a
+      request var/param/input (the common WP-plugin substitute for direct
+      $_GET/$_POST access) — and passed unsanitized as the selector
+      argument to a "factory-by-name" dispatcher call: a static or
+      instance method whose name signals it resolves and loads a
+      module/class/component/controller by that name (get_model,
+      load_module, get_class, get_component, ...), commonly chained
+      straight into a dynamic method invocation on the returned object
+      (Factory::get_module($name)->$task()). This is the AJAX/router
+      dispatch idiom many WordPress plugin frameworks (ticketing,
+      helpdesk, CRM, page builders) use to route a request to a
+      per-module handler class. The factory conventionally builds
+      "$dir . $name . '.php'" internally and includes it directly with no
+      containment check, so an unsanitized name selects an arbitrary
+      local file: unauthenticated Local File Inclusion (CWE-98 / CWE-22).
+      Reduce the selector to a safe charset (basename(),
+      sanitize_file_name(), sanitize_key()) or validate it against a
+      hardcoded allow-list of legitimate module names before it reaches
+      the factory call. Blacklisting a single traversal token (only
+      stripping ".." while leaving "/" in place) is insufficient on its
+      own — either strip both, or prefer an allow-list.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program ('PHP Remote File Inclusion')"
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/98.html
+        - https://cwe.mitre.org/data/definitions/22.html
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          # Custom request-getter wrapper convention: a static or instance
+          # method whose name signals it fetches a request var/param/input
+          # — the common substitute WP plugins write instead of touching
+          # $_GET/$_POST directly (own-sanitizing request accessor).
+          - patterns:
+              - pattern-either:
+                  - pattern: $CLASS::$SRC(...)
+                  - pattern: $OBJ->$SRC(...)
+              - metavariable-regex:
+                  metavariable: $SRC
+                  regex: "(?i).*get_?(var|param|input|request)\\w*$"
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $CLASS::$FACTORY($X, ...)
+              - pattern: $OBJ->$FACTORY($X, ...)
+          - metavariable-regex:
+              metavariable: $FACTORY
+              # Deliberately permits any identifier prefix before the
+              # keyword (plugin-prefixed method names such as
+              # "MJTC_getModel" are the common real-world shape) —
+              # traded off against the modest risk of an unrelated method
+              # name that happens to end the same way (e.g. "WidgetModel").
+              regex: "(?i).*(get|load|fetch|resolve)_?(model|module|class|component|controller|object|addon|handler)s?$"
+          - focus-metavariable: $X
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_file_name(...)
+          - pattern: basename(...)
+          # sanitize_key() output is [a-z0-9_-] only — traversal is impossible.
+          - pattern: sanitize_key(...)
+          - pattern: realpath(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          - pattern: sanitize_title(...)
+          - pattern: validate_file(...)
+          # Value confirmed to be a member of a fixed, known set before use.
+          - pattern: "in_array($X, $ARR, true) ? $X : $DEFAULT"
+          # Blacklist-strip fix idiom that removes traversal AND path-
+          # separator characters entirely (as opposed to only ".."), which
+          # blocks moving into any subdirectory at all — effective when
+          # both are present, even though neither call alone would be.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      $X = str_replace("..", $R1, $X);
+                      ...
+                      $X = str_replace("/", $R2, $X);
+                  - pattern: |
+                      $X = str_replace('..', $R1, $X);
+                      ...
+                      $X = str_replace('/', $R2, $X);

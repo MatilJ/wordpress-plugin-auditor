@@ -1,0 +1,101 @@
+rules:
+  - id: claude.php.wordpress.xss.sanitizer-output-entity-decode-reintroduction
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A value returned by a tag-stripping sanitizer (wp_kses($X, 'strip'),
+      strip_tags(), wp_strip_all_tags(), sanitize_text_field(), or
+      sanitize_textarea_field()) — or by an HTML-encoding function
+      (esc_html(), esc_attr(), esc_textarea()) — is passed to
+      html_entity_decode() or htmlspecialchars_decode(). Decoding HTML
+      character references AFTER the tags have been stripped/encoded can
+      reintroduce literal markup the prior call just neutralized: an attacker
+      submits an entity-encoded payload (&lt;script&gt;...&lt;/script&gt;)
+      that contains no literal tag syntax, so the stripping call has nothing
+      to strip, and the decode call then converts the entities back into a
+      live tag before any further escaping happens.
+
+      For the esc_html()/esc_attr()/esc_textarea() sources specifically, the
+      round-trip is direct rather than incidental: these functions encode via
+      htmlspecialchars() under the hood, and html_entity_decode() /
+      htmlspecialchars_decode() is the exact inverse operation — a literal
+      `<script>` the escaper just encoded to `&lt;script&gt;` is fully
+      restored to `<script>` by the very next decode call, independent of
+      whether the original payload used literal tags or pre-encoded entities.
+
+      This is NOT the same as the (non-exploitable) "entity bypass myth":
+      that concerns entities that stay encoded all the way to the browser,
+      which the browser's own HTML tokenizer renders as inert text in a
+      PCDATA context. Here the decode runs server-side, before the HTTP
+      response is generated, so any markup it reconstructs is real,
+      sent-over-the-wire HTML.
+
+      Exploitability still depends on what happens to the decoded value
+      afterward. This is only a confirmed Stored/Reflected XSS when the
+      decoded value reaches an output sink (echo, a template, an AJAX/REST
+      response, innerHTML) without a subsequent full HTML escape
+      (esc_html()/esc_attr()/wp_kses()). Trace the decoded variable to its
+      output sink before confirming.
+
+      COMMON FALSE POSITIVE — URL-context reconstruction: the decoded value
+      is subsequently passed through esc_url()/esc_url_raw() (often in a
+      later return/echo statement, not inline-nested with the decode call)
+      before being used as a URL. esc_url_raw() strips `<`/`>` and other
+      HTML-breakout characters regardless of what the decode reconstructed,
+      so this is not exploitable as HTML injection even though the decode
+      itself is real. Trace the decoded variable forward through the rest
+      of the function (including through apply_filters() calls, where a
+      filter is expected to return a value derived from the same variable)
+      to confirm whether esc_url()/esc_url_raw() is applied before the
+      value is ever echoed or returned. Not encoded as a pattern-not here:
+      the decode and the later esc_url_raw() call are typically separate
+      statements rather than an inline-nested call, and reliably tying a
+      later statement's escaping back to the specific decoded variable
+      requires the kind of cross-statement, context-dependent tracing this
+      rule intentionally defers to manual review.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: LOW
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Improper Neutralization Order (sanitize-then-decode reintroduction)"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/79.html
+        - https://cwe.mitre.org/data/definitions/116.html
+        - https://developer.wordpress.org/reference/functions/wp_kses/
+        - https://www.php.net/manual/en/function.html-entity-decode.php
+    pattern-sources:
+      - pattern-either:
+          - pattern: wp_kses($X, 'strip')
+          - pattern: wp_kses($X, array())
+          - pattern: wp_kses($X, [])
+          - pattern: strip_tags($X)
+          - pattern: wp_strip_all_tags($X)
+          - pattern: sanitize_text_field($X)
+          - pattern: sanitize_textarea_field($X)
+          # HTML-encoding functions built on htmlspecialchars(): a later
+          # html_entity_decode()/htmlspecialchars_decode() on the same value
+          # is the exact inverse of the encoding these perform, not merely an
+          # incidental reintroduction — see message for the direct round-trip.
+          - pattern: esc_html($X)
+          - pattern: esc_attr($X)
+          - pattern: esc_textarea($X)
+    # Numeric-cast sanitizers guarantee the decoded value can never contain
+    # HTML metacharacters, so a subsequent entity-decode call is a no-op.
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+    pattern-sinks:
+      - pattern-either:
+          - pattern: html_entity_decode($X)
+          - pattern: html_entity_decode($X, ...)
+          - pattern: htmlspecialchars_decode($X)
+          - pattern: htmlspecialchars_decode($X, ...)

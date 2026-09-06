@@ -1,0 +1,158 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+  # Shortcode callbacks execute when WordPress renders post content containing
+  # [shortcode_tag]. Any user with edit_posts capability (Contributor+) can
+  # insert arbitrary shortcode tags and attributes into draft post content —
+  # the callback runs during preview rendering. A shortcode callback that
+  # performs privileged writes without current_user_can() is Contributor+
+  # Missing Authorization.
+
+  - id: claude.php.wordpress.access-control.shortcode-callback-privileged-write
+    mode: join
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A shortcode callback performs a privileged write operation (update_option,
+      wp_insert_post, wp_mail, wp_remote_post, wp_delete_post, database write,
+      wp_set_auth_cookie) without calling current_user_can(). Shortcodes are
+      Contributor-accessible — any user with edit_posts can embed arbitrary
+      shortcode tags and attributes in draft post content (CWE-862).
+
+      Shortcode attributes ($atts) are fully attacker-controlled and receive
+      no sanitization from WordPress Core — apply the same distrust as $_POST.
+
+      TRIAGE — HIGH FP RATE:
+      1. Locate the add_shortcode() registration and read the callback body.
+      2. The callback may delegate to other methods that contain auth checks —
+         trace the full call chain before confirming.
+      3. Confirm the write operation depends on attacker-controlled shortcode
+         attributes or post content, not hardcoded values.
+      4. Determine CIA impact: option writes and user writes by Contributor =
+         HIGH; wp_mail() = email injection (MEDIUM); wp_remote_post() with
+         admin credentials = credential proxy (HIGH).
+      5. If the shortcode is designed for admin-only use and protected by
+         a conditional check in the callback, this is a FP.
+
+      Fix: add current_user_can('appropriate_cap') at the start of the
+      shortcode callback, returning empty string on failure.
+    join:
+      rules:
+        - id: shortcode-registration
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_shortcode('$TAG', '$CALLBACK');
+                - pattern: add_shortcode('$TAG', array($OBJ, '$CALLBACK'));
+                - pattern: add_shortcode('$TAG', [..., '$CALLBACK']);
+
+        - id: privileged-write-no-cap
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      update_option(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_insert_post(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_update_post(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_delete_post(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_mail(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_remote_post(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      $WPDB->insert(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      $WPDB->update(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      $WPDB->delete(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_set_auth_cookie(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_update_user(...);
+                      ...
+                    }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+
+      on:
+        - 'shortcode-registration.path == privileged-write-no-cap.path'
+        - 'shortcode-registration.$CALLBACK == privileged-write-no-cap.$CALLBACK'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: LOW
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/plugins/shortcodes/
+        - https://developer.wordpress.org/reference/functions/add_shortcode/

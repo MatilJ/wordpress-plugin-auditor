@@ -1,0 +1,71 @@
+rules:
+  - id: claude.php.wordpress.upload.pdf-library-output-unsanitized-filename
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A PDF-generation library's file-output method (the mPDF/TCPDF/FPDF-
+      family Output() call in file-destination mode) writes a rendered
+      document to a path built from a filename component that was produced
+      by str_replace()-based merge-tag/placeholder substitution — a common
+      pattern for an admin-configurable "output filename" template (e.g.
+      "[form-name]-[field]") — with no sanitize_file_name()/sanitize_title()/
+      basename() applied to the substituted value before the write
+      (CWE-552 / CWE-200).
+
+      Because the substitution keys are typically field/merge tags whose
+      replacement values come from submitted form data, and the resulting
+      filename is otherwise static per form/per admin configuration, the
+      written file lands at a predictable path inside a normally
+      web-accessible directory (wp_upload_dir()) with no access control of
+      its own — any party who learns or predicts the filename can retrieve
+      another user's generated document (which frequently embeds the full
+      submitted data) repeatedly, indefinitely.
+
+      Fix: call sanitize_file_name() on the substituted filename component
+      immediately before it is used in a path, and/or mix in a random or
+      per-submission-unique component (wp_generate_password(),
+      a submission ID) so the filename cannot be predicted or reused across
+      submissions.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-552: Files or Directories Accessible to External Parties"
+        - "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Information Disclosure"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/552.html
+        - https://cwe.mitre.org/data/definitions/200.html
+        - https://developer.wordpress.org/reference/functions/sanitize_file_name/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/vendor-prefixed/**"
+        - "**/node_modules/**"
+    pattern-sources:
+      - pattern: str_replace($KEYS, $VALUES, $BASE)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $PDF->Output($DST, $MODE)
+              - pattern: $PDF->output($DST, $MODE)
+          - metavariable-regex:
+              metavariable: $MODE
+              regex: "^('F'|\"F\"|Destination::FILE)$"
+          - focus-metavariable: $DST
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_file_name(...)
+          - pattern: sanitize_title(...)
+          - pattern: sanitize_key(...)
+          - pattern: basename(...)
+          - pattern: wp_unique_filename(...)
+          - pattern: md5(...)
+          - pattern: sha1(...)
+          - pattern: uniqid(...)

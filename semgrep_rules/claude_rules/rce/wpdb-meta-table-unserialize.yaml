@@ -1,0 +1,68 @@
+rules:
+  - id: claude.php.wordpress.rce.wpdb-meta-table-unserialize
+    languages: [php]
+    severity: HIGH
+    message: |
+      unserialize()/maybe_unserialize() called directly on an array-accessed
+      field named like a database meta-table value column (meta_value,
+      option_value, field_value, setting_value, data_value) OR a dynamically
+      built key ending in a concatenated '_field' suffix literal (the
+      "$row[$name . '_field']" shape used by form-entry/lead storage plugins
+      to distinguish a submitted field's value from its metadata), with no
+      allowed_classes restriction. Plugins that reimplement a WordPress-style
+      key/value meta table with their own custom table — or that store raw
+      per-field form-submission values under a dynamically-suffixed column
+      key — frequently store scalar values without wrapping them in
+      serialize() first — an attacker-controlled string that merely satisfies
+      is_serialized() will still be deserialized on read, independent of
+      whatever object graph the plugin intended to store (CWE-502). Because
+      the row was fetched by plugin code rather than through WP core's
+      get_post_meta()/get_option()/get_user_meta(), this is independently
+      reportable.
+
+      TRIAGE:
+      1. Identify the query that produced this row — is the source table
+         plugin-defined (not wp_postmeta/wp_options/wp_usermeta)? Reads of
+         WP's own core tables route through WP's own unrestricted
+         maybe_unserialize() and are not separately reportable.
+      2. Trace every write path to that column: does any path store a scalar
+         value directly (no serialize() call) sourced from request data,
+         reachable without elevated privilege?
+      3. Inventory magic methods (__wakeup/__destruct/__unserialize/
+         __toString/__call) in the codebase for a usable POP chain gadget.
+    metadata:
+      category: security
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+      owasp: "A08:2021 - Software and Data Integrity Failures"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Insecure Deserialization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/502.html
+        - https://owasp.org/www-community/vulnerabilities/PHP_Object_Injection
+    patterns:
+      - pattern-either:
+          - pattern: unserialize($ROW[$KEY])
+          - pattern: maybe_unserialize($ROW[$KEY])
+      - metavariable-regex:
+          metavariable: $KEY
+          # The last alternative requires the concatenation dot immediately
+          # before a STANDALONE quoted '_field' token (quote-bounded on both
+          # sides), not a bare substring match — this is deliberate: a loose
+          # "_field" substring also matches unrelated literal array keys like
+          # 'custom_fields'/'sorting_fields'/'search_fields' (plural, a single
+          # string-literal key with no concatenation, common in WP plugins
+          # storing an already-serialize()'d settings array under WP core's
+          # own get_post_meta()/update_post_meta()), which is a structurally
+          # different and much noisier shape than this CVE's dynamically
+          # concatenated per-field key — confirmed via a live corpus scan that
+          # a plain "_field" substring produced 64 such false leads before
+          # this anchor was added.
+          regex: ".*(meta_value|option_value|field_value|setting_value|data_value|\\.\\s*['\"]_field['\"]).*"
+      # A two-argument call restricting allowed_classes, or a refactor into a
+      # class-scoped wrapper method (a StaticCall/MethodCall node, not a bare
+      # FuncCall), are the two shapes the real-world fix for this bug takes —
+      # the exact-arity bare function-call pattern above excludes both.

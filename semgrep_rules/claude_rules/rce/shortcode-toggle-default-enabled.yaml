@@ -1,0 +1,59 @@
+rules:
+  - id: claude.php.wordpress.rce.shortcode-toggle-default-enabled
+    languages: [php]
+    severity: HIGH
+    message: |
+      A settings/defaults array sets a shortcode-processing toggle (a boolean
+      key named like *shortcode*) to `true` by default (CWE-94). This is the
+      insecure-default variant of Arbitrary Shortcode Execution: the toggle
+      exists specifically to gate a do_shortcode()/apply_shortcodes() call, or
+      a the_content-style apply_filters() chain that WordPress/ACF binds
+      do_shortcode to at priority 11 by default, before rendering a
+      message/content/template value. When that value can embed data supplied
+      by the current, possibly-unauthenticated request (e.g. via merge-tag /
+      template-placeholder substitution of submitted field values), an
+      attacker can submit a shortcode expression as field data and have it
+      executed the next time the message is rendered, with the toggle already
+      on by default (no explicit opt-in required) — any registered shortcode
+      is reachable.
+
+      esc_html()/sanitize_text_field()/wp_kses_post() applied to the
+      substituted value do NOT strip shortcode bracket syntax, so their
+      presence elsewhere in the flow does not neutralize this default.
+
+      TRIAGE REQUIRED: confirm (a) the message/content value this flag
+      controls can embed raw data from the current request or a prior
+      user submission, and (b) the flag actually gates a
+      do_shortcode()/apply_shortcodes() call or a content filter (e.g.
+      'the_content' or a plugin-defined alias) that has do_shortcode bound
+      to it by default.
+
+      Mitigation: default the toggle to `false` (opt-in, not opt-out), and/or
+      call strip_shortcodes() on the substituted value before it can reach
+      do_shortcode()/apply_shortcodes() or the content-filter chain.
+    metadata:
+      category: security
+      cwe: "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Arbitrary Shortcode Execution"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/94.html
+        - https://developer.wordpress.org/reference/functions/do_shortcode/
+        - https://developer.wordpress.org/reference/hooks/the_content/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          - pattern: array(..., $KEY => true, ...)
+          - pattern: "[..., $KEY => true, ...]"
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: "(?i).*shortcode.*"

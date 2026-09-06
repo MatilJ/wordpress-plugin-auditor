@@ -1,0 +1,98 @@
+rules:
+  # Detects a variable placed directly into an HTML href= or src= attribute
+  # via raw JS string concatenation (the jQuery/vanilla-JS mirror of the PHP
+  # sibling rule string-concat-url-attr-no-esc-url). Two branches: a 3-term
+  # chain ($PREFIX + $VAR + $SUFFIX, the common shape when more markup follows
+  # the attribute) and a 2-term chain ($PREFIX + $VAR, the attribute closes
+  # the concatenation). $PREFIX must be a string literal whose own source text
+  # ends in `href="`/`src="` (or the single-quote equivalent) immediately
+  # followed by the literal's own closing quote delimiter.
+  - id: claude.js.wordpress.xss.href-url-string-concat
+    languages: [js, typescript]
+    severity: MEDIUM
+    message: |
+      A jQuery-wrapped or raw HTML string is built by concatenating a
+      variable directly into a quoted href= or src= attribute value on a
+      tag literal — e.g. `$('<a href="' + url + '" ...>')` or
+      `'<img src="' + src + '" ...>'`. This shape recurs in lightbox/
+      gallery/slider widgets that re-parse a matched element's own
+      href/src attribute to build a thumbnail, "play" link, or embed frame.
+
+      If the concatenated value is read back from another element's own
+      href/src/data attribute rather than freshly constructed by the same
+      function from a whitelisted/regex-stripped token, and that source
+      element's attribute ultimately originates from post/comment content
+      or another user-controlled field, a literal quote character in the
+      value breaks out of the attribute and injects arbitrary
+      attributes/tags — stored or DOM-based XSS (CWE-79).
+
+      Fix: build the tag via `$('<tag/>', {attr: value})` or
+      `$('<tag/>').attr(attr, value)` — jQuery's attribute-object/`.attr()`
+      forms set the DOM attribute directly and never re-parse the value as
+      markup — or encode the value with encodeURIComponent() (or an
+      equivalent dedicated URL/HTML encoder) before concatenation.
+
+      TRIAGE:
+        - Confirm the concatenated variable is read from a DOM attribute
+          (`.attr('href')`, `.attr('src')`, `.prop('href')`, `.data(...)`)
+          of a previously-matched element, not a value the same function
+          just constructed from a whitelisted/regex-stripped token (e.g. a
+          numeric ID or an enum branch) — the latter is not
+          attacker-controlled even though it looks identical structurally.
+        - Trace the source element's href/src back to its origin: post
+          content, comment content, or another field written by an
+          in-scope role (unauthenticated/Subscriber/Customer) makes this a
+          submittable finding; an admin-only settings value does not.
+        - Bundled third-party JS (jquery.*.js under assets/ or similar
+          vendor-looking directories) is NOT automatically safe to skip for
+          this pattern — plugin vendors sometimes fork/patch a bundled
+          slider/lightbox library to add their own attribute-building glue
+          code, which carries the same risk as plugin-authored JS.
+        - A shared "is this URL allowed" validator function referenced via
+          a global (e.g. `window.RLG.isAllowedEmbedUrl(...)`) only
+          neutralizes this sink if it rejects quote/angle-bracket
+          characters anywhere in the string — a validator that only checks
+          protocol/hostname does not prevent attribute breakout.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [javascript, jquery, wordpress]
+      references:
+        - https://cheatsheetseries.owasp.org/cheatsheets/DOM_based_XSS_Prevention_Cheat_Sheet.html
+        - https://api.jquery.com/jQuery/#jQuery-html-attributes
+    paths:
+      exclude:
+        - "*.min.js"
+        - "*-min.js"
+        - "**/node_modules/**"
+    patterns:
+      # Left-associative `+` chains nest as (((A+B)+C)+D)..., so the
+      # href/src-ending literal is only a bare, directly-matchable operand
+      # when it is the FIRST term in the chain. When one or more unrelated
+      # terms precede it (e.g. a class-name fragment concatenated first, then
+      # the tag-opening literal, common in multi-attribute tag builders), the
+      # $A(+$A2) branches below reach it by matching one/two leading terms as
+      # a wildcard before the href/src literal.
+      - pattern-either:
+          - pattern: $PREFIX + $VAR + $SUFFIX
+          - pattern: $PREFIX + $VAR
+          - pattern: $A + $PREFIX + $VAR + $SUFFIX
+          - pattern: $A + $PREFIX + $VAR
+          - pattern: $A + $A2 + $PREFIX + $VAR + $SUFFIX
+          - pattern: $A + $A2 + $PREFIX + $VAR
+      - metavariable-regex:
+          metavariable: $PREFIX
+          # The trailing \\?['\"] pair (twice) allows for an escaped quote
+          # character (\" inside a double-quoted JS string literal) directly
+          # preceding the literal's own closing quote delimiter, in addition
+          # to the unescaped case.
+          regex: "(?i).*(?:href|src)\\s*=\\s*\\\\?['\"]\\s*\\\\?['\"]?$"
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: "^(?!encodeURIComponent\\(|encodeURI\\(|escape\\(|DOMPurify\\.sanitize\\(|escapeHtml\\(|wp\\.escapeHtml\\(|_\\.escape\\(|he\\.encode\\().*"

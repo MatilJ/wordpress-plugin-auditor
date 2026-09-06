@@ -1,0 +1,74 @@
+rules:
+  - id: claude.php.wordpress.access-control.wpdb-direct-postmeta-insert-no-auth
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      Direct $wpdb->insert() or $wpdb->update() on the wp_postmeta table
+      without a current_user_can() capability check or is_protected_meta()
+      guard. Unlike add_post_meta() and update_post_meta(), direct $wpdb
+      operations bypass WordPress's is_protected_meta() check that blocks
+      writes to underscore-prefixed meta keys by non-admin users (CWE-862).
+
+      This enables attackers to inject protected meta keys such as:
+        - _wp_page_template (template injection)
+        - _wp_attached_file (file path manipulation)
+        - _edit_lock (post locking)
+        - _wp_old_slug (redirect manipulation)
+
+      Common in post duplication/cloning/import functionality where plugins
+      copy metadata via $wpdb->insert() for performance, bypassing the WP
+      API protection layer.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - meta_key value originates from iterating over existing post meta
+          (including protected keys) and inserting without filtering.
+        - No is_protected_meta() check before the insert.
+        - No current_user_can() check in the containing function.
+
+      FALSE POSITIVE indicators:
+        - Handler has current_user_can('manage_options') — admin-only (PR:H).
+        - The meta_key is hardcoded to a non-protected key.
+        - is_protected_meta($key) is checked before the insert and protected
+          keys are skipped.
+        - The function is only called from admin-only code paths.
+
+      Fix: Use add_post_meta() or update_post_meta() instead, which call
+      is_protected_meta() internally. Or add explicit filtering:
+        if ( is_protected_meta( $key, 'post' ) ) { continue; }
+
+      Real-world CVE: CVE-2026-2301 (Post Duplicator).
+    patterns:
+      - pattern-either:
+          - pattern: $wpdb->insert($wpdb->prefix . 'postmeta', ...)
+          - pattern: $wpdb->insert($wpdb->prefix . "postmeta", ...)
+          - pattern: $wpdb->insert($wpdb->postmeta, ...)
+          - pattern: $wpdb->insert("{$wpdb->prefix}postmeta", ...)
+          - pattern: $wpdb->update($wpdb->prefix . 'postmeta', ...)
+          - pattern: $wpdb->update($wpdb->prefix . "postmeta", ...)
+          - pattern: $wpdb->update($wpdb->postmeta, ...)
+          - pattern: $wpdb->update("{$wpdb->prefix}postmeta", ...)
+      - pattern-not-inside: |
+          if (<... current_user_can('manage_options') ...>) {
+            ...
+          }
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Arbitrary Content Modification"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/is_protected_meta/
+        - https://developer.wordpress.org/reference/functions/add_post_meta/
+        - https://cwe.mitre.org/data/definitions/862.html

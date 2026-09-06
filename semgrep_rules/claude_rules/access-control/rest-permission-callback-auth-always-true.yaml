@@ -1,0 +1,67 @@
+rules:
+  - id: claude.php.wordpress.access.rest-permission-callback-auth-always-true
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A function with an authentication/authorization verb in its name
+      ('check', 'auth', 'access', 'verify', 'credential', 'validate')
+      unconditionally returns true. If this function is registered as a
+      REST API permission_callback it grants unauthenticated access to the
+      endpoint regardless of its name (CWE-862).
+      Replace with a real capability check: current_user_can('manage_options'),
+      current_user_can('edit_posts'), or equivalent.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      # TRIAGE GUIDANCE:
+      #
+      # This rule catches the pattern of an "auth-named" function whose ENTIRE body
+      # is "return true;" — a placeholder that was never filled with a real check.
+      # The body constraint is strict: any additional statement disqualifies the match.
+      #
+      # Confirmed TP: woo-razorpay 4.8.4 includes/api/auth.php:13-16
+      #   function checkAuthCredentials() { return true; }
+      #   → registered as permission_callback for /wp-json/1cc/v1/giftcard/apply and
+      #     six other 1cc REST endpoints, enabling unauthenticated gift card enumeration.
+      #   Not caught by rest-permission-callback-named-always-true because the function
+      #   name does not contain "permission".
+      #
+      # MANDATORY VERIFICATION STEP:
+      # Grep for the function name in register_rest_route() calls:
+      #   grep -r "permission_callback.*<FunctionName>" .
+      #   grep -r "<FunctionName>" . | grep -i permission
+      # A hit is only a confirmed vulnerability when the function IS used as a
+      # permission_callback. If the function is used elsewhere (helper, condition),
+      # triage as FP.
+      #
+      # COMMON FP PATTERNS:
+      # 1. Feature-flag functions: function checkFeatureEnabled() { return true; }
+      #    Not a permission callback — just a runtime flag. Verify usage.
+      # 2. Test/mock functions: function checkAuthInTest() { return true; }
+      #    In test fixtures, returning true is intentional. Look for *test*/*spec* files.
+      # 3. Public API intentional access: function checkAccessForPublicEndpoint() { return true; }
+      #    Some endpoints are intentionally public (e.g., product listings). Verify
+      #    whether the endpoint exposes sensitive data or performs privileged actions.
+      #
+      # Complements rest-permission-callback-named-always-true which covers functions
+      # with "permission" in the name. This rule extends coverage to "check/auth/
+      # access/verify/credential/validate" naming patterns.
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/register_rest_route/
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/routes-and-endpoints/#permissions-callback
+    # pattern-regex used instead of pattern+metavariable-regex because Semgrep PHP
+    # does not support $FUNC metavariables in function definition positions.
+    # The regex matches functions/methods whose name contains an auth/check verb
+    # and whose entire body is only "return true;" (handles TRUE/True/true variants).
+    # The `(?i)` flag makes all keyword matches case-insensitive.
+    # [^,)] in the parameter list requires 0 or 1 parameter — REST permission_callback
+    # receives at most 1 argument (WP_REST_Request); functions with 2+ parameters
+    # (containing a comma in their parameter list) are not permission callbacks.
+    pattern-regex: '(?i)function\s+\w*(check|auth|access|verify|credential|validate)\w*\s*\([^,)]*\)\s*\{\s*return\s+true\s*;\s*\}'

@@ -1,0 +1,72 @@
+rules:
+  - id: claude.php.wordpress.file.static-marker-decoded-path-file-read
+    languages: [php]
+    severity: HIGH
+    message: |
+      preg_replace_callback() uses a delimiter/marker regex that is a single
+      plain string literal (no per-request unpredictable component
+      concatenated into it), and the callback base64-decodes the captured
+      group and passes the result straight into a file-read or include sink
+      with no path validation (CWE-98 / CWE-22 / CWE-73). The delimiter marks
+      content the code believes it encoded itself earlier in the same pass,
+      but if the string being re-processed (page/post output, a cached
+      buffer, comment or translation content) can also receive attacker
+      input, the attacker can forge the marker and control the decoded path
+      — turning an internal placeholder mechanism into an unauthenticated
+      file read/inclusion primitive.
+      Tie the marker to unpredictable, server-side-only material (e.g. a
+      per-request hash of a secret) so it cannot be forged by content the
+      code did not itself just encode, and separately canonicalize +
+      allow-list the decoded path before using it.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program ('PHP Remote File Inclusion')"
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+        - "CWE-73: External Control of File Name or Path"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — static marker, decoded capture flows to a file sink:
+      #   preg_replace_callback('#%%TAG%%(.*?)%%TAG%%#is', $callback, $buffer);
+      #   // inside $callback: $path = base64_decode(strtok($matches[1], "|"));
+      #   //                    $content = file_get_contents($path);
+      #   -> The delimiter is a fixed literal; anyone who can get
+      #      "%%TAG%%<base64>%%TAG%%" into $buffer before this call runs
+      #      controls $path.
+      #
+      # FALSE POSITIVE — delimiter includes a per-request unpredictable value:
+      #   preg_replace_callback('#%%TAG'.$runtime_hash.'%%(.*?)%%TAG%%#is', ...);
+      #   -> The marker can no longer be forged without knowing $runtime_hash.
+      #
+      # CONTEXT CHECK:
+      #   1. Can the string passed as the subject argument (the 3rd arg)
+      #      contain content from outside the code's own prior encoding pass
+      #      (page output, post/comment content, cached HTML)?
+      #   2. Does the callback body (an inline closure OR a create_function()
+      #      string — this rule matches the callback's raw source text
+      #      either way) use the decoded value as a path with no
+      #      realpath()/basename()/allow-list check?
+      references:
+        - https://cwe.mitre.org/data/definitions/98.html
+        - https://cwe.mitre.org/data/definitions/22.html
+    patterns:
+      # pattern-regex must anchor the match (not a sibling `pattern:`) because
+      # the vulnerable code is frequently inside a create_function() string
+      # literal, which is opaque to the PHP AST — only raw-text matching can
+      # see into it. pattern-inside/pattern-not-inside then add structural
+      # context without shifting the reported location off the regex span.
+      - pattern-regex: base64_decode\s*\([\s\S]{0,400}?\b(file_get_contents\s*\(|readfile\s*\(|fopen\s*\(|include(_once)?\b|require(_once)?\b)
+      - pattern-inside: preg_replace_callback($DELIM, $CALLBACK, $CONTENT, ...)
+      # The patch pattern this rule is grounded in: the delimiter regex is
+      # built by concatenating in an unpredictable, per-request value —
+      # exactly the fix that turns a forgeable static marker into one an
+      # attacker cannot pre-compute.
+      - pattern-not-inside: preg_replace_callback($A . $B, $CALLBACK2, $CONTENT2, ...)
+      - pattern-not-regex: \b(realpath|basename|sanitize_file_name|validate_file|wp_normalize_path)\s*\(

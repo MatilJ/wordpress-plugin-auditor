@@ -1,0 +1,103 @@
+rules:
+  - id: claude.php.wordpress.access-control.rest-dispatch-case-sensitive-route-gate
+    languages: [php]
+    severity: HIGH
+    message: |
+      A REST request-hardening routine — one that strips forbidden/
+      internal-only parameters (or otherwise mutates the request) before a
+      controller callback runs — gates that action on a case-SENSITIVE
+      substring/prefix comparison of $request->get_route() against a
+      hardcoded namespace literal (strpos()/substr()/strncmp() with strict
+      !==/=== 0 semantics). When the route doesn't match, the function
+      returns early WITHOUT performing the strip/hardening.
+
+      WordPress's own REST dispatcher (WP_REST_Server::dispatch() ->
+      match_request_to_handler()) matches the registered route regex with
+      the case-INSENSITIVE `/i` modifier, so a request whose route differs
+      only in letter case (e.g. /Namespace/v1/things instead of
+      /namespace/v1/things) is still routed to the exact same controller —
+      while this gate's case-sensitive check fails to match and the
+      hardening step this function exists to perform is skipped entirely.
+      Any parameter the function meant to strip then survives into the
+      controller with whatever consequence that parameter enables there.
+      In the seeding disclosure the stripped parameter was a raw SQL
+      fragment concatenated straight into a WHERE clause (CWE-89); the same
+      broken-gate shape could just as easily leave a capability-override or
+      internal-only flag reachable. Root cause: CWE-178 (Improper Handling
+      of Case Sensitivity) defeating a security-relevant filter.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - The route comparison uses a case-sensitive string function
+          (strpos/substr/strncmp with strict comparison) with no stripos/
+          strcasecmp/strtolower()/strtoupper() normalization anywhere in
+          the same check.
+        - The same function also contains an unset($request[...]) (or
+          equivalent request-mutating hardening call) on the identical
+          request variable — confirming the early return actually skips a
+          security-relevant action, not just an unrelated log line.
+        - The callback is wired to a whole-API early-dispatch hook (e.g.
+          rest_pre_dispatch) rather than one route's own registered
+          callback, so the evident intent was "run for every request to my
+          namespace" — making the missed-case-variant gap a real bypass,
+          not an intentionally narrow filter.
+
+      FALSE POSITIVE indicators:
+        - The comparison already normalizes case (stripos, strcasecmp, or
+          strtolower()/strtoupper() applied to either operand) before the
+          match.
+        - The parameter-stripping/hardening call runs unconditionally
+          (outside/before the route check), with the check only gating an
+          unrelated side effect.
+        - The compared value is not the REST route (some other,
+          non-request-routing string being prefix-matched).
+    metadata:
+      category: security
+      cwe:
+        - "CWE-178: Improper Handling of Case Sensitivity"
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Improper Access Control"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/178.html
+        - https://cwe.mitre.org/data/definitions/89.html
+    patterns:
+      - pattern-either:
+          - pattern: |
+              if (strpos($REQUEST->get_route(), $PREFIX) !== 0) {
+                return $RESULT;
+              }
+          - pattern: |
+              if (0 !== strpos($REQUEST->get_route(), $PREFIX)) {
+                return $RESULT;
+              }
+          - pattern: |
+              if (substr($REQUEST->get_route(), 0, $LEN) !== $PREFIX) {
+                return $RESULT;
+              }
+          - pattern: |
+              if (strncmp($REQUEST->get_route(), $PREFIX, $LEN) !== 0) {
+                return $RESULT;
+              }
+      - pattern-inside: |
+          function $FUNC(...) {
+            ...
+            unset($REQUEST[$FORBIDDEN]);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (stripos($REQUEST->get_route(), $PREFIX) !== 0) { ... }
+            ...
+          }
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"

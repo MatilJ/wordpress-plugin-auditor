@@ -1,0 +1,68 @@
+rules:
+  - id: claude.php.wordpress.rce.prefixed-dynamic-function-dispatch
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function name is dynamically assembled by interpolating or
+      concatenating a fixed literal prefix with a variable, and the
+      resulting variable is then invoked directly as a callable
+      ($var(...)). Constraining only the literal prefix does not
+      constrain the variable portion — an attacker who influences that
+      portion can select any PHP function sharing the prefix, including
+      unrelated functions never intended to be reachable this way.
+      A function_exists() check on the assembled name is NOT an
+      allowlist: it only confirms *some* function by that name exists,
+      it does not restrict WHICH suffix is permitted (CWE-94 / CWE-470).
+      Validate the variable portion against a strict, explicit allowlist
+      (e.g. in_array(..., true) against a fixed literal list, or a
+      switch/match) before the name is assembled or invoked.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+        - "CWE-470: Use of Externally-Controlled Input to Select Classes or Code ('Unsafe Reflection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Code Injection"
+      technology: [php, wordpress]
+      references:
+        - https://owasp.org/www-community/attacks/Code_Injection
+        - https://www.php.net/manual/en/functions.variable-functions.php
+    patterns:
+      - pattern-either:
+          # $func = "prefix_$suffix"; ... $func(...)
+          - patterns:
+              - pattern-inside: |
+                  $FUNC = $DYNSTR;
+                  ...
+              - pattern: $FUNC(...)
+              - metavariable-regex:
+                  metavariable: $DYNSTR
+                  regex: ^"[^"$]*\$\{?[A-Za-z_]
+          # $func = 'prefix_' . $suffix; ... $func(...)
+          - patterns:
+              - pattern-inside: |
+                  $FUNC = $PREFIX . $VAR;
+                  ...
+              - pattern: $FUNC(...)
+              - metavariable-regex:
+                  metavariable: $PREFIX
+                  regex: ^['"]
+              # $VAR must be an actual variable/expression, not itself a string
+              # literal — 'prefix_' . '_suffix' is two concatenated literals with
+              # zero runtime variability (a compile-time-constant function name),
+              # not attacker-influenceable regardless of context.
+              - metavariable-regex:
+                  metavariable: $VAR
+                  regex: ^(?!['"])
+      # A preceding early-return guard (however the condition is expressed)
+      # is treated as the allowlist check the fix would add.
+      - pattern-not-inside: |
+          if (! $COND) {
+            ...
+            return ...;
+          }
+          ...

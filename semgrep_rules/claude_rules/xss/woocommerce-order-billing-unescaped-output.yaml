@@ -1,0 +1,186 @@
+rules:
+  - id: claude.php.wordpress.xss.woocommerce-order-billing-unescaped-output
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A WooCommerce order billing or shipping address field flows into an output
+      sink without esc_html() escaping. Billing/shipping fields (first_name, city,
+      state, company, address) are stored verbatim by WooCommerce — any customer
+      placing an order controls these values without a WordPress account. If the
+      unescaped value reaches an HTML context (popup notification, email template,
+      jQuery .html()/.appendTo() sink) it constitutes Stored XSS visible to all
+      subsequent site visitors (PR:N, CVSS typically 7.1–8.3).
+
+      TRIAGE: Confirm the tainted value is rendered as HTML, not merely included in
+      a JSON payload that a JS client then inserts via .text() or setAttribute() with
+      a safe method. The vulnerable case is jQuery $(html).appendTo() or innerHTML
+      with the unescaped billing data.
+
+      Fix: esc_html($order->get_billing_first_name()) at every HTML output site.
+      For JSON responses consumed by a jQuery HTML-inject sink, escape before
+      building the JSON payload, not after.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — Stored"
+      technology: [php, wordpress, woocommerce]
+      references:
+        - https://developer.wordpress.org/reference/functions/esc_html/
+        - https://woocommerce.github.io/code-reference/classes/WC-Order.html
+      # Billing/shipping fields are customer-controlled at WooCommerce checkout.
+      # Plugins that embed these fields in popups or AJAX JSON without esc_html()
+      # allow stored XSS for all site visitors via jQuery HTML-inject sinks.
+      # Confirmed TP: live-sales-notifications-for-woocommerce 2.3.62
+      #   class-common.php:77-80 get_billing_first_name/city/state → searchReplace()
+      #   HTML concat → getOrders() JSON echo → notification-popup.js appendTo().
+    paths:
+      exclude:
+        - "**/freemius/**"
+    pattern-sources:
+      - pattern-either:
+          - pattern: $ORDER->get_billing_first_name()
+          - pattern: $ORDER->get_billing_last_name()
+          - pattern: $ORDER->get_billing_company()
+          - pattern: $ORDER->get_billing_address_1()
+          - pattern: $ORDER->get_billing_address_2()
+          - pattern: $ORDER->get_billing_city()
+          - pattern: $ORDER->get_billing_state()
+          - pattern: $ORDER->get_billing_postcode()
+          - pattern: $ORDER->get_billing_phone()
+          - pattern: $ORDER->get_customer_note()
+          - pattern: $ORDER->get_shipping_first_name()
+          - pattern: $ORDER->get_shipping_last_name()
+          - pattern: $ORDER->get_shipping_company()
+          - pattern: $ORDER->get_shipping_city()
+          - pattern: $ORDER->get_shipping_state()
+          - pattern: $ORDER->get_shipping_address_1()
+          - pattern: $ORDER->get_shipping_address_2()
+    pattern-propagators:
+      # Propagate taint through array key assignment — common intermediate storage
+      # pattern for WC billing data before it reaches template/output functions.
+      - pattern: $ARR[$KEY] = $SRC;
+        from: $SRC
+        to: $ARR
+      - pattern: $ARR[] = $SRC;
+        from: $SRC
+        to: $ARR
+    pattern-sinks:
+      - pattern-either:
+          - pattern: echo $X;
+          - pattern: print $X;
+          - pattern: print($X);
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: esc_html(...)
+          - pattern: esc_attr(...)
+          - pattern: esc_html__(...)
+          - pattern: esc_attr__(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: sanitize_text_field(...)
+          - pattern: sanitize_textarea_field(...)
+          - pattern: wp_strip_all_tags(...)
+          - pattern: tag_escape(...)
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: number_format(...)
+          # JSON response helpers — safe when the JS consumer uses .text() not .html()
+          - pattern: wp_send_json(...)
+          - pattern: wp_send_json_success(...)
+          - pattern: wp_send_json_error(...)
+
+  # Pattern-mode companion: billing field directly echoed or concatenated-then-echoed
+  # without any escaping in the same statement. Catches simpler single-function cases
+  # not requiring cross-function propagation.
+  - id: claude.php.wordpress.xss.woocommerce-order-billing-html-concat
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A WooCommerce order billing/shipping getter is used in an HTML output context
+      without esc_html() wrapping. Customer-controlled fields (first_name, city, state,
+      company, address) are stored verbatim by WooCommerce. Direct concatenation into
+      HTML strings without esc_html() is Stored XSS when rendered in a browser
+      (PR:N — no WordPress account required to place a WooCommerce order).
+
+      Fix: esc_html($order->get_billing_first_name()) or equivalent escaper at
+      the point of HTML concatenation.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — Stored"
+      technology: [php, wordpress, woocommerce]
+      references:
+        - https://developer.wordpress.org/reference/functions/esc_html/
+        - https://woocommerce.github.io/code-reference/classes/WC-Order.html
+    paths:
+      exclude:
+        - "**/freemius/**"
+    patterns:
+      - pattern-either:
+          # billing: first_name, last_name, company, city, state, address, phone
+          - pattern: $A . $ORDER->get_billing_first_name() . $B
+          - pattern: $A . $ORDER->get_billing_first_name()
+          - pattern: $ORDER->get_billing_first_name() . $B
+          - pattern: $A . $ORDER->get_billing_last_name() . $B
+          - pattern: $A . $ORDER->get_billing_last_name()
+          - pattern: $ORDER->get_billing_last_name() . $B
+          - pattern: $A . $ORDER->get_billing_city() . $B
+          - pattern: $A . $ORDER->get_billing_city()
+          - pattern: $ORDER->get_billing_city() . $B
+          - pattern: $A . $ORDER->get_billing_state() . $B
+          - pattern: $A . $ORDER->get_billing_state()
+          - pattern: $ORDER->get_billing_state() . $B
+          - pattern: $A . $ORDER->get_billing_company() . $B
+          - pattern: $A . $ORDER->get_billing_company()
+          - pattern: $ORDER->get_billing_company() . $B
+          - pattern: $A . $ORDER->get_billing_address_1() . $B
+          - pattern: $A . $ORDER->get_billing_address_1()
+          - pattern: $A . $ORDER->get_billing_address_2() . $B
+          - pattern: $A . $ORDER->get_billing_address_2()
+          - pattern: $A . $ORDER->get_billing_phone() . $B
+          - pattern: $A . $ORDER->get_billing_phone()
+          - pattern: $A . $ORDER->get_billing_postcode() . $B
+          - pattern: $A . $ORDER->get_billing_postcode()
+          - pattern: $A . $ORDER->get_customer_note() . $B
+          - pattern: $A . $ORDER->get_customer_note()
+          # shipping: first_name, last_name, company, city, state, address
+          - pattern: $A . $ORDER->get_shipping_first_name() . $B
+          - pattern: $A . $ORDER->get_shipping_first_name()
+          - pattern: $ORDER->get_shipping_first_name() . $B
+          - pattern: $A . $ORDER->get_shipping_last_name() . $B
+          - pattern: $A . $ORDER->get_shipping_last_name()
+          - pattern: $A . $ORDER->get_shipping_city() . $B
+          - pattern: $A . $ORDER->get_shipping_city()
+          - pattern: $A . $ORDER->get_shipping_state() . $B
+          - pattern: $A . $ORDER->get_shipping_state()
+          - pattern: $A . $ORDER->get_shipping_address_1() . $B
+          - pattern: $A . $ORDER->get_shipping_address_1()
+          - pattern: $A . $ORDER->get_shipping_address_2() . $B
+          - pattern: $A . $ORDER->get_shipping_address_2()
+          - pattern: $A . $ORDER->get_shipping_company() . $B
+          - pattern: $A . $ORDER->get_shipping_company()
+      - pattern-not-inside: esc_html(...)
+      - pattern-not-inside: esc_attr(...)
+      - pattern-not-inside: htmlspecialchars(...)
+      - pattern-not-inside: htmlentities(...)
+      - pattern-not-inside: sanitize_text_field(...)
+      - pattern-not-inside: wp_kses(...)
+      - pattern-not-inside: wp_kses_post(...)
+      - pattern-not-inside: wp_strip_all_tags(...)
+      - pattern-not-inside: intval(...)
+      - pattern-not-inside: absint(...)

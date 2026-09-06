@@ -1,0 +1,119 @@
+rules:
+  - id: claude.php.wordpress.sqli.wpdb-orderby-unsafe-sanitizer
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      User-controlled input reaches a $wpdb SQL execution method after passing
+      through only esc_sql(), sanitize_text_field(), esc_attr(), or esc_url_raw().
+      These functions do NOT prevent SQL injection in ORDER BY / LIMIT / unquoted
+      contexts (CWE-89).
+
+      esc_sql() escapes quotes via mysqli_real_escape_string(), but ORDER BY values
+      are not quoted in SQL — attackers do not need quotes to inject subqueries:
+        ORDER BY (SELECT CASE WHEN (...) THEN col1 ELSE col2 END)
+
+      sanitize_text_field() strips HTML tags only — SQL operators (OR, AND),
+      functions (SLEEP, BENCHMARK, CASE), and punctuation (parentheses, semicolons)
+      all pass through unchanged.
+
+      Fix: use one of these ORDER BY defenses:
+        1. Allowlist: in_array($orderby, ['id', 'date', 'title'], true)
+        2. sanitize_sql_orderby($orderby) — regex [a-z0-9_] + ASC/DESC only
+        3. $wpdb->prepare("... ORDER BY %i", $orderby) — WP 6.2+ identifier placeholder
+
+      TRIAGE GUIDANCE
+      ───────────────────────────────────────────────────────────────────
+      TRUE POSITIVE indicators:
+        - The variable is used in ORDER BY, LIMIT, GROUP BY, or other unquoted SQL
+          position after only esc_sql() / sanitize_text_field() / esc_attr().
+        - WP_List_Table subclass with sortable columns using $_GET['orderby'].
+        - AJAX handler accepting 'order' or 'orderby' parameters.
+
+      FALSE POSITIVE indicators:
+        - The variable is used in a quoted WHERE context ('$var') where esc_sql()
+          IS effective. Check the actual SQL position.
+        - An allowlist (in_array / switch with hardcoded columns) guards the value
+          before the SQL call, but Semgrep cannot see across the branch.
+        - The variable flows through sanitize_sql_orderby() but on a different code
+          path from what Semgrep traces.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/sanitize_sql_orderby/
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_query_params()
+          - pattern: $REQUEST->get_body_params()
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $wpdb->query($Q, ...)
+              - pattern: $wpdb->get_results($Q, ...)
+              - pattern: $wpdb->get_row($Q, ...)
+              - pattern: $wpdb->get_var($Q, ...)
+              - pattern: $wpdb->get_col($Q, ...)
+          - focus-metavariable: $Q
+    pattern-sanitizers:
+      - pattern-either:
+          # sanitize_sql_orderby: regex [a-z0-9_] + backtick-wrapped + ASC/DESC + RAND()
+          # Returns false on invalid input. Verified: wp-core formatting.php:2412-2417.
+          - pattern: sanitize_sql_orderby(...)
+          # $wpdb->prepare: parameterized queries. Note: %s wraps in quotes (breaks
+          # ORDER BY syntax), but %i (WP 6.2+) is safe for identifiers.
+          - pattern: $wpdb->prepare(...)
+          # Numeric casts: no SQL metacharacters possible
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          # sanitize_key: [a-z0-9_-] only — no SQL metacharacters
+          - pattern: sanitize_key(...)
+          # sanitize_title: [a-z0-9%-_] only — no SQL metacharacters
+          - pattern: sanitize_title(...)
+          # wp_parse_id_list: array of absint values
+          - pattern: wp_parse_id_list(...)
+          # DateTime/DateTimeImmutable: constructor throws on non-date input,
+          # ->format() outputs only date components — no SQL metacharacters.
+          - pattern: new DateTime(...)
+          - pattern: new DateTimeImmutable(...)
+          # strtotime(): always returns an integer (Unix timestamp) or false.
+          # Neither int nor bool can carry SQL metacharacters.
+          - pattern: strtotime(...)
+          # Array-level numeric sanitization
+          - pattern: array_map('absint', ...)
+          - pattern: array_map('intval', ...)
+          - pattern: array_map('floatval', ...)
+          # NOTE: esc_sql() is intentionally NOT listed as a sanitizer here.
+          # esc_sql() escapes quotes (via mysqli_real_escape_string), which protects
+          # quoted string contexts (WHERE col = 'val'). But ORDER BY values are
+          # NOT quoted — injection payloads like (SELECT ...) or SLEEP(5) do not
+          # contain quotes and pass through esc_sql() unchanged.
+          #
+          # NOTE: sanitize_text_field() is intentionally NOT listed as a sanitizer.
+          # It strips HTML tags only. SQL operators (OR, AND), functions (SLEEP,
+          # BENCHMARK, CASE), parentheses, and semicolons all pass through.
+          #
+          # NOTE: esc_attr() is intentionally NOT listed as a sanitizer.
+          # It encodes HTML entities (& < > " ') only — no SQL protection.
+          #
+          # NOTE: esc_url_raw() is intentionally NOT listed as a sanitizer.
+          # URL validation only — single quotes survive in path/query components.

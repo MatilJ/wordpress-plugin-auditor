@@ -1,0 +1,45 @@
+rules:
+  - id: claude.php.wordpress.xss.preg-replace-html-attr-strip
+    languages: [generic]
+    severity: WARNING
+    message: |
+      preg_replace() used to strip or modify HTML attributes from content.
+      Greedy/lazy quantifiers (.*?, .*, .+, [^"]*) in the regex pattern can
+      match across attribute boundaries when an attacker crafts input with
+      mixed quote types (single inside double or vice versa). This allows
+      the regex to consume more than intended, shifting or promoting
+      attacker-injected attributes (e.g., onfocus, autofocus) into the
+      element — resulting in XSS (CWE-79). This pattern is called "RegExSS."
+      HIGH FP RATE — many hits are element removal (entire <tag>...</tag>) or
+      internal HTML cleanup. Prioritize hits where: (1) the content is
+      user-controllable (post content, comments, shortcode attrs); (2) the
+      regex strips a single attribute, not an entire element; (3) no proper
+      escaping (esc_attr, wp_kses) follows the preg_replace.
+      Fix: replace regex-based HTML manipulation with a proper DOM parser
+      such as WP_HTML_Tag_Processor (WordPress 6.2+), DOMDocument, or
+      wp_kses() with a restricted allowed-tags list.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — RegExSS"
+      technology: [php, wordpress]
+      references:
+        - https://sec.stealthcopter.com/regexss
+        - https://www.wordfence.com/threat-intel/vulnerabilities/id/2d8e7f45-7a53-4d83-81b9-c12fbb5df06e
+    patterns:
+      # Match preg_replace where regex contains attr="..." with a greedy quantifier.
+      # Requires $var = assignment to exclude comments.
+      - pattern-regex: "\\$\\w+\\s*=\\s*preg_replace\\s*\\(\\s*['\"/\\#@~].*\\w+\\\\?=\\\\?['\"].*(\\.\\*\\??|\\.\\+\\??|\\[\\^['\"][^\\]]*\\][*+?]).*?['\"/\\#@~]\\s*,"
+      # Exclude BBCode converters: regex contains literal \[ (escaped square bracket)
+      - pattern-not-regex: "\\\\\\["
+      # Exclude <script>/<style> element removal
+      - pattern-not-regex: "<script|<\\\\/script|<style|<\\\\/style"
+      # Exclude JSON-LD structured data removal
+      - pattern-not-regex: "application.ld|ld\\+json"
+      # Exclude smiley/emoticon patterns
+      - pattern-not-regex: "(?i)smiley|emoticon|SMILIES_PATH|EMO_DIR"

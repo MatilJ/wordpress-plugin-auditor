@@ -1,0 +1,72 @@
+rules:
+  - id: claude.php.wordpress.rce.callback-function-user-input
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      User-controlled input flows into the callback argument of a PHP function
+      that accepts callbacks (array_map, array_filter, array_walk, usort,
+      preg_replace_callback, ob_start, register_shutdown_function, etc.).
+      An attacker can specify arbitrary PHP functions as the callback,
+      enabling remote code execution (CWE-94).
+      Validate callback values against a strict allowlist before use.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Code Injection"
+      technology: [php, wordpress]
+      references:
+        - https://www.php.net/manual/en/function.call-user-func.php
+        - https://gist.github.com/mccabe615/b0907514d34b2de088c4996933ea1720
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+    pattern-propagators:
+      - pattern: wp_unslash($INPUT)
+        from: $INPUT
+        to: return
+      - pattern: stripslashes_deep($INPUT)
+        from: $INPUT
+        to: return
+      - pattern: wp_parse_args($INPUT, ...)
+        from: $INPUT
+        to: return
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: (int) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: sanitize_key(...)
+          - pattern: sanitize_title(...)
+          - pattern: sanitize_html_class(...)
+          - pattern: sanitize_file_name(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: array_map($CALLBACK, ...)
+              - pattern: array_filter($ARR, $CALLBACK, ...)
+              - pattern: array_walk($ARR, $CALLBACK, ...)
+              - pattern: array_walk_recursive($ARR, $CALLBACK, ...)
+              - pattern: usort($ARR, $CALLBACK)
+              - pattern: uasort($ARR, $CALLBACK)
+              - pattern: uksort($ARR, $CALLBACK)
+              - pattern: preg_replace_callback($PAT, $CALLBACK, ...)
+              - pattern: ob_start($CALLBACK)
+              - pattern: register_shutdown_function($CALLBACK, ...)
+              - pattern: spl_autoload_register($CALLBACK, ...)
+              - pattern: set_error_handler($CALLBACK, ...)
+              - pattern: set_exception_handler($CALLBACK)
+              - pattern: array_reduce($ARR, $CALLBACK, ...)
+          - focus-metavariable: $CALLBACK

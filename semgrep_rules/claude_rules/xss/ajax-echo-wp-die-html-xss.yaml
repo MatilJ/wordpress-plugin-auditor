@@ -1,0 +1,287 @@
+rules:
+  - id: claude.php.wordpress.xss.ajax-echo-wp-die-html-xss
+    languages: [php]
+    severity: HIGH
+    message: |
+      AJAX handler echoes data then calls wp_die()/die()/exit without setting
+      Content-Type to application/json. WP Core _ajax_wp_die_handler()
+      (functions.php) does NOT set Content-Type — browser defaults to text/html,
+      rendering any HTML/script in the echoed value. Use wp_send_json(),
+      wp_send_json_success(), or wp_send_json_error() instead, which explicitly
+      set Content-Type: application/json.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_send_json/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                echo $DATA;
+                ...
+                wp_die(...);
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                echo $DATA;
+                ...
+                die(...);
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                echo $DATA;
+                ...
+                die;
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                echo $DATA;
+                ...
+                exit;
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                echo $DATA;
+                ...
+                exit(...);
+              }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            header(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            wp_send_json(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            wp_send_json_success(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            wp_send_json_error(...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            echo esc_html(...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            echo esc_attr(...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            echo wp_json_encode(...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            echo json_encode(...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            echo wp_kses_post(...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            echo wp_kses(...);
+            ...
+          }
+      # sanitize_text_field()/sanitize_textarea_field() strip literal tag
+      # syntax (via strip_tags()) before the value reaches this plain-body
+      # echo — the same "entity bypass is not exploitable in a PCDATA echo
+      # context" reasoning already applied elsewhere in this rule corpus
+      # (no innerHTML/attribute-breakout context exists here, since the sink
+      # is wp_die()'s default text/html body).
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            echo sanitize_text_field(...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            echo sanitize_textarea_field(...);
+            ...
+          }
+      # A translation-function call whose message argument is a string
+      # literal (not a variable) returns developer-authored text — no
+      # attacker input can reach the echoed value regardless of locale.
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            echo __("...", "...");
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            echo __("...");
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            echo esc_html__("...", "...");
+            ...
+          }
+      # A concatenation whose only dynamic segment is wrapped in a known
+      # escaping function, bookended by literal string content on one or
+      # both sides, is safe — the "..." string-content wildcard matches
+      # only actual string literals, not variables or further concatenation,
+      # so this cannot mask an unescaped operand hiding in a literal slot.
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            echo "..." . esc_attr(...) . "...";
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            echo "..." . esc_html(...) . "...";
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            echo "..." . acf_esc_attrs(...) . "...";
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            echo "..." . acf_esc_html(...) . "...";
+            ...
+          }
+      # A variable assigned via esc_url() on a prior line, then wrapped in
+      # wp_json_encode()/json_encode() inside a literal-bookended concat
+      # echo, is safe regardless of what the literal bookend actually is
+      # (script block, HTML attribute, or plain body text): esc_url()'s
+      # allowlist (wp-core-reference.md) excludes `<`, `>`, and `"` outright,
+      # so no HTML/attribute/script breakout character can survive into the
+      # JSON-encoded output. This is narrower than accepting any
+      # literal-bookended encode() call unconditionally — a bookend that
+      # happens to land in an HTML attribute context is NOT safe from a
+      # bare (non-esc_url'd) encode() alone, since json_encode() does not
+      # escape a literal double-quote the same way an HTML parser needs.
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            $SAFE = esc_url(...);
+            ...
+            echo "..." . wp_json_encode($SAFE) . "...";
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            $SAFE = esc_url(...);
+            ...
+            echo "..." . json_encode($SAFE) . "...";
+            ...
+          }
+      # error_get_last()'s own message/file/line fields are PHP-engine-
+      # generated diagnostic text describing the interpreter's own fatal
+      # error state, not attacker-supplied payload content — a shutdown
+      # handler that echoes them (typically gated on a non-default debug
+      # flag) is not an XSS sink in the sense this rule targets.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $ERR = error_get_last();
+            ...
+            echo <... $ERR ...>;
+            ...
+          }
+      # manage_options gate: the highest-privilege core WP capability, held
+      # only by Administrators by default. Since this rule's threat model is
+      # a reflected/self-response echo (the same request's own AJAX reply,
+      # not a stored value shown to other users), a manage_options-gated
+      # handler only ever reflects data back to the Administrator who made
+      # the request — PR:H, consistent with the manage_options sanitizer
+      # already applied in this rule corpus's other access-control rules
+      # (rest-get-post-content-no-per-resource-auth, media-sideload-no-upload-cap).
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if (!current_user_can('manage_options')) return false;
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if (!current_user_can("manage_options")) return false;
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if (!current_user_can('manage_options')) {
+              ...
+            }
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if (!current_user_can("manage_options")) {
+              ...
+            }
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            current_user_can('manage_options');
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            current_user_can("manage_options");
+            ...
+          }
+      # A pure string literal (no interpolated variable, no concatenation)
+      # is fixed at write-time and can never carry attacker-controlled
+      # content, regardless of what follows it.
+      - metavariable-regex:
+          metavariable: $DATA
+          regex: (?s)^(?!('[^']*'|"[^"$]*")$).*$
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"

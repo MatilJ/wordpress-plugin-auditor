@@ -1,0 +1,114 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+  - id: claude.php.wordpress.info-disclosure.rest-prepare-filter-weak-gate-field-restore
+    mode: join
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function registered on a rest_prepare_* filter (rest_prepare_user,
+      rest_prepare_post, rest_prepare_{post_type}, rest_prepare_comment, etc.)
+      mutates the response data and writes it back via $response->set_data(),
+      but the function body contains no current_user_can() check.
+
+      WordPress Core's REST controllers apply field-level capability redaction
+      BEFORE rest_prepare_* filters run — for example,
+      WP_REST_Users_Controller::prepare_item_for_response() withholds the
+      'roles' field unless the viewer has list_users or edit_user. A
+      rest_prepare_* callback that unconditionally (or under a weaker check
+      such as is_user_logged_in()) restores a field Core just redacted
+      re-exposes that data to viewers Core deliberately excluded — the
+      capability gate is bypassed at the filter layer, not the endpoint layer
+      (CWE-862 root cause, CWE-200 impact).
+
+      TRIAGE: confirm the field being restored is one WP Core actually redacts
+      by capability (e.g. 'roles' on users) — a filter re-adding a field Core
+      never redacted in the first place is not this bug.
+    join:
+      rules:
+        - id: rest-prepare-hook-registration
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_filter($HOOK, '$FUNC', ...)
+                - pattern: add_filter($HOOK, $FUNC, ...)
+            # $HOOK captures the whole quoted string; metavariable-regex uses
+            # prefix-anchored match semantics, so a leading .* is required to
+            # match past any literal prefix before "rest_prepare_".
+            - metavariable-regex:
+                metavariable: $HOOK
+                regex: "(?i).*rest_prepare_.*"
+
+        - id: set-data-handler-no-capability-check
+          languages: [php]
+          patterns:
+            - pattern: |
+                function $FUNC($RESP, $OBJ, $REQUEST) {
+                  ...
+                  $RESP->set_data($DATA);
+                  ...
+                }
+            - pattern-not: |
+                function $FUNC($RESP, $OBJ, $REQUEST) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not: |
+                function $FUNC($RESP, $OBJ, $REQUEST) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            # Exclude: call to a custom capability-wrapper function whose name
+            # follows common WP plugin capability-check naming conventions
+            # (see the sibling access-control wrapper-name exclusions in this
+            # ruleset for rationale — same dominant cross-rule FP driver).
+            - pattern-not:
+                patterns:
+                  - pattern: |
+                      function $FUNC($RESP, $OBJ, $REQUEST) {
+                        ...
+                        $WRAPCHECK(...);
+                        ...
+                      }
+                  - metavariable-regex:
+                      metavariable: $WRAPCHECK
+                      regex: "(?i).*(user_can_manage|can_manage_|has_access|has_capability|check_permission|verify_access|validate_access_rights|is_admin_user|is_current_user_allowed|hascapability|usercan).*"
+            - pattern-not:
+                patterns:
+                  - pattern: |
+                      function $FUNC($RESP, $OBJ, $REQUEST) {
+                        ...
+                        if (<... $WRAPCHECK(...) ...>) {
+                          ...
+                        }
+                        ...
+                      }
+                  - metavariable-regex:
+                      metavariable: $WRAPCHECK
+                      regex: "(?i).*(user_can_manage|can_manage_|has_access|has_capability|check_permission|verify_access|validate_access_rights|is_admin_user|is_current_user_allowed|hascapability|usercan).*"
+
+      on:
+        - 'rest-prepare-hook-registration.path == set-data-handler-no-capability-check.path'
+        - 'rest-prepare-hook-registration.$FUNC == set-data-handler-no-capability-check.$FUNC'
+
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/hooks/rest_prepare_this-post_type/
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://cwe.mitre.org/data/definitions/200.html

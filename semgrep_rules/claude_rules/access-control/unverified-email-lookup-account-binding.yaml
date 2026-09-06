@@ -1,0 +1,92 @@
+rules:
+  - id: claude.php.wordpress.access-control.unverified-email-lookup-account-binding
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A user is looked up by email via get_user_by('email', ...) with no
+      server-side proof the requester controls that address — no password
+      check (wp_signon()/wp_authenticate()), no provider-token verification
+      (wp_remote_get()/wp_remote_post() to an OAuth endpoint), and no
+      existing-session gate (is_user_logged_in()) governing which branch
+      runs. The matched user's ID is then used to bind ownership of an
+      order, subscription, booking, or similar account-state record via a
+      set_user_id()/set_customer_id()/set_owner_id()-style method call, or a
+      direct ->user_id/->customer_id/->owner_id property write.
+
+      Unlike a wp_set_auth_cookie() sink (see the sibling
+      social-login-email-to-auth-cookie rule), this does not grant the
+      requester a session — but it does let an unauthenticated or
+      low-privileged requester force a real account-state write (an order
+      marked paid/completed, an enrollment, a subscription activation)
+      against an arbitrary existing account, using only that account's
+      email address (CWE-287 / CWE-862).
+
+      TRIAGE:
+        1. Confirm the enclosing handler is reachable while unauthenticated
+           or by a role below the target account's own privilege (a nopriv
+           AJAX action, a REST route with permission_callback =>
+           __return_true, or an init-hook request router).
+        2. Confirm no password/OTP/confirmation-link/provider-token check,
+           and no is_user_logged_in()-gated branch that would instead bind
+           the REQUESTER's own ID, sits between the email lookup and the
+           sink call.
+        3. Confirm the resulting write has a real effect (order completion,
+           enrollment, subscription activation) rather than being discarded
+           or requiring a second, independently-authenticated confirmation
+           step.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-287: Improper Authentication"
+        - "CWE-862: Missing Authorization"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/get_user_by/
+        - https://cwe.mitre.org/data/definitions/287.html
+        - https://cwe.mitre.org/data/definitions/862.html
+    pattern-sources:
+      - pattern-either:
+          - pattern: get_user_by("email", ...)
+          - pattern: get_user_by('email', ...)
+          # A wrapper method whose own name declares it as an email-based
+          # identity lookup (e.g. checkout_email_exists(), get_user_by_email())
+          # is treated as a source too — the get_user_by('email', ...) call
+          # frequently lives inside such a helper one level away from the
+          # sink, not inline in the same function.
+          - patterns:
+              - pattern-either:
+                  - pattern: $this->$METHOD(...)
+                  - pattern: self::$METHOD(...)
+                  - pattern: static::$METHOD(...)
+              - metavariable-regex:
+                  metavariable: $METHOD
+                  regex: "(?i).*email.*(exist|lookup|match).*|.*(by|from)_email.*|.*email.*(user|account).*"
+    pattern-sinks:
+      - patterns:
+          - pattern: $OBJ->$METHOD($X, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: "(?i)^set_?(user|owner|customer|account)_?id$"
+          # A sink call inside an is_user_logged_in()-gated branch is the
+          # documented fix shape: the bound ID there is the REQUESTER's own
+          # (get_current_user_id()-derived), not the unverified email match.
+          - pattern-not-inside: |
+              if (is_user_logged_in()) {
+                ...
+              }
+      - patterns:
+          - pattern: $OBJ->$PROP = $X;
+          - metavariable-regex:
+              metavariable: $PROP
+              regex: "(?i)^(user|owner|customer|account)_?id$"
+          - pattern-not-inside: |
+              if (is_user_logged_in()) {
+                ...
+              }

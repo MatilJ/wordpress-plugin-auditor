@@ -1,0 +1,84 @@
+rules:
+  - id: claude.php.wordpress.rce.variable-function-call-user-input
+    mode: taint
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      User-controlled input flows into a variable used as a function name
+      in a PHP variable function call ($var()). An attacker can invoke any
+      PHP function including system(), exec(), wp_set_auth_cookie(), etc.
+      (CWE-94). CVE-2026-3584 (Kali Forms): form field keys mapped to
+      internal placeholders, placeholder values passed to variable function
+      calls — attacker called wp_set_auth_cookie(1) for instant admin takeover.
+      Validate function names against a strict allowlist before invocation.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+        - "CWE-470: Use of Externally-Controlled Input to Select Classes or Code ('Unsafe Reflection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Code Injection"
+      technology: [php, wordpress]
+      references:
+        - https://www.php.net/manual/en/functions.variable-functions.php
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+    pattern-propagators:
+      - pattern: wp_unslash($INPUT)
+        from: $INPUT
+        to: return
+      - pattern: stripslashes_deep($INPUT)
+        from: $INPUT
+        to: return
+      - pattern: wp_parse_args($INPUT, ...)
+        from: $INPUT
+        to: return
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: (int) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: sanitize_key(...)
+          - pattern: sanitize_title(...)
+          - pattern: sanitize_html_class(...)
+          - pattern: sanitize_file_name(...)
+    pattern-sinks:
+      - patterns:
+          - pattern: $FUNC(...)
+          - metavariable-regex:
+              metavariable: $FUNC
+              regex: "^\\$"
+          # Excludes a static method call on a dynamically-indexed class
+          # expression (Class::method() / $arr[$key]::method()) — Semgrep's
+          # generic callee capture binds the whole "$arr[$key]::method"
+          # prefix to $FUNC (which still starts with "$"), but this is a
+          # static-method-selection shape (dynamic class instantiation,
+          # CWE-470) where the method name itself stays hardcoded, not a
+          # variable directly holding an invocable function name/closure
+          # (CWE-94, this rule's actual target).
+          - metavariable-regex:
+              metavariable: $FUNC
+              regex: "^(?!.*::).*$"
+          - focus-metavariable: $FUNC
+          # Excludes the WP_List_Table-style bounded row/bulk-action dispatch
+          # idiom: method_exists() gates the identical dynamic callee in an
+          # enclosing if-condition, which restricts invocation to methods the
+          # class author already defined on that object — not an arbitrary
+          # PHP function/system() call, the risk this rule targets.
+          - pattern-not-inside: |
+              if (<... method_exists(...) ...>) {
+                ...
+                $FUNC(...);
+                ...
+              }

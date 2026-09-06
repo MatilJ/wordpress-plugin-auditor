@@ -1,0 +1,51 @@
+rules:
+  - id: claude.php.wordpress.rce.preg-replace-e-modifier
+    languages: [php]
+    severity: HIGH
+    message: |
+      preg_replace() with the "/e" modifier evaluates the replacement string
+      as PHP code. This is always dangerous and was removed in PHP 7 for
+      exactly this reason. Any code still using /e is an RCE sink if the
+      replacement or subject can be influenced by user input.
+      Use preg_replace_callback() instead.
+    metadata:
+      category: security
+      cwe: "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Code Injection"
+      technology: [php, wordpress]
+      references:
+        - https://www.php.net/manual/en/reference.pcre.pattern.modifiers.php
+    patterns:
+      - pattern-either:
+          - pattern: preg_replace("$PATTERN", ...)
+          - pattern: preg_replace('$PATTERN', ...)
+      - metavariable-regex:
+          metavariable: $PATTERN
+          regex: "^.(.+).[a-zA-Z]*e[a-zA-Z]*$"
+
+  - id: claude.php.wordpress.rce.create-function-usage
+    languages: [php]
+    severity: HIGH
+    message: |
+      create_function() builds PHP code by string concatenation and
+      evaluates it. Equivalent to eval() from a security standpoint, and
+      removed in PHP 8.0. If either argument is user-influenced this is RCE.
+      Replace with a real anonymous function.
+    metadata:
+      category: security
+      cwe: "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Code Injection"
+      technology: [php, wordpress]
+      references:
+        - https://www.php.net/manual/en/function.create-function.php
+    pattern: create_function(...)

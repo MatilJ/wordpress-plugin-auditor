@@ -1,0 +1,38 @@
+rules:
+  - id: claude.php.wordpress.xss.register-post-meta-no-sanitize-rest
+    languages: [php]
+    severity: HIGH
+    message: |
+      register_post_meta() registers this meta key as REST-writable (show_in_rest: true)
+      but provides no sanitize_callback. WordPress Core does not apply wp_kses_post()
+      to REST-written meta lacking this callback — any user with the required CPT
+      capability can store arbitrary values verbatim. Trace whether the stored value
+      reaches an unescaped output sink (echo, wp_add_inline_style, wp_add_inline_script).
+    patterns:
+      - pattern-either:
+          - pattern: register_post_meta(..., $KEY, [..., 'show_in_rest' => true, ...])
+          - pattern: register_post_meta(..., $KEY, array(..., 'show_in_rest' => true, ...))
+      - pattern-not: register_post_meta(..., ..., [..., 'sanitize_callback' => $CB, ...])
+      - pattern-not: register_post_meta(..., ..., array(..., 'sanitize_callback' => $CB, ...))
+      # _-prefixed meta keys: WP Core defaults auth_callback to __return_false (meta.php:1516),
+      # blocking all non-admin REST writes regardless of post ownership — FP for write-path analysis.
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: "^(?!'_|\"_)"
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: LOW
+      impact: HIGH
+      subcategory:
+        - vuln
+      vulnerability_class:
+        - Cross-Site Scripting (XSS)
+      technology:
+        - php
+        - wordpress
+      references:
+        - https://cwe.mitre.org/data/definitions/79.html
+        - https://owasp.org/www-project-top-ten/

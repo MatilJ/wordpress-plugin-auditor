@@ -1,0 +1,243 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+  - id: claude.php.wordpress.access-control.capability-check-without-nonce-verification
+    mode: join
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      Callback registered on an admin_action_ / admin_post_ / wp_ajax_ hook calls
+      current_user_can() but never calls wp_verify_nonce(), check_admin_referer(),
+      or check_ajax_referer() anywhere in its body (CWE-352). A capability check
+      confirms the caller's privilege level but not the request's origin — it does
+      not stop a forged cross-site request from a logged-in victim who already
+      holds that capability. admin_action_ hooks are reachable via a simple GET
+      navigation (SameSite=Lax cookies do not block top-level GET navigation),
+      so a state-changing admin_action_ handler with no nonce check is CSRF-able
+      by any attacker who can get the victim to click/load a crafted link.
+
+      This is the inverse of the missing-authorization case (see the sibling rule
+      nonce-without-capability-check): here the request IS authorized (capability
+      check passes for the victim) but the request's INTENT/ORIGIN is never
+      confirmed.
+
+      TRIAGE:
+      1. Confirm the callback (or any function it calls) performs a real state
+         change (post/option/meta write, delete, redirect-with-side-effect).
+      2. Known miss risk runs the OTHER direction from the sibling rule: because
+         this rule anchors on the capability check rather than a write sink, it
+         may also fire on read-only admin_action_ handlers (e.g. an export/
+         download action) that have no CSRF-relevant impact — confirm real impact
+         before reporting.
+      3. If the nonce check lives in a called helper method rather than inline in
+         the matched callback, this rule will still report a false hit — confirm
+         no callee performs nonce verification before treating as a true finding.
+
+      Fix: add wp_verify_nonce() / check_admin_referer() / check_ajax_referer()
+      before performing any state change, verifying a nonce that was embedded
+      alongside the link/form that triggers this action.
+
+      Also covers admin_init: unlike admin_action_ / wp_ajax_, admin_init fires
+      unconditionally on every /wp-admin/ request, so a matched callback typically
+      dispatches on its own request parameter (e.g. $_GET['action']) internally —
+      the same CSRF-via-SameSite=Lax-GET reasoning applies once that internal
+      dispatch check passes.
+    join:
+      rules:
+        - id: cap-hook-results
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_action('$ACTION', [..., '$CALLBACK'], ...);
+                - pattern: add_action('$ACTION', '$CALLBACK', ...);
+                - pattern: add_action('$ACTION', array($OBJ, '$CALLBACK'), ...);
+            - metavariable-regex:
+                metavariable: $ACTION
+                regex: (admin_action_.*|admin_post_.*|wp_ajax_.*|admin_init)
+
+        - id: cap-no-nonce-functions-results
+          languages: [php]
+          patterns:
+            - pattern: |
+                function $CALLBACK(...) {
+                  ...
+                }
+            - pattern-either:
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      current_user_can(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      if (<... current_user_can(...) ...>) {
+                        ...
+                      }
+                      ...
+                    }
+            - pattern-not: function $CALLBACK(...) { ... wp_verify_nonce(...); ... }
+            - pattern-not: function $CALLBACK(...) { ... check_admin_referer(...); ... }
+            - pattern-not: function $CALLBACK(...) { ... check_ajax_referer(...); ... }
+            # A custom auth-wrapper call verifies both nonce and capability internally —
+            # Semgrep cannot see into the wrapper's own body from the caller's side.
+            - pattern-not: function $CALLBACK(...) { ... __::isAuthentic(...); ... }
+            # Nonce-verification call embedded inside an if-condition expression
+            # (e.g. `if ( ! wp_verify_nonce(...) ) { wp_die(...); }`) rather than as
+            # a standalone statement.
+            - pattern-not: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... wp_verify_nonce(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... check_admin_referer(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... check_ajax_referer(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            # Nonce verification delegated to a private sibling method in the same
+            # class, called via $this->method() from the callback — the callback's
+            # own body has no nonce call, but the helper it invokes performs the
+            # check before any write. Covers both declaration orders (helper method
+            # defined before or after the callback in the class body).
+            - pattern-not-inside: |
+                class $CLASS {
+                  ...
+                  function $CALLBACK(...) {
+                    ...
+                    $this->$HELPER(...);
+                    ...
+                  }
+                  ...
+                  function $HELPER(...) {
+                    ...
+                    <... wp_verify_nonce(...) ...>;
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                class $CLASS {
+                  ...
+                  function $HELPER(...) {
+                    ...
+                    <... wp_verify_nonce(...) ...>;
+                    ...
+                  }
+                  ...
+                  function $CALLBACK(...) {
+                    ...
+                    $this->$HELPER(...);
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                class $CLASS {
+                  ...
+                  function $CALLBACK(...) {
+                    ...
+                    $this->$HELPER(...);
+                    ...
+                  }
+                  ...
+                  function $HELPER(...) {
+                    ...
+                    <... check_admin_referer(...) ...>;
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                class $CLASS {
+                  ...
+                  function $HELPER(...) {
+                    ...
+                    <... check_admin_referer(...) ...>;
+                    ...
+                  }
+                  ...
+                  function $CALLBACK(...) {
+                    ...
+                    $this->$HELPER(...);
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                class $CLASS {
+                  ...
+                  function $CALLBACK(...) {
+                    ...
+                    $this->$HELPER(...);
+                    ...
+                  }
+                  ...
+                  function $HELPER(...) {
+                    ...
+                    <... check_ajax_referer(...) ...>;
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                class $CLASS {
+                  ...
+                  function $HELPER(...) {
+                    ...
+                    <... check_ajax_referer(...) ...>;
+                    ...
+                  }
+                  ...
+                  function $CALLBACK(...) {
+                    ...
+                    $this->$HELPER(...);
+                    ...
+                  }
+                  ...
+                }
+
+      # No same-file (path==path) constraint: many WordPress plugins register hooks for
+      # a handler class from a separate central bootstrap file (e.g. a plugin.php or
+      # base.php that does add_action('admin_action_x', [Handler::class, 'method'])
+      # while Handler itself is defined in classes/handler.php). A same-file join would
+      # miss that architecture entirely — this rule correlates on callback name only.
+      on:
+        - 'cap-hook-results.$CALLBACK == cap-no-nonce-functions-results.$CALLBACK'
+
+    # Freemius SDK is always a bundled third-party library; OOS for Wordfence bounty.
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+
+    metadata:
+      category: security
+      cwe: "CWE-352: Cross-Site Request Forgery (CSRF)"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Cross-Site Request Forgery (CSRF)"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/352.html
+        - https://developer.wordpress.org/apis/security/nonces/
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/

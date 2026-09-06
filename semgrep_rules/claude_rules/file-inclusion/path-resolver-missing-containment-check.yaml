@@ -1,0 +1,193 @@
+rules:
+  - id: claude.php.wordpress.file.path-resolver-missing-containment-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      A path-resolution helper builds a filesystem path from a base/root
+      directory and a variable remainder — either by string concatenation
+      with a trimmed remainder, or via WordPress's own path_join() — and
+      returns it directly, with no realpath()/wp_normalize_path()
+      canonicalization and no check that the resolved path still starts
+      with the base directory (CWE-22 / CWE-98). When the remainder
+      originates from the current request (e.g. the request URI, a URL
+      path segment, or a submitted form field) and a caller uses the
+      returned path to read, move, serve, or delete file contents (directly,
+      or by handing it to a recursive directory-empty/delete routine),
+      `../` segments let an attacker escape the base directory and disclose,
+      relocate, or destroy arbitrary files on the host, including sensitive
+      configuration.
+      For the path_join() shape specifically, WordPress core's path_join()
+      returns its second argument completely UNCHANGED whenever it is an
+      absolute path (path_is_absolute() — a leading '/', a drive letter,
+      a UNC path, or any value realpath() resolves to itself): an absolute
+      path such as "/etc/passwd" contains no "../" or "./" sequence, so a
+      blacklist substring check on the joined result never catches it and
+      the helper silently returns a path fully outside the base directory.
+      Resolve with realpath() and reject the result when it does not start
+      with the intended base directory; for path_join() callers, also
+      reject any remainder that is not already a bare filename
+      (wp_basename($remainder) !== $remainder) before joining.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+        - "CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program ('PHP Remote File Inclusion')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — resolver returns the raw concatenation:
+      #   function getOriginalPath($url) {
+      #       $path = str_replace(home_url(), '', $url);
+      #       return self::getRootPath() . ltrim($path, '/');
+      #   }
+      #   -> No realpath()/containment check; a caller that reads or serves
+      #      the returned path lets `../` segments escape the root.
+      #
+      # FALSE POSITIVE — realpath() + prefix check before returning:
+      #   $resolved = realpath($base . ltrim($path, '/'));
+      #   if (strpos($resolved, $base) !== 0) { return false; }
+      #   return $resolved;
+      #
+      # TRUE POSITIVE — path_join() shape, blacklist-only check:
+      #   function generate_user_filepath($form_id, $name, $filename) {
+      #       $dir = get_user_dir($form_id, $name);
+      #       $filepath = path_join($dir, $filename);
+      #       if (str_contains($filepath, '../')) { throw new \RuntimeException(); }
+      #       return $filepath;
+      #   }
+      #   -> $filename = "/etc/passwd" (or any absolute path) contains no
+      #      "../", so path_join() returns it unchanged and the blacklist
+      #      check never fires. A caller that moves/reads/deletes the
+      #      returned path operates on an attacker-chosen file anywhere on
+      #      the host.
+      #
+      # FALSE POSITIVE — remainder validated at the source, not the sink:
+      #   $id = sanitize_form_id($id);
+      #   if (false === $id) { throw new \RuntimeException(); }
+      #   $dir = path_join($base, (string) $id);
+      #   -> The join's second argument is rejected/coerced (e.g. a
+      #      digit-only allow-list) *before* the join instead of the joined
+      #      result being checked after — this closes the same hole and is
+      #      an equally valid guard even though it never touches the joined
+      #      path itself.
+      #
+      # FALSE POSITIVE — remainder stripped to a bare filename before the
+      # join, via basename()/wp_basename() on a variable other than the one
+      # bound at the return/path_join call site:
+      #   $name = wp_basename($meta['companion_file']);
+      #   ...
+      #   return path_join(dirname($attached_file), $name);
+      #   -> basename()-family functions discard every directory component,
+      #      so the joined remainder can never carry a traversal segment
+      #      regardless of which local variable name reaches the join call.
+      #
+      # CONTEXT CHECK:
+      #   1. Is the returned path later read, moved (rename()/copy()),
+      #      served (file_get_contents, WP_Filesystem::get_contents,
+      #      readfile, require/include), or deleted (unlink, rmdir,
+      #      wp_delete_file, or a recursive directory-empty routine)?
+      #   2. Is the trimmed/joined remainder derived from request data at the
+      #      call site or a caller (request URI, $_GET/$_POST/form-field
+      #      value, REST route param)?
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                return $BASE . ltrim($REST, ...);
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $PATHVAR = $BASE . ltrim($REST, ...);
+                ...
+                return $PATHVAR;
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                return path_join($BASE, $REST);
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $PATHVAR = path_join($BASE, $REST);
+                ...
+                return $PATHVAR;
+              }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            realpath(...);
+            ...
+          }
+      # basename()/wp_basename() discard every directory component from
+      # their argument — a traversal-safe remainder regardless of which
+      # local variable name is later passed to the join/concatenation.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            basename(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            wp_basename(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            validate_file(...);
+            ...
+          }
+      # Statement-level "validate_file(...);" above only matches a bare call
+      # or assignment RHS — a call embedded in an if-condition needs the deep
+      # expression operator to be found by the same function-wide search.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... validate_file(...) ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            wp_normalize_path(...);
+            ...
+          }
+      # CVE-2026-1056 (Snow Monkey Forms): the fix validates the untrusted
+      # remainder itself before the join rather than the joined result
+      # after — a value is reassigned through a validator/sanitizer call
+      # and the function aborts (throw/return) when that call reports
+      # failure, e.g. `$id = sanitize_form_id($id); if (false === $id) {
+      # throw ...; }`. This closes the traversal at the source instead of
+      # the sink and is an equally valid guard the realpath()-based clauses
+      # above don't recognize.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $ID = $SANITIZER(...);
+            if (false === $ID) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $ID = $SANITIZER(...);
+            if ($ID === false) {
+              ...
+            }
+            ...
+          }

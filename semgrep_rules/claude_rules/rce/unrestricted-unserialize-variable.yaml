@@ -1,0 +1,191 @@
+rules:
+  - id: claude.php.wordpress.rce.unrestricted-unserialize-variable
+    languages: [php]
+    severity: HIGH
+    message: |
+      maybe_unserialize() or single-argument unserialize() called on a bare
+      variable with no allowed_classes restriction. Both perform UNRESTRICTED
+      object deserialization — maybe_unserialize() is not a "safe" alternative to
+      unserialize(); it calls unserialize() internally with no allowed_classes
+      option, so any serialized-object payload it receives is instantiated. If the
+      variable's value is influenced by request/upload/cookie data reachable at a
+      low privilege, this is PHP Object Injection (CWE-502).
+
+      This rule deliberately targets a BARE VARIABLE argument, that same bare
+      variable wrapped in trim() (a near-universal step before unserializing a
+      DB-stored string), a single-level object-property access (e.g. a
+      $wpdb->get_row() result's column), or a request superglobal ($_GET/$_POST/
+      $_REQUEST/$_COOKIE) — optionally indexed and/or wrapped in exactly one decode
+      call (base64_decode/gzinflate/gzuncompress/rawurldecode/stripslashes) — the
+      common "decode a request field, then unserialize it" postback-handler
+      shape, via the metavariable constraints below. It does NOT fire on an
+      inline WordPress core read such as maybe_unserialize(get_option(...))
+      / get_post_meta(...) / get_user_meta(...) — those route values WordPress itself
+      serialized and are core's own unrestricted behaviour, not separately reportable.
+      It also leaves $row['meta_value']-shaped custom-table reads to the dedicated
+      meta-table rule.
+
+      A broken "protection" is just as vulnerable as none: watch for an options
+      array that LOOKS like it restricts classes but uses the wrong key (e.g.
+      'allow_classes' instead of the real 'allowed_classes') — PHP silently ignores
+      unrecognized option keys, so allowed_classes defaults back to true (every
+      class allowed). This rule's pattern-not only recognizes the exact correct
+      key, so any misspelled/incorrect variant still matches as vulnerable.
+
+      TRIAGE:
+      1. Trace the variable to its origin. Any write/assignment path sourced from
+         $_GET/$_POST/$_REQUEST/$_COOKIE, php://input, an uploaded file's contents,
+         or a request-populated function parameter makes this exploitable.
+      2. Confirm the auth floor of the reaching endpoint (unauth / Subscriber /
+         Customer scope is in-scope; note the disclosed reachability).
+      3. Inventory magic methods (__wakeup/__destruct/__unserialize/__toString/
+         __call) across the plugin AND its vendored libraries for a usable POP
+         chain gadget — the sink is only RCE/file-write with a reachable gadget.
+
+      Fix: unserialize($data, ['allowed_classes' => false]) (or an allow-list of
+      the exact classes required).
+    metadata:
+      category: security
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+      owasp: "A08:2021 - Software and Data Integrity Failures"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Insecure Deserialization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/502.html
+        - https://owasp.org/www-community/vulnerabilities/PHP_Object_Injection
+    patterns:
+      - pattern-either:
+          # Bare variable only — excludes inline core get_*() reads (argument is a
+          # FuncCall, not a Variable) and $row['meta_value'] array-access shapes
+          # (handled by claude.php.wordpress.rce.wpdb-meta-table-unserialize). The
+          # trailing $ anchor is essential: metavariable-regex is prefix-anchored
+          # (re.match), so without it "$row['meta_value']" would match on the "$row"
+          # prefix.
+          - patterns:
+              - pattern-either:
+                  - pattern: maybe_unserialize($X)
+                  - pattern: unserialize($X)
+                  - pattern: unserialize($X, $OPTS)
+              - metavariable-regex:
+                  metavariable: $X
+                  regex: '^\$[A-Za-z_][A-Za-z0-9_]*$'
+              # The neutralizer the real-world fix adds — an allowed_classes
+              # restriction. Short- and long-array syntaxes, false or empty
+              # allow-list.
+              - pattern-not: unserialize($X, ['allowed_classes' => false])
+              - pattern-not: unserialize($X, ['allowed_classes' => []])
+              - pattern-not: unserialize($X, array('allowed_classes' => false))
+              - pattern-not: unserialize($X, array('allowed_classes' => array()))
+              # Bare variable was assigned, earlier in the same function,
+              # directly from a WP core meta/option accessor — the value is
+              # data WordPress itself serialized via
+              # update_*_meta()/update_option(), not separately reportable
+              # by this rule (same design intent as the inline
+              # get_option()/get_post_meta() exclusion, extended to the
+              # equally common "assign, then unserialize" two-step idiom).
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    $X = get_comment_meta(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    $X = get_post_meta(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    $X = get_user_meta(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    $X = get_option(...);
+                    ...
+                  }
+          # Same bare-variable taint, wrapped in trim() — the near-universal step
+          # before unserializing a value pulled out of a DB column/log row. A
+          # separate branch (not folded into $X above) because pattern-not must
+          # mirror the exact trim(...) call shape to recognize the fixed form.
+          - patterns:
+              - pattern-either:
+                  - pattern: maybe_unserialize(trim($Y))
+                  - pattern: unserialize(trim($Y))
+                  - pattern: unserialize(trim($Y), $OPTS)
+              - metavariable-regex:
+                  metavariable: $Y
+                  regex: '^\$[A-Za-z_][A-Za-z0-9_]*$'
+              - pattern-not: unserialize(trim($Y), ['allowed_classes' => false])
+              - pattern-not: unserialize(trim($Y), ['allowed_classes' => []])
+              - pattern-not: unserialize(trim($Y), array('allowed_classes' => false))
+              - pattern-not: unserialize(trim($Y), array('allowed_classes' => array()))
+          # Variant: unserialize()/maybe_unserialize() on a single-level object-property
+          # access (e.g. a $wpdb->get_row()/get_var() result's column) — the same
+          # unrestricted-deserialization shape as the bare-variable branch above, just
+          # one property dereference deeper (a PropertyFetch node, which the bare-variable
+          # metavariable-regex above cannot match).
+          - patterns:
+              - pattern-either:
+                  - pattern: maybe_unserialize($OBJ->$PROP)
+                  - pattern: unserialize($OBJ->$PROP)
+                  - pattern: unserialize($OBJ->$PROP, $OPTS)
+              - pattern-not: unserialize($OBJ->$PROP, ['allowed_classes' => false])
+              - pattern-not: unserialize($OBJ->$PROP, ['allowed_classes' => []])
+              - pattern-not: unserialize($OBJ->$PROP, array('allowed_classes' => false))
+              - pattern-not: unserialize($OBJ->$PROP, array('allowed_classes' => array()))
+              - pattern-not: unserialize($OBJ->$PROP, ['allowed_classes' => [...]])
+              - pattern-not: unserialize($OBJ->$PROP, array('allowed_classes' => array(...)))
+              # $PROP is exactly "meta_value" — the literal column name shared
+              # by every WordPress core meta table (wp_postmeta/
+              # wp_commentmeta/wp_usermeta/wp_termmeta). A raw $wpdb query
+              # result exposing this column carries the same
+              # WordPress-itself-serialized data its own get_*_meta()
+              # accessors return — not separately reportable by this rule,
+              # consistent with the inline-accessor exclusion's design intent.
+              - metavariable-regex:
+                  metavariable: $PROP
+                  regex: ^(?!meta_value$).*
+          # Variant (CVE-2025-0769 class): unserialize()/maybe_unserialize() on a
+          # request superglobal itself, or that superglobal wrapped in exactly one
+          # decode call — the common "decode a request field, then unserialize it"
+          # postback-handler shape (e.g. an async-task AJAX handler reading $_POST).
+          - patterns:
+              - pattern-either:
+                  - pattern: maybe_unserialize($Z)
+                  - pattern: unserialize($Z)
+                  - pattern: unserialize($Z, $OPTS)
+              - metavariable-pattern:
+                  metavariable: $Z
+                  patterns:
+                    - pattern-either:
+                        - pattern: $SUPERGLOBAL
+                        - pattern: $SUPERGLOBAL[...]
+                        - pattern: base64_decode($SUPERGLOBAL)
+                        - pattern: base64_decode($SUPERGLOBAL[...])
+                        - pattern: gzinflate($SUPERGLOBAL)
+                        - pattern: gzinflate($SUPERGLOBAL[...])
+                        - pattern: gzuncompress($SUPERGLOBAL)
+                        - pattern: gzuncompress($SUPERGLOBAL[...])
+                        - pattern: rawurldecode($SUPERGLOBAL)
+                        - pattern: rawurldecode($SUPERGLOBAL[...])
+                        - pattern: stripslashes($SUPERGLOBAL)
+                        - pattern: stripslashes($SUPERGLOBAL[...])
+                    - metavariable-regex:
+                        metavariable: $SUPERGLOBAL
+                        regex: '^\$_(POST|GET|REQUEST|COOKIE)$'
+              - pattern-not: unserialize($Z, ['allowed_classes' => false])
+              - pattern-not: unserialize($Z, ['allowed_classes' => []])
+              - pattern-not: unserialize($Z, array('allowed_classes' => false))
+              - pattern-not: unserialize($Z, array('allowed_classes' => array()))
+              # A populated allow-list (specific class names, not just false/empty)
+              # is also a legitimate restriction — ellipsis matches any element count.
+              - pattern-not: unserialize($Z, ['allowed_classes' => [...]])
+              - pattern-not: unserialize($Z, array('allowed_classes' => array(...)))

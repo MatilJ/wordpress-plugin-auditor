@@ -1,0 +1,119 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+
+  # A class both (1) verifies a cryptographic signature over a request
+  # (openssl_verify(), or a hash_equals()-wrapped HMAC comparison) and (2)
+  # establishes an authenticated session for a request-resolved account
+  # (wp_set_current_user()/wp_set_auth_cookie()), with no method in the class
+  # ever calling add_option() — the standard atomic compare-and-set WordPress
+  # uses to record a nonce/token as consumed. The signature check and the
+  # session grant commonly live in different methods of the same class, so
+  # this join correlates them by class rather than requiring both in one
+  # function.
+
+  - id: claude.php.wordpress.access-control.signature-auth-no-replay-guard
+    mode: join
+    languages: [php]
+    severity: HIGH
+    message: |
+      This class verifies a cryptographic signature over a request
+      (openssl_verify(), or a hash_equals()-wrapped HMAC comparison) and, on
+      success, establishes an authenticated session for a request-resolved
+      account (wp_set_current_user()/wp_set_auth_cookie()) — but no method in
+      the class ever calls add_option() to atomically record a nonce/token as
+      consumed (CWE-287 / CWE-294 — Authentication Bypass by Capture-replay).
+      A request that is cryptographically valid once (captured from network
+      traffic, a log, a proxy, or an intentionally lower-trust caller) can be
+      resubmitted unlimited times to re-authenticate as the resolved account,
+      because nothing marks the signed nonce/token "already used."
+
+      TRIAGE:
+      1. Confirm the verified payload actually includes a nonce/timestamp
+         field distinct from the static signing key/secret — a signature
+         over a wholly static message has a different, worse problem (no
+         freshness check at all), but is not this specific gap.
+      2. Confirm the account established by wp_set_current_user()/
+         wp_set_auth_cookie() is resolved from request data (not a fixed,
+         hardcoded service account) and can carry elevated capabilities.
+      3. A get_transient()/set_transient() check-then-set pair used instead
+         of add_option() is not treated as a fix by this rule (it is not
+         atomic — a TOCTOU window remains) but is materially better than no
+         check; weigh that when triaging.
+
+      Fix: before granting the session, atomically record the nonce/token as
+      consumed — add_option() returns false when the option key already
+      exists, giving a cheap compare-and-set with no dedicated table — and
+      reject any request whose nonce was already seen or falls outside a
+      short acceptance window.
+    join:
+      rules:
+        - id: signature-verify-sink-in-class
+          languages: [php]
+          patterns:
+            - pattern-inside: |
+                class $CLASS {
+                  ...
+                }
+            - pattern-either:
+                - pattern: openssl_verify(...)
+                - patterns:
+                    - pattern: hash_equals(...)
+                    - pattern-inside: |
+                        class $CLASS {
+                          ...
+                          function $ANYMETHOD(...) {
+                            ...
+                            hash_hmac(...);
+                            ...
+                          }
+                          ...
+                        }
+
+        - id: auth-grant-no-add-option-in-class
+          languages: [php]
+          patterns:
+            - pattern-inside: |
+                class $CLASS {
+                  ...
+                }
+            - pattern-either:
+                - pattern: wp_set_current_user(...)
+                - pattern: wp_set_auth_cookie(...)
+            - pattern-not-inside: |
+                class $CLASS {
+                  ...
+                  function $ANYMETHOD(...) {
+                    ...
+                    add_option(...);
+                    ...
+                  }
+                  ...
+                }
+
+      on:
+        - 'signature-verify-sink-in-class.$CLASS == auth-grant-no-add-option-in-class.$CLASS'
+        - 'signature-verify-sink-in-class.path == auth-grant-no-add-option-in-class.path'
+
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe:
+        - "CWE-287: Improper Authentication"
+        - "CWE-294: Authentication Bypass by Capture-replay"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: MEDIUM
+      likelihood: LOW
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/287.html
+        - https://cwe.mitre.org/data/definitions/294.html
+        - https://developer.wordpress.org/reference/functions/add_option/

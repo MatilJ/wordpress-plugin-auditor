@@ -1,0 +1,204 @@
+rules:
+  - id: claude.php.wordpress.xss.wp-user-profile-field-unescaped-output
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A WP_User profile field flows into an output sink without esc_html()/esc_attr()
+      escaping. first_name, last_name, nickname, user_nicename, and display_name are
+      editable by the account owner via their own wp-admin/profile.php — any
+      authenticated user, including a Subscriber, controls these values without
+      needing any elevated capability. If the unescaped value reaches an HTML or
+      HTML-attribute context (an admin list-table column, a tooltip, a user-info
+      card) it constitutes Stored XSS against whichever higher-privileged user later
+      views that page (PR:N pivot to PR:H via a Subscriber-controlled profile field).
+
+      TRIAGE: accessing the field via `$user->data->$field` (the raw, unfiltered
+      stdClass row backing a WP_User object) is a stronger signal than the plain
+      `$user->$field` magic-getter form — `->data->` bypasses WP_User::__get()'s
+      sanitize_user_field() filtering entirely, so the value is guaranteed raw.
+      Also confirm the sink is genuinely an HTML/attribute-rendering context and not
+      a plain-text log, CSV export, or JSON API response consumed only via .text().
+
+      Fix: esc_html($user->first_name) / esc_attr($user->first_name) at the point
+      the field is concatenated into the output string — escaping only the final
+      combined string with esc_attr() is not equivalent when a client-side widget
+      (e.g. a tooltip plugin) later reads the attribute back out and re-inserts it
+      as HTML, since attribute-value decoding by the browser un-does a single layer
+      of encoding before the second parse.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — Stored"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/esc_html/
+        - https://developer.wordpress.org/reference/classes/wp_user/
+        - https://cwe.mitre.org/data/definitions/79.html
+    paths:
+      exclude:
+        - "**/freemius/**"
+    pattern-sources:
+      - pattern-either:
+          # magic-getter object access (may or may not be filtered depending on $user->filter)
+          - pattern: $USER->first_name
+          - pattern: $USER->last_name
+          - pattern: $USER->nickname
+          - pattern: $USER->user_nicename
+          - pattern: $USER->display_name
+          - pattern: $USER->user_login
+          - pattern: $USER->user_email
+          # raw stdClass row — always unfiltered, bypasses sanitize_user_field() entirely
+          - pattern: $USER->data->first_name
+          - pattern: $USER->data->last_name
+          - pattern: $USER->data->nickname
+          - pattern: $USER->data->user_nicename
+          - pattern: $USER->data->display_name
+          - pattern: $USER->data->user_login
+          - pattern: $USER->data->user_email
+          # plain-array user-data shape (get_userdata()->to_array(), MainWP-style child-site payloads)
+          - pattern: $USER_DATA['first_name']
+          - pattern: $USER_DATA['last_name']
+          - pattern: $USER_DATA['nickname']
+          - pattern: $USER_DATA['user_nicename']
+          - pattern: $USER_DATA['display_name']
+          - pattern: $USER_DATA['user_login']
+          - pattern: $USER_DATA['user_email']
+    pattern-sinks:
+      - pattern-either:
+          - pattern: echo $X;
+          - pattern: print $X;
+          - pattern: print($X);
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: esc_html(...)
+          - pattern: \esc_html(...)
+          - pattern: esc_attr(...)
+          - pattern: \esc_attr(...)
+          - pattern: esc_html__(...)
+          - pattern: \esc_html__(...)
+          - pattern: esc_attr__(...)
+          - pattern: \esc_attr__(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: \htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          - pattern: \htmlentities(...)
+          - pattern: wp_kses(...)
+          - pattern: \wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: \wp_kses_post(...)
+          - pattern: sanitize_text_field(...)
+          - pattern: \sanitize_text_field(...)
+          - pattern: wp_strip_all_tags(...)
+          - pattern: \wp_strip_all_tags(...)
+          - pattern: sanitize_user(...)
+          - pattern: \sanitize_user(...)
+
+  # Pattern-mode companion: field directly concatenated into a string without any
+  # escaping in the same expression. Catches the exact pre-fix shape (a hand-built
+  # HTML/tooltip string assigned via `.`/`.=`, never reaching a bare echo/print in
+  # the same function) that the taint rule above cannot see.
+  - id: claude.php.wordpress.xss.wp-user-profile-field-html-concat
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A WP_User profile field (first_name, last_name, nickname, user_nicename,
+      display_name, user_login, user_email) is concatenated directly into a string
+      without esc_html()/esc_attr() escaping anywhere in the expression. These
+      fields are editable by the account owner via their own wp-admin/profile.php —
+      any authenticated user, including a Subscriber, controls the value. Building
+      an HTML fragment (a tooltip, a list-table cell, a user-info card) from these
+      fields with no escaping is Stored XSS the first time a higher-privileged user
+      views the rendered page.
+
+      Fix: wrap each field access with esc_html() (or esc_attr() if the destination
+      is genuinely only an HTML attribute value that nothing later re-parses as
+      markup) at the point of concatenation, not only on the fully-assembled string.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — Stored"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/esc_html/
+        - https://developer.wordpress.org/reference/classes/wp_user/
+        - https://cwe.mitre.org/data/definitions/79.html
+    paths:
+      exclude:
+        - "**/freemius/**"
+    patterns:
+      - pattern-either:
+          - pattern: $A . $USER->data->first_name . $B
+          - pattern: $A . $USER->data->first_name
+          - pattern: $A . $USER->data->last_name . $B
+          - pattern: $A . $USER->data->last_name
+          - pattern: $A . $USER->data->nickname . $B
+          - pattern: $A . $USER->data->nickname
+          - pattern: $A . $USER->data->user_nicename . $B
+          - pattern: $A . $USER->data->user_nicename
+          - pattern: $A . $USER->data->display_name . $B
+          - pattern: $A . $USER->data->display_name
+          - pattern: $A . $USER->data->user_login . $B
+          - pattern: $A . $USER->data->user_login
+          - pattern: $A . $USER->data->user_email . $B
+          - pattern: $A . $USER->data->user_email
+          - pattern: $A . $USER->first_name . $B
+          - pattern: $A . $USER->first_name
+          - pattern: $A . $USER->last_name . $B
+          - pattern: $A . $USER->last_name
+          - pattern: $A . $USER->nickname . $B
+          - pattern: $A . $USER->nickname
+          - pattern: $A . $USER->user_nicename . $B
+          - pattern: $A . $USER->user_nicename
+          - pattern: $A . $USER->display_name . $B
+          - pattern: $A . $USER->display_name
+          - pattern: $A . $USER->user_login . $B
+          - pattern: $A . $USER->user_login
+          - pattern: $A . $USER->user_email . $B
+          - pattern: $A . $USER->user_email
+          - pattern: $A . $USER_DATA['first_name'] . $B
+          - pattern: $A . $USER_DATA['first_name']
+          - pattern: $A . $USER_DATA['last_name'] . $B
+          - pattern: $A . $USER_DATA['last_name']
+          - pattern: $A . $USER_DATA['nickname'] . $B
+          - pattern: $A . $USER_DATA['nickname']
+          - pattern: $A . $USER_DATA['user_nicename'] . $B
+          - pattern: $A . $USER_DATA['user_nicename']
+          - pattern: $A . $USER_DATA['display_name'] . $B
+          - pattern: $A . $USER_DATA['display_name']
+          - pattern: $A . $USER_DATA['user_login'] . $B
+          - pattern: $A . $USER_DATA['user_login']
+          - pattern: $A . $USER_DATA['user_email'] . $B
+          - pattern: $A . $USER_DATA['user_email']
+      - pattern-not-inside: esc_html(...)
+      - pattern-not-inside: \esc_html(...)
+      - pattern-not-inside: esc_attr(...)
+      - pattern-not-inside: \esc_attr(...)
+      - pattern-not-inside: esc_html__(...)
+      - pattern-not-inside: \esc_html__(...)
+      - pattern-not-inside: esc_attr__(...)
+      - pattern-not-inside: \esc_attr__(...)
+      - pattern-not-inside: htmlspecialchars(...)
+      - pattern-not-inside: \htmlspecialchars(...)
+      - pattern-not-inside: htmlentities(...)
+      - pattern-not-inside: \htmlentities(...)
+      - pattern-not-inside: wp_kses(...)
+      - pattern-not-inside: \wp_kses(...)
+      - pattern-not-inside: wp_kses_post(...)
+      - pattern-not-inside: \wp_kses_post(...)
+      - pattern-not-inside: sanitize_text_field(...)
+      - pattern-not-inside: \sanitize_text_field(...)
+      - pattern-not-inside: wp_strip_all_tags(...)
+      - pattern-not-inside: \wp_strip_all_tags(...)
+      - pattern-not-inside: sanitize_user(...)
+      - pattern-not-inside: \sanitize_user(...)

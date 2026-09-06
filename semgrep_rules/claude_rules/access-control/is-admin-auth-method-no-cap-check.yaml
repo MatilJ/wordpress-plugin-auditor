@@ -1,0 +1,125 @@
+rules:
+  # Static or instance method calls whose names suggest auth/token/connection
+  # operations inside is_admin() blocks without a capability check at that scope.
+  # is_admin() is a request-context check, not an authorization check — it returns
+  # true for all admin-ajax.php requests regardless of the authenticated user's role.
+  # Source: load.php:1356-1364 (WP 6.9)
+  #
+  # This rule catches the indirect-write variant of is-admin-as-authorization:
+  # the called method may internally perform option writes, token storage, or
+  # account configuration without a capability gate visible at the call site.
+  #
+  # NOTE: In Semgrep PHP, $CLASS::$METHOD(...) matches both static (::) and
+  # instance (->) method calls. metavariable-regex uses re.match() semantics
+  # (anchored at start) so the regex uses .* prefix to match keywords anywhere
+  # in the method name (e.g. "init_oauth" contains "oauth" but does not start with it).
+  - id: claude.php.wordpress.access-control.is-admin-auth-method-no-cap-check
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      is_admin() is used as an authorization gate without a current_user_can() check,
+      guarding a state-changing operation. is_admin() returns true for ALL requests to
+      admin-ajax.php — including any authenticated user regardless of role — so it never
+      actually restricts access by privilege (CWE-862 / CWE-266).
+
+      Branch 1: a method whose name suggests authentication, token, or configuration
+      handling is called inside a positive `if (is_admin())` block with no capability
+      check at that scope.
+
+      Branch 2: the negated guard-clause form `if (!is_admin() || ...) { deny; }` (or
+      bare `if (!is_admin()) { deny; }`) is used as the entire authorization check for a
+      handler, immediately followed by a per-user privilege/meta write
+      (update_user_meta/add_user_meta) with no current_user_can() anywhere in between —
+      any authenticated user reaches the write and can set the target meta key/value
+      for an arbitrary or self user_id (Privilege Escalation).
+
+      Verify the method/write has its own capability check; if not, add
+      current_user_can('appropriate_capability') before the call.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/is_admin/
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://cwe.mitre.org/data/definitions/266.html
+    patterns:
+      - pattern-either:
+          # Branch 1 (original): is_admin() used as a positive wrapper condition
+          # around an auth/token/config-suggestive method call, with no cap check
+          # visible at that scope.
+          - patterns:
+              - pattern-inside: |
+                  if (is_admin()) {
+                    ...
+                  }
+              # In Semgrep PHP, $CLASS::$METHOD(...) matches both :: (static) and
+              # -> (instance) method calls. The .* prefix is required because
+              # metavariable-regex uses re.match() semantics (anchored at start) —
+              # without .*, "oauth" in "init_oauth" would not match.
+              - pattern: $CLASS::$METHOD(...)
+              - metavariable-regex:
+                  metavariable: $METHOD
+                  regex: '.*(oauth|token|auth|connect|credential|login|setup|configure|initialize|sync|import).*'
+              # Exclude is_admin() blocks that have a visible capability check at this scope.
+              - pattern-not-inside: |
+                  if (is_admin()) {
+                    ...
+                    current_user_can(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  if (is_admin()) {
+                    ...
+                    if (<... current_user_can(...) ...>) {
+                      ...
+                    }
+                    ...
+                  }
+          # Branch 2 (CWE-266 variant): negated guard-clause form of the same
+          # confusion — `if (!is_admin() || ...)` (or bare `if (!is_admin())`) used
+          # as the ENTIRE authorization check for a handler, directly followed by a
+          # privileged per-user meta write. $FUNC is captured generically and
+          # constrained to update_user_meta/add_user_meta via metavariable-regex —
+          # the WP-core primitives for granting a user a privilege/role/status flag.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      if (!is_admin() || $COND) {
+                        ...
+                      }
+                      ...
+                      $FUNC($USER_ID, $META_KEY, $VALUE);
+                  - pattern: |
+                      if (!is_admin()) {
+                        ...
+                      }
+                      ...
+                      $FUNC($USER_ID, $META_KEY, $VALUE);
+              - metavariable-regex:
+                  metavariable: $FUNC
+                  regex: '^(update_user_meta|add_user_meta)$'
+              # Exclude cases where a real capability check appears between the
+              # is_admin() guard-clause and the privileged write (flat sibling form).
+              - pattern-not: |
+                  if (!is_admin() || $COND) {
+                    ...
+                  }
+                  ...
+                  current_user_can(...);
+                  ...
+                  $FUNC($USER_ID, $META_KEY, $VALUE);
+              - pattern-not: |
+                  if (!is_admin()) {
+                    ...
+                  }
+                  ...
+                  current_user_can(...);
+                  ...
+                  $FUNC($USER_ID, $META_KEY, $VALUE);

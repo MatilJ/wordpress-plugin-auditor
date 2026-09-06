@@ -1,0 +1,146 @@
+rules:
+  - id: claude.php.wordpress.access-control.conditional-nonce-post-only-auth-cookie
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function establishes an authenticated WordPress session
+      (wp_set_auth_cookie()/wp_set_current_user()) but the only nonce check
+      in the function is nested inside an
+      `if ($_SERVER['REQUEST_METHOD'] === 'POST')`-style conditional, while
+      the session-establishing call itself sits outside that conditional.
+      OAuth/social-login provider redirects — and any other GET-driven
+      callback into this handler — always arrive as a GET request, so the
+      nonce check is silently skipped on exactly the request path that
+      grants the session (CWE-352 Login CSRF, surfacing as CWE-287 Improper
+      Authentication once the session is established). An attacker who
+      legitimately completes their own authentication flow (their own OAuth
+      consent, their own validly-issued token/state, etc.) can hand the
+      resulting callback URL to a victim; the victim's browser executes the
+      GET, skips the nonce check entirely, and is silently authenticated as
+      the attacker's own account.
+
+      Fix: verify the nonce/state-binding check unconditionally, regardless
+      of $_SERVER['REQUEST_METHOD'], before any wp_set_auth_cookie()/
+      wp_set_current_user() call reachable from this function.
+    metadata:
+      category: security
+      cwe: "CWE-352: Cross-Site Request Forgery (CSRF)"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/352.html
+        - https://developer.wordpress.org/reference/functions/wp_set_auth_cookie/
+        - https://owasp.org/www-community/attacks/csrf
+      # TRIAGE GUIDANCE
+      # TRUE POSITIVE — the function is reachable via a nopriv AJAX action,
+      # a REST route, or an init/wp_loaded hook reading
+      # $_SERVER['REQUEST_URI'] (a common OAuth-callback dispatch shape),
+      # AND the actual external trigger for this code path (provider
+      # redirect, emailed confirmation link, etc.) is a GET request in
+      # practice — not merely theoretically reachable via GET.
+      #
+      # FALSE POSITIVE — a separate, unconditional nonce/state-binding
+      # check (outside any POST-only conditional) also gates the function,
+      # or the endpoint is provably POST-only in practice (no GET-triggering
+      # caller exists anywhere in the codebase for this action).
+      #
+      # KNOWN LIMITATION (does not suppress — still worth manual review): if
+      # this rule fires on a dispatcher function with no direct
+      # wp_set_auth_cookie()/wp_set_current_user() call visible in it, the
+      # actual sink is likely one call away in a sibling helper method (a
+      # shared "finish login"/"set current user" routine) — grep the same
+      # class for wp_set_auth_cookie/wp_set_current_user call sites before
+      # dismissing.
+    patterns:
+      - pattern-either:
+          - pattern: wp_set_auth_cookie(...)
+          - pattern: wp_set_current_user(...)
+      # Structural gate: the session-establishing call must sit inside a
+      # function that also contains a POST-only conditional somewhere.
+      # Split from the sink pattern above (rather than nested inside one
+      # big function-skeleton pattern) so the reported finding location is
+      # the auth-cookie call itself, not the enclosing function's first
+      # line.
+      - pattern-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... "POST" ...>) {
+              ...
+            }
+            ...
+          }
+      # Exclude: the session-establishing call is itself nested inside the
+      # POST-conditional block (properly gated).
+      - pattern-not-inside: |
+          if (<... "POST" ...>) {
+            ...
+          }
+      # Exclude: an unconditional nonce/CSRF check exists as a SIBLING
+      # statement to the POST-conditional (not nested inside it) — the
+      # common fix shape, covering the standard WP-core nonce functions.
+      # Anchored to precede the if-block in the statement sequence (a
+      # bare "wp_verify_nonce(...) anywhere in the function" check would
+      # also match the vulnerable shape, since its own nonce call sits
+      # nested INSIDE the POST conditional — a different nesting level
+      # that this sibling-position skeleton deliberately excludes).
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            wp_verify_nonce(...);
+            ...
+            if (<... "POST" ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            check_ajax_referer(...);
+            ...
+            if (<... "POST" ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            check_admin_referer(...);
+            ...
+            if (<... "POST" ...>) {
+              ...
+            }
+            ...
+          }
+      # Same exclusion for a custom nonce-wrapper method/function whose own
+      # name signals nonce validation (e.g. $this->helper->validateNonce()),
+      # a common refactor in plugins that centralize the WP-core nonce call
+      # behind a shared helper.
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  $NONCEEXPR;
+                  ...
+                  if (<... "POST" ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - metavariable-pattern:
+                metavariable: $NONCEEXPR
+                patterns:
+                  - pattern-either:
+                      - pattern: $OBJ->$METHOD(...)
+                      - pattern: $OBJ->$PROP->$METHOD(...)
+                      - pattern: $FN(...)
+            - metavariable-regex:
+                metavariable: $NONCEEXPR
+                regex: "(?i).*(nonce|referer).*"

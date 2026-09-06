@@ -1,0 +1,141 @@
+rules:
+  - id: claude.php.wordpress.xss.post-meta-url-key-no-url-sanitizer
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      User input is sanitized with sanitize_text_field(), sanitize_textarea_field(),
+      or esc_attr() before being stored to a URL-type meta/option field, OR a generic
+      per-key sanitization loop applies esc_attr() to every field's value with no
+      per-key type branching. These functions strip literal HTML tags (or merely
+      HTML-attribute-encode) but preserve dangerous URI schemes such as javascript:
+      and data:. If the stored value is later echoed inside an href or src attribute,
+      clicking the element executes the attacker's JavaScript in the visitor's
+      browser — Stored XSS (CWE-79).
+
+      sanitize_text_field()/sanitize_textarea_field() only call strip_tags(), which
+      requires a literal < byte. esc_attr() encodes HTML special characters but
+      applies no protocol filtering. Neither strips "javascript:alert(1)", which
+      contains no < or HTML-special character. esc_url() must be used at render
+      time (or esc_url_raw() at write time) to strip javascript:, data:, and other
+      disallowed URI schemes.
+
+      A common variant of this bug is a *generic* meta/option bulk-update handler
+      (e.g. a REST endpoint accepting an arbitrary key=>value map) that applies the
+      SAME sanitizer to every field regardless of key, with no per-key type
+      branching — meaning any field that is semantically a URL never gets
+      esc_url()/esc_url_raw() at all. If the fix later added a per-key allow-list
+      (checking the key against a set of known URL fields before choosing the
+      sanitizer), the ORIGINAL blanket-sanitizer loop is the vulnerable shape.
+
+      TRIAGE — confirm the render path before reporting:
+      1. Find where get_post_meta() / get_option() / the custom meta getter
+         retrieves this key.
+      2. Check output context:
+           href / src attribute  → esc_url() required → TRUE POSITIVE
+           data-* / class / id   → esc_attr() is correct → FALSE POSITIVE
+      3. Check auth floor: who can reach this write path?
+           manage_options required → PR:H → OOS for Wordfence bounty.
+           edit_post (Contributor/Author for their own CPT posts), or an
+           unauthenticated/low-priv REST route → PR:N/PR:L → TP.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://developer.wordpress.org/reference/functions/esc_url/
+        - https://cwe.mitre.org/data/definitions/79.html
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+    patterns:
+      - pattern-either:
+          # Branch 1: literal URL-named meta/option key stored after
+          # sanitize_text_field()-type sanitization — both inline and
+          # split-assignment coding styles.
+          # metavariable-regex requires .* anchors because $KEY captures the
+          # full PHP string literal token (including surrounding quotes).
+          - patterns:
+              - pattern-either:
+                  # Inline: sanitize_text_field() applied directly inside the meta write
+                  - pattern: update_post_meta($POST_ID, $KEY, sanitize_text_field($_POST[...]))
+                  - pattern: update_post_meta($POST_ID, $KEY, sanitize_text_field($_GET[...]))
+                  - pattern: update_post_meta($POST_ID, $KEY, sanitize_text_field($_REQUEST[...]))
+                  - pattern: update_post_meta($POST_ID, $KEY, sanitize_textarea_field($_POST[...]))
+                  - pattern: update_post_meta($POST_ID, $KEY, sanitize_textarea_field($_GET[...]))
+                  - pattern: update_post_meta($POST_ID, $KEY, sanitize_textarea_field($_REQUEST[...]))
+                  - pattern: add_post_meta($POST_ID, $KEY, sanitize_text_field($_POST[...]))
+                  - pattern: add_post_meta($POST_ID, $KEY, sanitize_text_field($_GET[...]))
+                  - pattern: add_post_meta($POST_ID, $KEY, sanitize_textarea_field($_POST[...]))
+                  - pattern: update_user_meta($USER_ID, $KEY, sanitize_text_field($_POST[...]))
+                  - pattern: update_user_meta($USER_ID, $KEY, sanitize_text_field($_GET[...]))
+                  - pattern: update_term_meta($TERM_ID, $KEY, sanitize_text_field($_POST[...]))
+                  - pattern: update_option($KEY, sanitize_text_field($_POST[...]))
+                  - pattern: update_option($KEY, sanitize_text_field($_GET[...]))
+                  - pattern: add_option($KEY, sanitize_text_field($_POST[...]))
+                  # esc_attr() used directly as the (wrong) sanitizer, same call shapes
+                  - pattern: update_post_meta($POST_ID, $KEY, esc_attr($_POST[...]))
+                  - pattern: update_post_meta($POST_ID, $KEY, esc_attr($_GET[...]))
+                  - pattern: update_post_meta($POST_ID, $KEY, esc_attr($_REQUEST[...]))
+                  - pattern: add_post_meta($POST_ID, $KEY, esc_attr($_POST[...]))
+                  - pattern: update_user_meta($USER_ID, $KEY, esc_attr($_POST[...]))
+                  - pattern: update_option($KEY, esc_attr($_POST[...]))
+                  - pattern: add_option($KEY, esc_attr($_POST[...]))
+                  # Split-assignment: sanitize_text_field()/esc_attr() assigned to
+                  # $VAL, then stored
+                  - pattern: |
+                      $VAL = sanitize_text_field($_POST[...]);
+                      ...
+                      update_post_meta($POST_ID, $KEY, $VAL);
+                  - pattern: |
+                      $VAL = sanitize_text_field($_GET[...]);
+                      ...
+                      update_post_meta($POST_ID, $KEY, $VAL);
+                  - pattern: |
+                      $VAL = sanitize_text_field($_REQUEST[...]);
+                      ...
+                      update_post_meta($POST_ID, $KEY, $VAL);
+                  - pattern: |
+                      $VAL = sanitize_textarea_field($_POST[...]);
+                      ...
+                      update_post_meta($POST_ID, $KEY, $VAL);
+                  - pattern: |
+                      $VAL = sanitize_text_field($_POST[...]);
+                      ...
+                      update_user_meta($USER_ID, $KEY, $VAL);
+                  - pattern: |
+                      $VAL = sanitize_text_field($_POST[...]);
+                      ...
+                      update_option($KEY, $VAL);
+                  - pattern: |
+                      $VAL = esc_attr($_POST[...]);
+                      ...
+                      update_post_meta($POST_ID, $KEY, $VAL);
+              # Only flag writes to URL-named keys — non-URL fields rendered with
+              # esc_attr() in data-* / class / id attributes are correctly escaped.
+              # .* anchors required: $KEY captures the full PHP string literal token.
+              - metavariable-regex:
+                  metavariable: $KEY
+                  regex: "(?i).*(link|url|href|src|redirect|endpoint|uri|website|homepage).*"
+          # Branch 2: generic/bulk per-key sanitization loop — the key is not a
+          # literal (it comes from the loop itself, e.g. an arbitrary key=>value
+          # map accepted by a REST/AJAX "update meta" endpoint), so no literal-name
+          # regex is possible. Instead this targets the STRUCTURAL bug: every
+          # value is blindly run through esc_attr() regardless of key, with no
+          # per-key type branching. pattern-not-inside is the fix-derived negative
+          # clause — once the code checks the key against an allow-list (e.g.
+          # `in_array($KEY, $URL_KEYS, true)`) before picking the sanitizer, this
+          # branch is exactly what a real fix looks like and must not fire.
+          - patterns:
+              - pattern: $ARR[$KEY] = esc_attr(...);
+              - pattern-inside: |
+                  foreach ($METAS as $KEY => $VALUE) { ... }
+              - pattern-not-inside: |
+                  if (in_array($KEY, $URL_KEYS, ...)) { ... }

@@ -1,0 +1,145 @@
+rules:
+  - id: claude.php.wordpress.file-upload.filename-validator-missing-extension-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      A small helper function's entire body reassigns its filename parameter
+      through sanitize_file_name() (or basename()) and returns it
+      unconditionally, with no file-extension allow-list check
+      (pathinfo(..., PATHINFO_EXTENSION) + in_array()/comparison,
+      wp_check_filetype(), wp_check_filetype_and_ext()) and no content-type
+      check (finfo_file(), mime_content_type(), getimagesize(),
+      exif_imagetype()) anywhere in the function (CWE-434).
+
+      sanitize_file_name()/basename() only strip illegal characters and
+      directory components from a filename — neither restricts nor
+      re-checks the file extension. A function shaped this way is commonly
+      wired up as an indirect callback (e.g. the "options" callback of
+      filter_input(..., FILTER_CALLBACK, ...), or a sanitize_callback for a
+      registered setting/REST argument) or invoked as a stand-alone
+      validation step before an upload/export/import write. Because that
+      wiring is indirect, an attacker-chosen destination filename (e.g.
+      "shell.php") survives the "validation" untouched, and if the caller
+      later writes attacker-controlled content to a path built from this
+      return value in a web-accessible directory, it executes as PHP (or
+      another dangerous type) once requested.
+
+      The actual write call is frequently in a DIFFERENT function than this
+      validator (the caller that owns the AJAX/REST/import action), so a
+      same-function sink check is unreliable here — this validator's own
+      return path is the only fixed marker. Add an extension allow-list
+      check (and/or a real content-type check) that gates the return so an
+      invalid extension aborts/errors instead of passing the original
+      filename through.
+
+      TRIAGE:
+        1. Confirm the function's return value is actually used, anywhere
+           in the call graph (directly, or via a FILTER_CALLBACK/
+           sanitize_callback wiring), to build a write/save destination
+           path — not merely displayed or compared.
+        2. Confirm that destination directory is web-accessible.
+        3. Determine the authentication requirement to reach the caller
+           that performs the write.
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/434.html
+        - https://owasp.org/Top10/A04_2021-Insecure_Design/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $FN($X) {
+                $X = sanitize_file_name($X);
+                ...
+                return $X;
+              }
+          - pattern: |
+              function $FN($X) {
+                $X = basename($X);
+                ...
+                return $X;
+              }
+          - pattern: |
+              function $FN($X) {
+                return sanitize_file_name($X);
+              }
+          - pattern: |
+              function $FN($X) {
+                return basename($X);
+              }
+      - metavariable-regex:
+          metavariable: $FN
+          regex: (?i)^(?=.*(file|name|upload))(?=.*(valid|saniti[sz]e|clean|check|filter|callback)).*$
+      # The official fix (and the general neutralizer for this class) adds an
+      # extension allow-list or content-type check inside the SAME function
+      # before the value is allowed to return — any of these makes the match
+      # above structurally impossible (the function body is no longer the
+      # bare assign-then-return shape) and additionally guards the exact
+      # tokens the fix could plausibly use.
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            pathinfo($Y, PATHINFO_EXTENSION);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            wp_check_filetype(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            wp_check_filetype_and_ext(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            finfo_file(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            new finfo(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            getimagesize(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            exif_imagetype(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            mime_content_type(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            in_array($EXT, $ALLOWED, true);
+            ...
+          }

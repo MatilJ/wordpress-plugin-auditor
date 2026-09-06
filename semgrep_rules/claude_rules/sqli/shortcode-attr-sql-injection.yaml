@@ -1,0 +1,84 @@
+rules:
+  - id: claude.php.wordpress.sqli.shortcode-attr-sql-injection
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A shortcode attribute value ($atts / $attributes / $instance) reaches
+      a $wpdb query method without $wpdb->prepare() or an equivalent SQL
+      sanitizer. Shortcode attributes are controlled by users with
+      Contributor role or higher (they can insert arbitrary shortcode
+      attributes into post content). This is SQL injection (CWE-89).
+      CVE references: Slimstat Analytics <= 5.0.9, Pods Custom Content
+      Types, News Announcement Scroll <= 9.0.0 — all Contributor+ SQLi
+      via shortcode attributes.
+      Fix: use $wpdb->prepare() with %d/%s/%f placeholders for all
+      shortcode attribute values used in SQL queries.
+      Triage: verify the function is registered as a shortcode callback
+      via add_shortcode(). If $atts is used in a non-shortcode context,
+      this may be a false positive.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://www.wordfence.com/threat-intel/vulnerabilities/wordpress-plugins/wp-slimstat/slimstat-analytics-509-authenticated-contributor-blind-sql-injection-via-shortcode
+    pattern-sources:
+      - pattern-either:
+          - pattern: $atts[$K]
+          - pattern: $atts
+          - pattern: $attributes[$K]
+          - pattern: $attributes
+      # $instance is handled separately: it collides with the common Singleton-accessor
+      # local-variable convention ($instance = self::get_instance();), which is an object
+      # reference unrelated to a WP_Widget config array and must not be treated as a source.
+      - patterns:
+          - pattern-either:
+              - pattern: $instance[$K]
+              - pattern: $instance
+          - pattern-not-inside: |
+              $instance = self::get_instance();
+              ...
+          - pattern-not-inside: |
+              $instance = $CLASS::get_instance();
+              ...
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $wpdb->query($Q, ...)
+              - pattern: $wpdb->get_results($Q, ...)
+              - pattern: $wpdb->get_row($Q, ...)
+              - pattern: $wpdb->get_var($Q, ...)
+              - pattern: $wpdb->get_col($Q, ...)
+          - focus-metavariable: $Q
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: $wpdb->prepare(...)
+          - pattern: esc_sql(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          - pattern: sanitize_key(...)
+          - pattern: sanitize_sql_orderby(...)
+          - pattern: array_map('absint', ...)
+          - pattern: array_map('intval', ...)
+          - pattern: array_map('floatval', ...)
+          - pattern: array_map('sanitize_key', ...)
+          - pattern: map_deep($X, 'absint')
+          - pattern: map_deep($X, 'intval')
+          - pattern: map_deep($X, 'sanitize_key')
+          - pattern: wp_parse_id_list(...)
+          - pattern: sanitize_title(...)
+          - pattern: new DateTime(...)
+          - pattern: new DateTimeImmutable(...)
+          - pattern: strtotime(...)
+          # NOTE: sanitize_text_field() is NOT a sanitizer.
+          # It strips HTML but preserves ' " ; ( ) and other SQL metacharacters.

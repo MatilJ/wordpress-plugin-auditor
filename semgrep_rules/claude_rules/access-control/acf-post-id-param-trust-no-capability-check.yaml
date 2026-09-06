@@ -1,0 +1,100 @@
+rules:
+  - id: claude.php.wordpress.access-control.acf-post-id-param-trust-no-capability-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      Code re-derives the "target object" for an ACF-style save/validate flow by
+      reading the raw '_acf_post_id' request parameter directly (via
+      acf_maybe_get_POST('_acf_post_id', ...) or a raw $_POST/$_REQUEST read),
+      instead of using the framework-provided, already-validated post_id (the
+      hook's own callback argument, or acf_get_form_data('post_id')). No
+      current_user_can() capability check gates the enclosing function.
+
+      ACF core exposes '_acf_post_id' as a hidden form field so its own
+      acf/validate_save_post and acf/save_post machinery can resolve which
+      object (post/user/term/option/etc, via acf_decode_post_id()-style
+      "type_id" strings such as user_1) a submission targets — and ACF core's
+      own resolution already applies its own validation. A plugin/module that
+      hooks the same actions and re-reads '_acf_post_id' straight from the
+      request, rather than trusting the value ACF core already resolved, lets
+      an attacker submit a hidden field naming an ARBITRARY object — including
+      another user (e.g. "user_1", the administrator) — and have that object
+      receive the submitted field values. When the mapped field group can write
+      role/capability-bearing data, this becomes privilege escalation; in all
+      cases it is an IDOR-style object-confusion (CWE-639) enabling missing
+      authorization (CWE-862) on the resolved object.
+
+      Confirmed pattern (ACF-ecosystem "validate_save_post" hook handler,
+      pre-fix): a validate_save_post() callback read
+      $post_id = acf_maybe_get_POST('_acf_post_id'); and used that raw value,
+      unchecked, both as the array key selecting which object's submitted data
+      to process and as the "id=" argument fired via do_action() to run the
+      matching save routine for that object -- with no current_user_can() call
+      anywhere in the handler.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - '_acf_post_id' (or equivalent object-id field) is read directly from
+          $_POST/$_REQUEST/acf_maybe_get_POST(), not from the hook's own
+          $post_id parameter or acf_get_form_data('post_id').
+        - The resulting value selects which post/user/term/option object is
+          written to (array key, do_action() argument, meta/field save call).
+        - No current_user_can() check (e.g. edit_post/edit_user with the
+          resolved id) appears anywhere in the enclosing function.
+
+      FALSE POSITIVE indicators:
+        - The enclosing function calls current_user_can() (standalone or
+          inside a conditional) before using the value.
+        - The value is sourced from acf_get_form_data('post_id') or the
+          hook callback's own argument instead of a raw request read.
+        - The resolved object type is restricted to a fixed, non-identity
+          bearing kind (e.g. always 'option') with no per-user object in scope.
+
+      Fix: trust the framework-resolved value instead of re-reading raw input,
+      e.g. acf_get_form_data('post_id'); or, if a raw read is unavoidable,
+      verify current_user_can() against the specific resolved object id/type
+      before honoring it.
+    metadata:
+      category: security
+      cwe: "CWE-269: Improper Privilege Management"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/269.html
+        - https://cwe.mitre.org/data/definitions/639.html
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+    patterns:
+      - pattern-either:
+          - pattern: $POSTID = acf_maybe_get_POST('_acf_post_id', ...);
+          - pattern: $POSTID = acf_maybe_get_POST("_acf_post_id", ...);
+          - pattern: $POSTID = $_POST['_acf_post_id'];
+          - pattern: $POSTID = $_POST["_acf_post_id"];
+          - pattern: $POSTID = $_REQUEST['_acf_post_id'];
+          - pattern: $POSTID = $_REQUEST["_acf_post_id"];
+      # Exclude: current_user_can() present anywhere in the enclosing function
+      # (standalone statement or inside an if-condition) — an explicit
+      # capability check is the accepted mitigation for a raw object-id read.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can(...) ...>) { ... }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... !current_user_can(...) ...>) { ... }
+            ...
+          }

@@ -1,0 +1,103 @@
+rules:
+  - id: claude.php.wordpress.access-control.cookie-flag-bypasses-security-gate
+    languages: [php]
+    severity: HIGH
+    message: |
+      A raw $_COOKIE value, checked only with isset()/!empty() (no hash_equals(),
+      HMAC, or server-side session/transient verification), directly sets a
+      variable whose name suggests it controls a security or visibility gate —
+      e.g. a maintenance-mode display flag, a paywall/lock bypass, or an
+      access-restriction toggle (CWE-287: Improper Authentication / CWE-565:
+      Reliance on Cookie without Validation and Integrity Checking). Cookies are
+      fully attacker-controlled request data; any visitor can set an arbitrary
+      cookie value on a fresh, unauthenticated request.
+
+      This also covers the sibling shape where the cookie's raw VALUE (not
+      just its presence) is compared with ==/=== directly against a hardcoded
+      string literal that reads as an auth/session status word (e.g.
+      "authenticated", "verified", "valid"). Because that literal is a fixed
+      constant baked into the plugin's own source rather than a per-install
+      secret or a signed/hashed token, it never varies between sites, users,
+      or sessions — anyone who reads the (typically public) plugin source, or
+      observes one legitimately-issued cookie, can replay the identical value
+      forever to satisfy the check.
+
+      TRIAGE: trace the gate variable to its later use. If it feeds a
+      return/bypass branch of a restrictive code path with no other independent
+      server-side check, an unauthenticated visitor can flip it with a single
+      forged cookie. If the variable only affects a non-security UI preference,
+      this is a false positive.
+
+      Fix: never let a raw client-supplied cookie value alone satisfy a security
+      decision. Bind the cookie to a signed value (hash_equals() against an HMAC
+      of a server secret) or a server-side session/transient lookup keyed by a
+      cryptographically random token.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-287: Improper Authentication"
+        - "CWE-565: Reliance on Cookie without Validation and Integrity Checking"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/287.html
+        - https://cwe.mitre.org/data/definitions/565.html
+    patterns:
+      - pattern-either:
+          # Presence-only gate: the cookie's mere existence flips a security
+          # flag; the cookie's actual value is never inspected.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      if (!empty($_COOKIE[$KEY])) { $GATE = $VAL; }
+                  - pattern: |
+                      if (isset($_COOKIE[$KEY])) { $GATE = $VAL; }
+              - metavariable-regex:
+                  metavariable: $GATE
+                  regex: (?i)^\$\w*(show|hide|display|skip|bypass|unlock|lock|block|restrict|gate|access|maintenance|allow|deny)\w*$
+          # Value-literal gate: the cookie's raw value is compared directly to
+          # a hardcoded status-word literal instead of a signed/hashed value.
+          - patterns:
+              - pattern-either:
+                  - pattern: $_COOKIE[$KEY] == "$LIT"
+                  - pattern: |
+                      "$LIT" == $_COOKIE[$KEY]
+                  - pattern: $_COOKIE[$KEY] === "$LIT"
+                  - pattern: |
+                      "$LIT" === $_COOKIE[$KEY]
+                  - pattern: |
+                      $GATE2 = isset($_COOKIE[$KEY]) ? $_COOKIE[$KEY] : $DEFAULT;
+                      ...
+                      if ($GATE2 == "$LIT") { ... }
+                  - pattern: |
+                      $GATE2 = isset($_COOKIE[$KEY]) ? $_COOKIE[$KEY] : $DEFAULT;
+                      ...
+                      if ("$LIT" == $GATE2) { ... }
+                  - pattern: |
+                      $GATE2 = $_COOKIE[$KEY];
+                      ...
+                      if ($GATE2 == "$LIT") { ... }
+                  - pattern: |
+                      $GATE2 = $_COOKIE[$KEY];
+                      ...
+                      if ("$LIT" == $GATE2) { ... }
+              - metavariable-regex:
+                  metavariable: $LIT
+                  regex: (?i)^(authenticated|verified|valid|granted|unlocked|success|passed|allowed|active|confirmed|logged.?in|admin|yes|true|ok|1)$
+              # Exclude: the fix shape — the literal is verified through a
+              # timing-safe/hash-based comparison rather than raw ==/===.
+              - pattern-not-inside: |
+                  if (wp_check_password(...)) { ... }
+              - pattern-not-inside: |
+                  if (hash_equals(...)) { ... }
+              - pattern-not-inside: |
+                  if (password_verify(...)) { ... }
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"

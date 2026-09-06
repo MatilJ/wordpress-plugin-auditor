@@ -1,0 +1,53 @@
+rules:
+  - id: claude.php.wordpress.xss.wp-add-inline-style-stored-value
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      Stored value flows into wp_add_inline_style() without CSS-safe sanitization.
+      WP Core print_inline_style() (class-wp-styles.php) outputs CSS between
+      <style> tags without HTML encoding. A payload like
+      </style><script>alert(1)</script> breaks out of CSS context into HTML.
+      Sanitize with sanitize_hex_color(), safecss_filter_attr(), or validate
+      against an allowlist before passing to wp_add_inline_style().
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: LOW
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_add_inline_style/
+    pattern-sources:
+      - pattern-either:
+          - pattern: get_post_meta(...)
+          - pattern: get_option(...)
+          - pattern: get_user_meta(...)
+          - pattern: get_term_meta(...)
+          - pattern: get_the_author_meta(...)
+    pattern-sinks:
+      - pattern-either:
+          - pattern: wp_add_inline_style($HANDLE, $SINK)
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_hex_color(...)
+          - pattern: safecss_filter_attr(...)
+          - pattern: esc_attr(...)
+          - pattern: esc_html(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          - pattern: wp_strip_all_tags(...)
+          - pattern: strip_tags(...)
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"

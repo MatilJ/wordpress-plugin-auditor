@@ -1,0 +1,87 @@
+rules:
+  - id: claude.php.wordpress.access-control.render-callback-token-issuance-no-capability-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      A Gutenberg block's render_callback mints a fresh authentication/access
+      token (a $obj->create()/generate()/issue()/mint() call) and hands it to
+      the browser via wp_localize_script()/wp_add_inline_script(), with no
+      current_user_can() capability check anywhere in the callback. Because
+      render_callback runs on every render of the block — including for any
+      visitor whose request causes the block markup to be parsed — the token
+      is issued unconditionally instead of only to viewers authorized to use
+      the data it unlocks (CWE-862).
+
+      Fix: gate token issuance behind an explicit capability check (and, for
+      blocks whose containing content is not always publicly published, a
+      post-visibility check) before minting or localizing the token:
+        if ( ! current_user_can( $required_capability ) ) {
+            return '';
+        }
+        wp_localize_script( $handle, $name, [ 'token' => $token->create(...) ] );
+
+      TRIAGE:
+      1. If the block's data is intentionally public once its containing
+         content is published, confirm a status check still gates issuance
+         for non-published content — an unconditional mint with zero checks
+         anywhere in the callback is the defect, not a public-content carve-out.
+      2. Confirm the localized value is actually consumed as a bearer
+         credential by a REST/AJAX endpoint, not a non-sensitive display id.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Missing Authorization / Sensitive Token Exposure"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/functions/wp_localize_script/
+        - https://developer.wordpress.org/block-editor/reference-guides/block-api/block-registration/
+    # Freemius SDK is always a bundled third-party library; OOS for Wordfence bounty.
+    paths:
+      exclude:
+        - "**/freemius/**"
+    patterns:
+      # Outer anchor: must be inside a dynamic block registration call.
+      - pattern-inside: register_block_type(...)
+      # Core sink: the callback localizes a value produced by a create/generate/
+      # issue/mint-style method call directly into the frontend-visible script data.
+      - pattern-either:
+          - pattern: |
+              function (...) {
+                ...
+                wp_localize_script($HANDLE, $NAME, <... $OBJ->$METHOD(...) ...>);
+                ...
+              }
+          - pattern: |
+              function (...) {
+                ...
+                wp_add_inline_script($HANDLE, <... $OBJ->$METHOD(...) ...>, ...);
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: "(?i).*(create|generate|issue|mint).*"
+      # Exclude: capability check present as a standalone statement anywhere
+      # in the callback (the canonical defensive fix).
+      - pattern-not-inside: |
+          function (...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      # Exclude: capability check present inside an if-condition — required in
+      # addition to the standalone form since Semgrep's statement-level pattern
+      # does not match calls that appear only inside if conditions.
+      - pattern-not-inside: |
+          function (...) {
+            ...
+            if (<... current_user_can(...) ...>) {
+              ...
+            }
+            ...
+          }

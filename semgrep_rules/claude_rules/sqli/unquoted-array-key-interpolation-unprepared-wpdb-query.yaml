@@ -1,0 +1,154 @@
+rules:
+  - id: claude.php.wordpress.sqli.unquoted-array-key-interpolation-unprepared-wpdb-query
+    languages: [php]
+    severity: HIGH
+    message: |
+      An array-key or object-property value is spliced directly into a SQL
+      string immediately after a comparison operator, with NO surrounding
+      quote characters and no int/float cast, and the resulting string is
+      passed straight to a $wpdb execution method with no ->prepare()
+      anywhere in between. Because the value sits UNQUOTED in the SQL text,
+      an attacker does not even need to break out of a string literal — any
+      submitted value is spliced verbatim into the query as raw SQL syntax
+      at that position (CWE-89 SQL Injection).
+
+      Two PHP syntaxes produce this identical runtime shape and are both
+      covered: curly-brace string interpolation ({$arr['key']} / {$obj->prop}
+      inside a double-quoted string) and plain '.'-concatenation of the bare
+      array/object access into the query string (whether built inline at the
+      $wpdb call or assigned to an intermediate variable first, e.g.
+      $query = '...WHERE id = ' . $args['id'] . '...'; ... $wpdb->get_results
+      ($query)). The concatenation form is the common shape behind AJAX/
+      shortcode handlers whose argument array (often literally named $atts,
+      $args, or $data — the same parameter the caller fed straight from
+      $_POST/$_REQUEST/$_GET) is passed into a query-building helper that
+      splices one of its keys straight into a WHERE clause with no cast
+      applied before the concatenation.
+
+      This shape is easy to miss during review: the array/object whose key
+      is read (e.g. a "current item" or "context" struct) is often built
+      several function calls away — frequently inside a WordPress filter
+      callback that silently overrides one of its fields with unsanitized
+      request data — so the line that actually executes the query looks
+      like ordinary, already-escaped SQL (the neighboring fields are often
+      genuinely wrapped in esc_sql()), while just one field was missed.
+
+      Fix: use $wpdb->prepare() with a %d/%f/%i placeholder for the value
+      (never hand-build the numeric-looking clause), or at minimum cast the
+      value with (int)/(float)/absint() before it is ever written into the
+      array/object that gets interpolated or concatenated.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+      # TRIAGE GUIDANCE — this is a pattern-based (non-taint) lead: Semgrep
+      # cannot see whether the array/object field was sanitized on an
+      # earlier, unrelated line (PHP does not allow calling a sanitizer
+      # function inside {$...} string interpolation, so the field itself
+      # must have been cast/escaped BEFORE it was stored — confirm that
+      # manually).
+      #
+      # TRUE POSITIVE — the array/object whose key or property is
+      # interpolated is populated (anywhere in its construction, including
+      # via an apply_filters()/add_filter() callback that overrides one of
+      # its fields) from $_GET/$_POST/$_REQUEST, a REST request parameter,
+      # or any other request-controlled source, with no (int)/absint()/
+      # esc_sql() applied to that specific field along the way.
+      #
+      # FALSE POSITIVE — the field was populated exclusively via (int)
+      # cast/absint()/intval() before being stored in the array/object, or
+      # is a hardcoded/enum value never influenced by request data.
+      #
+      # KNOWN LIMITATION — same as raw-sql-clause-quoted-variable-
+      # interpolation.yaml: this pattern intentionally does not require the
+      # interpolated field's construction to be visible in the same
+      # function; the vulnerable line for this class is the SQL string
+      # itself, which is frequently the ONLY place the missing escaping is
+      # observable (the field may be set correctly in every OTHER code path
+      # and unsanitized only via one hook/filter override).
+    patterns:
+      - pattern-either:
+          # Branch A — curly-brace string interpolation, inline at the sink
+          # call itself ({$arr['key']} / {$obj->prop} spliced directly into
+          # the SQL string argument).
+          - patterns:
+              - pattern-either:
+                  - pattern: $WPDB->query($Q, ...)
+                  - pattern: $WPDB->get_results($Q, ...)
+                  - pattern: $WPDB->get_row($Q, ...)
+                  - pattern: $WPDB->get_var($Q, ...)
+                  - pattern: $WPDB->get_col($Q, ...)
+              - metavariable-regex:
+                  metavariable: $Q
+                  # Leading ".*" required: metavariable-regex is prefix-anchored
+                  # (re.match semantics), not substring search.
+                  # "(?!wpdb\b)" excludes {$wpdb->prop} interpolation specifically:
+                  # $wpdb's own properties (->users, ->posts, ->prefix, etc.) are
+                  # WP-Core-internal table-name strings, never attacker-influenced,
+                  # and this exact FP fires on wp-statistics' own OTHER queries
+                  # (class-wp-statistics-visitor.php get_users_visitor(): "... =
+                  # {$wpdb->users}.ID") — confirmed empirically while validating
+                  # this rule against its seeding CVE's own affected tree.
+                  regex: "(?is).*\\b(select|where|and|or)\\b.*=\\s*\\{\\$(?!wpdb\\b)[a-z_][a-z0-9_]*(\\[[^\\]]*\\]|->[a-z_][a-z0-9_]*)\\}(?!')"
+              # Fix-derived FP guard: the seeding CVE's patch did NOT change this
+              # sink shape directly (it wrapped the source value in esc_sql() two
+              # function calls upstream, in a different file/class, invisible from
+              # this call site) — the only textual change AT the sink was the
+              # patch author defensively single-quoting the previously-bare id
+              # field ('{$current_page['id']}' instead of {$current_page['id']}).
+              # That happens to be the exact, real distinguishing signal a
+              # sink-local rule CAN see: requiring the interpolation be UNQUOTED
+              # (no quote between "=" and "{", none immediately after "}") is what
+              # makes this rule fire pre-patch and go silent post-patch at the same
+              # line — encoded directly in the regex above rather than as a
+              # separate pattern-not clause, since the "fix" here is a syntactic
+              # shape (missing quotes), not a named sanitizer call.
+          # Branch B — plain '.'-concatenation of the bare array/object access
+          # into a query string, either built inline at the sink call or
+          # assigned to an intermediate variable first and passed to the sink
+          # a few lines later. The '.'-operator equivalent of Branch A; a
+          # second, independently confirmed CVE (SQLi via an AJAX handler's
+          # request-array parameter concatenated straight into a WHERE-clause
+          # numeric value) established this as the same class under a
+          # different, at least as common, PHP syntax.
+          - patterns:
+              - pattern-either:
+                  # $ARR[$KEY] mid-chain (more clauses concatenated after it).
+                  - pattern: |
+                      $Q = $BEFORE . $ARR[$KEY] . $AFTER;
+                      ...
+                      $WPDB->$METHOD($Q, ...);
+                  - pattern: $WPDB->$METHOD($BEFORE . $ARR[$KEY] . $AFTER, ...)
+                  # $ARR[$KEY] as the final/tail element of the chain (no
+                  # trailing fragment) — equally common, e.g. a simple
+                  # "...WHERE id = " . $args['id'] lookup with nothing after.
+                  - pattern: |
+                      $Q = $BEFORE . $ARR[$KEY];
+                      ...
+                      $WPDB->$METHOD($Q, ...);
+                  - pattern: $WPDB->$METHOD($BEFORE . $ARR[$KEY], ...)
+              - metavariable-regex:
+                  metavariable: $METHOD
+                  regex: ^(query|get_results|get_row|get_var|get_col)$
+              # Fix-derived FP guard: requiring the concatenated element to be
+              # the bare array/object-access expression itself (nothing more)
+              # means the seeding CVE's fix — wrapping the exact same value in
+              # intval() at the exact same concatenation site — changes the
+              # AST shape at that position from a bare array access to a
+              # function-call node, which this pattern does not match. No
+              # separate pattern-not/cast-exclusion list is needed: the cast
+              # itself is what stops the shape from matching, mirroring how
+              # Branch A's regex goes silent once the value is quoted.
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"

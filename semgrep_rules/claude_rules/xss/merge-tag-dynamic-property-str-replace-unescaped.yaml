@@ -1,0 +1,70 @@
+rules:
+  - id: claude.php.wordpress.xss.merge-tag-dynamic-property-str-replace-unescaped
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A template/merge-tag substitution routine reassigns a text variable via
+      str_replace(), where the replacement value is an object property
+      (`$obj->prop` or the dynamically-named `$obj->$prop` form used by a
+      per-field loop substituting `{field_1}`, `{field_2}`, ... `{field_N}`
+      placeholders), with no output-escaping function wrapped around that
+      argument (CWE-79).
+
+      This idiom recurs in newsletter/CRM/form-builder plugins that
+      implement their own merge-tag engine rather than WP's templating: a
+      routine substitutes one or more named placeholders with a stored
+      record's properties, commonly including a loop over a fixed count of
+      custom/profile fields. When the underlying field was populated by a
+      lower-privileged or unauthenticated submitter (a public
+      subscription/contact-form field) and the resulting text is later
+      rendered as HTML — an outgoing HTML email, an admin preview, a
+      confirmation page — this is Stored XSS.
+
+      A strong same-function signal: sibling merge tags substituted in the
+      SAME routine are wrapped in esc_html()/esc_attr() while another
+      property (often the dynamically-indexed per-field one) is not, proving
+      the surrounding code is escaping-aware and this one path was simply
+      missed. A property carrying inherently non-string/generated data (a
+      numeric id, a random token, a normalized IP) is a weaker signal and
+      should be deprioritized during triage.
+
+      TRIAGE: confirm the property genuinely originates from a prior
+      user/visitor submission (not solely admin-authored configuration or
+      system-generated data), and that the resulting text is rendered as
+      HTML or sent as an HTML email rather than used only as a plain-text
+      value.
+
+      Fix: wrap the property access in esc_html() (or an equivalent
+      HTML-safe sanitizer) before it is passed as the replacement value.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — Stored"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/79.html
+        - https://developer.wordpress.org/apis/security/escaping/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/vendor-prefixed/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          - pattern: $OUT = str_replace($PLACEHOLDER, $OBJ->$PROP, $SUBJECT);
+          - pattern: $OUT .= str_replace($PLACEHOLDER, $OBJ->$PROP, $SUBJECT);
+      # Defensive: the argument-shape match above already excludes any
+      # inline-wrapped form (the sanitizer call, not the bare property
+      # access, would occupy this argument position) — these are kept for
+      # documentation/robustness against minor pattern variations.
+      - pattern-not: $OUT = str_replace($PLACEHOLDER, esc_html($OBJ->$PROP), $SUBJECT);
+      - pattern-not: $OUT = str_replace($PLACEHOLDER, esc_attr($OBJ->$PROP), $SUBJECT);
+      - pattern-not: $OUT = str_replace($PLACEHOLDER, sanitize_text_field($OBJ->$PROP), $SUBJECT);
+      - pattern-not: $OUT = str_replace($PLACEHOLDER, wp_kses_post($OBJ->$PROP), $SUBJECT);
+      - pattern-not: $OUT = str_replace($PLACEHOLDER, wp_strip_all_tags($OBJ->$PROP), $SUBJECT);
+      - pattern-not: $OUT = str_replace($PLACEHOLDER, htmlspecialchars($OBJ->$PROP), $SUBJECT);

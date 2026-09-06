@@ -1,0 +1,73 @@
+rules:
+  - id: claude.php.wordpress.xss.kses-entity-bypass-via-title-filter
+    mode: taint
+    languages: [php]
+    severity: LOW
+    message: |
+      Output from get_the_title() or apply_filters('the_title', ...) flows into
+      an output sink without esc_html() escaping. The 'the_title' filter callbacks
+      (wptexturize, convert_chars, capital_P_dangit) do NOT HTML-encode the title.
+      Missing esc_html() is a code quality / defense-in-depth issue.
+
+      NOTE: This is NOT exploitable via HTML entity encoding (&#60;img&#62;).
+      Per the WHATWG HTML specification, character references in Data state
+      (PCDATA) are resolved by the browser's tokenizer to character tokens
+      (text content), NOT tag openers. Entity-encoded payloads always render
+      as visible text, never as executable markup. Additionally, WordPress
+      core applies wp_filter_kses() via title_save_pre for users without
+      unfiltered_html, preventing literal <tag> storage by Contributors.
+
+      This rule flags missing output escaping as a best-practice issue only.
+      Do NOT report hits as exploitable Stored XSS unless you can confirm a
+      write path that stores literal < in post_title accessible to a
+      low-privilege user (bypassing both sanitize_text_field and wp_filter_kses).
+
+      Fix: wrap the title with esc_html() before echoing, or use
+      the_title_attribute() / esc_html(get_the_title()) in display contexts.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: LOW
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Output Escaping (defense-in-depth)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_kses_post/
+        - https://developer.wordpress.org/reference/functions/esc_html/
+        - https://developer.wordpress.org/reference/functions/the_title/
+        - https://developer.wordpress.org/reference/functions/the_title_attribute/
+        - https://html.spec.whatwg.org/multipage/parsing.html#data-state
+      note: |
+        ENTITY BYPASS IS A MYTH. HTML entities (&#60;) in server-sent PCDATA
+        are decoded to text characters by the browser tokenizer, not to markup.
+        This rule was previously HIGH severity based on the false assumption
+        that entity-decoded characters create executable tags. They do not.
+        Downgraded after manual testing confirmed non-exploitability.
+    pattern-sources:
+      - pattern-either:
+          - pattern: apply_filters('the_title', ...)
+          - pattern: apply_filters("the_title", ...)
+          - pattern: get_the_title(...)
+          - pattern: the_title(...)
+    # wp_kses_post() and wp_kses() are now listed as sanitizers since
+    # entity bypass through them is not exploitable in PCDATA context.
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: esc_html(...)
+          - pattern: esc_attr(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: (int) $X
+          - pattern: wp_strip_all_tags(...)
+          - pattern: wp_kses_post(...)
+          - pattern: wp_kses(...)
+    pattern-sinks:
+      - pattern-either:
+          - pattern: echo $X;
+          - pattern: print $X;
+          - pattern: print($X);

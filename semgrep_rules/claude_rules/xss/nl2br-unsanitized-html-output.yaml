@@ -1,0 +1,118 @@
+rules:
+  - id: claude.php.wordpress.xss.nl2br-unsanitized-html-output
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A method formats a stored/externally-sourced text value for HTML
+      display by piping it through nl2br() and then returns or echoes the
+      result, with no call to esc_html(), wp_kses(), htmlspecialchars(), a
+      sanitize_*() function, or an equivalently-named sanitizer/normalizer
+      wrapper applied to the same variable anywhere in the same method.
+      nl2br() only converts newline characters to <br /> tags — it performs
+      NO HTML-entity encoding and does not strip or neutralize markup, so
+      any <script> tag, event-handler attribute, or other HTML present in
+      the input reaches the page byte-for-byte. This shape recurs across
+      WordPress plugins that render externally-sourced free text (third-
+      party API responses, imported feeds, reviews, comments, calendar/
+      event data, social-media items) via nl2br() alone, mistaking it for a
+      safe formatting operation.
+
+      TRIAGE: confirm the value passed to nl2br() genuinely originates from
+      an external or attacker-influenceable source (not admin-authored
+      static configuration), and that the returned/echoed value is rendered
+      as raw HTML by a downstream template or consumer rather than escaped
+      later in the pipeline.
+
+      Fix: sanitize the value (wp_kses() with an explicit allow-list, or
+      esc_html() if no markup should be preserved) BEFORE calling nl2br() —
+      escaping after nl2br() would also encode the inserted <br /> tags.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — Stored"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/vendor-prefixed/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-inside: |
+                  function $FUNC(...) {
+                    ...
+                    return $VAR;
+                  }
+              - pattern-either:
+                  - pattern: $VAR = nl2br($VAR);
+                  - pattern: $VAR = nl2br($VAR, $BRARG);
+          - pattern: return <... nl2br($VAR) ...>;
+          - pattern: echo <... nl2br($VAR) ...>;
+      - pattern-not-inside:
+          patterns:
+            - pattern-either:
+                - pattern: |
+                    function $FUNC(...) {
+                      ...
+                      $VAR = $SANFUNC($VAR);
+                      ...
+                    }
+                - pattern: |
+                    function $FUNC(...) {
+                      ...
+                      $VAR = $SANFUNC($VAR, $...SANARGS);
+                      ...
+                    }
+                - pattern: |
+                    function $FUNC(...) {
+                      ...
+                      $VAR = $CLASS::$SANFUNC($VAR);
+                      ...
+                    }
+                - pattern: |
+                    function $FUNC(...) {
+                      ...
+                      $VAR = $CLASS::$SANFUNC($VAR, $...SANARGS);
+                      ...
+                    }
+                - pattern: |
+                    function $FUNC(...) {
+                      ...
+                      $VAR = $OBJ->$SANFUNC($VAR);
+                      ...
+                    }
+            - metavariable-regex:
+                metavariable: $SANFUNC
+                regex: "(?i).*(kses|saniti|escap|esc_|purify|normalize|strip[_a-z]*tags|htmlspecial|htmlentit|clean).*"
+      - pattern-not-inside:
+          patterns:
+            - pattern-either:
+                - pattern: return $SANFUNC(<... nl2br($VAR) ...>);
+                - pattern: echo $SANFUNC(<... nl2br($VAR) ...>);
+            - metavariable-regex:
+                metavariable: $SANFUNC
+                regex: "(?i).*(kses|saniti|escap|esc_|purify|normalize|strip[_a-z]*tags|htmlspecial|htmlentit|clean).*"
+      # Sanitizer nested INSIDE nl2br()'s argument (nl2br(esc_html($x))) is the
+      # reverse nesting order from the guard above (SANFUNC(nl2br($x))) — text
+      # is fully neutralized before nl2br() ever sees it, which is at least as
+      # safe as sanitizing afterward (and avoids double-encoding the inserted
+      # <br /> tags), so this shape must also be excluded.
+      - pattern-not-inside:
+          patterns:
+            - pattern-either:
+                - pattern: $VAR = nl2br($SANFUNC(...));
+                - pattern: $VAR = nl2br($SANFUNC(...), $BRARG2);
+                - pattern: return <... nl2br($SANFUNC(...)) ...>;
+                - pattern: echo <... nl2br($SANFUNC(...)) ...>;
+            - metavariable-regex:
+                metavariable: $SANFUNC
+                regex: "(?i).*(kses|saniti|escap|esc_|purify|normalize|strip[_a-z]*tags|htmlspecial|htmlentit|clean).*"

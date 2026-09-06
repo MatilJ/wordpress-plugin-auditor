@@ -1,0 +1,196 @@
+rules:
+  - id: claude.php.wordpress.file.strpos-prefix-containment-no-realpath
+    languages: [php]
+    severity: HIGH
+    message: |
+      A directory-containment check compares a path against a trusted base
+      directory using a raw substring-prefix match (strpos($PATH, $BASE) === 0,
+      0 === strpos($PATH, $BASE), or str_starts_with($PATH, $BASE)), but $PATH
+      is never canonicalized with realpath() (or wp_normalize_path(realpath()))
+      anywhere in the enclosing function before the check runs. strpos() and
+      str_starts_with() compare literal strings only — they do not resolve
+      ".." segments — so a value that is literally prefixed with the trusted
+      base directory but carries embedded traversal sequences after that
+      prefix (e.g. "{$basedir}/../../../../etc/passwd") satisfies the check
+      while still resolving to a path outside the trusted directory once the
+      OS opens it. If the checked value later reaches a file-read, mail/
+      export attachment, or file-serve operation, this is an arbitrary file
+      read/download primitive; if it instead reaches a file-deletion call
+      (unlink()/wp_delete_file()/$wp_filesystem->delete()), it is an
+      arbitrary file deletion primitive (CWE-22). Resolve the path with
+      realpath() FIRST, then compare the canonicalized result's prefix
+      against the canonicalized (and trailing-slash-normalized) base
+      directory.
+      A second shape reaches the same outcome even though realpath() IS
+      present: realpath() is applied ONLY to the trusted base directory
+      before an attacker-influenced remainder is string-concatenated onto
+      the already-resolved result ($real = realpath($base) . $tainted;),
+      and the prefix check then compares that concatenation against the
+      same unresolved base. realpath() never sees the traversal sequences
+      in $tainted because they are appended after it already ran, so
+      "../" segments in $tainted survive into the value later passed to
+      unlink()/rmdir()/other filesystem sinks.
+    metadata:
+      category: security
+      cwe: "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - "https://cwe.mitre.org/data/definitions/22.html"
+        - "https://owasp.org/www-community/attacks/Path_Traversal"
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — raw string-prefix containment gate, no realpath():
+      #   $upload_dir = wp_upload_dir();
+      #   foreach ($attachments as $key => $attachment) {
+      #       if (0 !== strpos($attachment, $upload_dir['basedir'])) {
+      #           unset($attachments[$key]);
+      #       }
+      #   }
+      #   -> $attachment is never realpath()'d. A value like
+      #      "{$basedir}/../../../../etc/passwd" literally starts with
+      #      $basedir so the check passes; the OS resolves ".." on open/
+      #      attach and the real target is outside the trusted directory.
+      #
+      # FALSE POSITIVE — path canonicalized before the prefix check:
+      #   $real = realpath($path);
+      #   $prefix = trailingslashit(wp_normalize_path(realpath($basedir)));
+      #   if (false === $real || 0 !== strpos(wp_normalize_path($real), $prefix)) {
+      #       return false;
+      #   }
+      #   -> realpath() collapses ".." before the string comparison runs, so
+      #      the prefix check is now meaningful. This rule stays silent here.
+      #
+      # CONTEXT CHECK:
+      #   1. Does $PATH (the strpos/str_starts_with haystack) originate from
+      #      user input, a stored value from a prior request, or any other
+      #      attacker-influenced source — directly or via array/object access?
+      #   2. Is realpath() genuinely absent for THIS variable, or does it
+      #      appear on a differently-named variable that is unrelated to the
+      #      check (verify manually — the rule only checks presence anywhere
+      #      in the function/class method, not dataflow)?
+      #   3. Does the checked value reach a sink afterward — file read,
+      #      mail attachment, export, header-triggered download, include?
+      #
+      # TRUE POSITIVE (second shape) — realpath() applied ONLY to the base,
+      # BEFORE an attacker-controlled remainder is concatenated on, then the
+      # concatenation is prefix-checked against the same unresolved base
+      # (CVE-2025-68912, hdforms <= 1.6.1): an unauthenticated AJAX handler
+      # built $dir from $_POST-derived formId/uid values (sanitize_text_field()
+      # only — no traversal filtering), scheduled a WP-Cron callback with it,
+      # and the callback's "safety" check was:
+      #   $real_path = realpath($upload_dir) . $dir;
+      #   if ($real_path && strpos($real_path, $upload_dir) === 0) { ... }
+      # realpath() resolves only the fixed $upload_dir prefix; the "../"
+      # sequences inside the attacker-controlled $dir are appended afterward
+      # and never canonicalized, yet the check trivially passes because the
+      # concatenation always starts with the literal $upload_dir string. The
+      # cron callback then ran unlink()/rmdir() on the traversed path —
+      # unauthenticated arbitrary file deletion.
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-either:
+                  - pattern: strpos($PATH, $BASE) === 0
+                  - pattern: 0 === strpos($PATH, $BASE)
+                  - pattern: strpos($PATH, $BASE) !== 0
+                  - pattern: 0 !== strpos($PATH, $BASE)
+                  - pattern: str_starts_with($PATH, $BASE)
+                  - pattern: "!str_starts_with($PATH, $BASE)"
+              - metavariable-regex:
+                  metavariable: $BASE
+                  # `\b` is non-functional in this semgrep engine's metavariable-regex
+                  # (an alternative containing it silently never matches, with no
+                  # validation error — confirmed empirically) — boundaries are
+                  # hand-rolled instead via [^A-Za-z0-9_] / (^|...) / (...|$).
+                  # Second alternative (no leading boundary) closes a false-negative
+                  # gap (CVE-2025-8141): a normalizer-prefixed name like
+                  # "$normalized_uploads" has an underscore, not a non-word char,
+                  # immediately before "uploads" — a leading-boundary-anchored token
+                  # list never matches it even though it plainly names an upload/base
+                  # directory. Third alternative (fully unanchored, no boundary
+                  # either side) closes a second false-negative gap (CVE-2026-42737):
+                  # a camelCase property-access base like "$this->attachmentsPath"
+                  # has a word character ("P") immediately after "attachments", so
+                  # even a trailing-boundary variant would not match — only a bare
+                  # substring test catches it.
+                  regex: ".*(^|[^A-Za-z0-9_])(basedir|base_dir|upload_dir|uploads_dir|safe_dir|safedir|allowed_dir|allowlist_dir|root_dir|target_dir|plugin_dir|content_dir)([^A-Za-z0-9_]|$).*|.*uploads?([^A-Za-z0-9_]|$).*|.*attachments?.*"
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    realpath(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  class $CLASS {
+                    ...
+                    function $ANY(...) {
+                      ...
+                      realpath(...);
+                      ...
+                    }
+                    ...
+                  }
+              # Relative-path-for-display idiom (mirrors WP core's own
+              # private _wp_relative_upload_path()): the if-body strips the
+              # matched base-directory prefix off the SAME checked variable
+              # via str_replace() and the result is returned as a plain
+              # string — no file-read/write/delete/serve operation is
+              # allowed or denied based on the check, so there is no
+              # containment gate here to bypass, only a display-path
+              # computation.
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    if (<... strpos($PATH, $BASE) ...>) {
+                      $PATH = str_replace($BASE, '', $PATH);
+                      ...
+                    }
+                    ...
+                  }
+          # Second shape (CVE-2025-68912): realpath() IS present but is
+          # applied only to the base BEFORE the tainted remainder is
+          # concatenated on, so it never resolves the traversal sequences
+          # that reach the prefix check. This branch intentionally requires
+          # realpath($BASE) rather than excluding on its presence, and uses
+          # pattern-inside (not a single multi-statement pattern:) because a
+          # bare trailing expression statement does not parse standalone.
+          - patterns:
+              - pattern-either:
+                  - pattern: strpos($REAL, $BASE) === 0
+                  - pattern: 0 === strpos($REAL, $BASE)
+                  - pattern: strpos($REAL, $BASE) !== 0
+                  - pattern: 0 !== strpos($REAL, $BASE)
+              - pattern-either:
+                  - pattern-inside: |
+                      function $FUNC(...) {
+                        ...
+                        $REAL = <... realpath($BASE) ...>;
+                        ...
+                      }
+                  - pattern-inside: |
+                      class $CLASS {
+                        ...
+                        function $ANY(...) {
+                          ...
+                          $REAL = <... realpath($BASE) ...>;
+                          ...
+                        }
+                        ...
+                      }
+              - metavariable-regex:
+                  metavariable: $BASE
+                  regex: ".*(^|[^A-Za-z0-9_])(basedir|base_dir|upload_dir|uploads_dir|safe_dir|safedir|allowed_dir|allowlist_dir|root_dir|target_dir|plugin_dir|content_dir)([^A-Za-z0-9_]|$).*|.*uploads?([^A-Za-z0-9_]|$).*|.*attachments?.*"
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    $REAL = <... realpath($BASE) ...>;
+                    ...
+                    $REAL = realpath($REAL);
+                    ...
+                  }

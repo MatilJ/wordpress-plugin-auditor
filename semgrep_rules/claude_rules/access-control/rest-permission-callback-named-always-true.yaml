@@ -1,0 +1,45 @@
+rules:
+  - id: claude.php.wordpress.access.rest-permission-callback-named-always-true
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A function with 'permission' in its name unconditionally returns true. If registered
+      as a REST API permission_callback, this grants unauthenticated access to the endpoint
+      and is functionally identical to '__return_true' — WordPress does not validate function
+      names. Named permission callbacks are NOT automatically authenticated. Replace with an
+      explicit capability check (e.g. current_user_can('manage_options') or 'edit_posts').
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      # TRIAGE GUIDANCE:
+      # This rule catches the "named permission callback that unconditionally returns true"
+      # pattern: a placeholder function that was never filled with a real capability check.
+      # The body must contain ONLY "return true;" — any additional logic disqualifies the match.
+      #
+      # Verify by checking whether this function is used as a permission_callback in a
+      # register_rest_route() call. If it is, the endpoint is fully unauthenticated.
+      # If it is not connected to a REST route (e.g., it is a helper for ACL logic elsewhere),
+      # triage as a lower-priority issue or FP depending on context.
+      #
+      # The 'permission' regex intentionally excludes generic 'check', 'verify', etc. to
+      # reduce noise — REST API permission callbacks virtually always contain 'permission'
+      # in their name following the WP Developer Handbook convention.
+      #
+      # Confirmed TP: userfeedback-lite 1.11.1 class-userfeedback-logic-type.php:48-51
+      #   view_logic_type_results_permission_check() { return true; }
+      #   → unauthenticated access to GET /userfeedback/v1/logic-type (CVSS 5.3)
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/register_rest_route/
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/routes-and-endpoints/#permissions-callback
+    # pattern-regex used instead of pattern+metavariable-regex because Semgrep PHP
+    # does not support $FUNC metavariables in function definition positions.
+    # The regex matches functions/methods containing "permission" in their name whose
+    # entire body is only "return true;" (case-insensitive, handles TRUE/True variants).
+    pattern-regex: '(?i)function\s+\w*permission\w*\s*\([^)]*\)\s*\{\s*return\s+true\s*;\s*\}'

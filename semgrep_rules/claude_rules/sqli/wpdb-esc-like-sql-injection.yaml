@@ -1,0 +1,61 @@
+rules:
+  # Rule 1 — Taint: esc_like() result flows directly into a wpdb execution method
+  # without passing through prepare().
+  #
+  # Why esc_like() is the SOURCE (not the sanitizer):
+  #   $wpdb->esc_like() escapes only LIKE wildcards (%, _, \).
+  #   Single quotes, semicolons, and other SQL metacharacters pass through unchanged.
+  #   Developers commonly mistake it for a complete SQL sanitizer and skip prepare().
+  #   Making it the taint source flags every downstream use that isn't wrapped in prepare().
+  #
+  # Coverage: catches direct esc_like() → $wpdb->method() chains.
+  # Does NOT catch the posts_where filter callback pattern — see Rule 2 below.
+  #
+  # Why the sanitizer requires >=2 prepare() arguments:
+  #   $wpdb->prepare($query_with_value_already_interpolated) — called with ONLY the
+  #   finished query string and no bind arguments — is a no-op: there is no placeholder
+  #   left for prepare() to substitute, so the pre-interpolated value passes through
+  #   unescaped. Only a prepare() call that receives the tainted value as a separate
+  #   argument (bound against a %s/%d placeholder) actually neutralizes it.
+
+  - id: wpdb-esc-like-reaches-wpdb-method
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      `$wpdb->esc_like()` escapes only LIKE wildcards (%, _, \) — single quotes are NOT
+      escaped. Data flows from esc_like() directly into a $wpdb SQL execution method
+      without passing through a properly-parameterized $wpdb->prepare() call (one that
+      receives the tainted value as a separate bind argument rather than having it
+      pre-interpolated into the query string), allowing SQL injection via quote breakout
+      (CWE-89). A prepare() call with no bind arguments is a no-op and does not neutralize
+      the value.
+
+      Fix: wrap the esc_like() result in a bind argument:
+        $wpdb->prepare("WHERE col LIKE %s", '%' . $wpdb->esc_like($val) . '%')
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+        - https://developer.wordpress.org/reference/classes/wpdb/esc_like/
+    pattern-sources:
+      - pattern: $wpdb->esc_like(...)
+    pattern-sanitizers:
+      - pattern: $wpdb->prepare($QUERY, $BIND_ARG, ...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $wpdb->query($Q, ...)
+              - pattern: $wpdb->get_results($Q, ...)
+              - pattern: $wpdb->get_row($Q, ...)
+              - pattern: $wpdb->get_var($Q, ...)
+              - pattern: $wpdb->get_col($Q, ...)
+          - focus-metavariable: $Q

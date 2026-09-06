@@ -1,0 +1,35 @@
+rules:
+  - id: claude.php.wordpress.upload.files-type-trusted
+    languages: [php]
+    severity: HIGH
+    message: |
+      $_FILES[...]['type'] is sent by the client and is trivially spoofable.
+      Using it to decide whether an upload is allowed lets an attacker
+      upload arbitrary file types (including .php) simply by sending the
+      expected Content-Type header (CWE-434).
+      Validate using wp_check_filetype_and_ext() / finfo_file() / an
+      extension allowlist on the saved filename.
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Improper File Type Validation"
+      technology: [php, wordpress]
+      references:
+        - https://www.php.net/manual/en/features.file-upload.post-method.php
+    pattern-either:
+      - pattern: $X === $_FILES[$K]['type']
+      - pattern: $_FILES[$K]['type'] === $X
+      - pattern: $X == $_FILES[$K]['type']
+      - pattern: $_FILES[$K]['type'] == $X
+      - pattern: $X != $_FILES[$K]['type']
+      - pattern: $_FILES[$K]['type'] != $X
+      - pattern: $X !== $_FILES[$K]['type']
+      - pattern: $_FILES[$K]['type'] !== $X
+      - pattern: in_array($_FILES[$K]['type'], ...)
+      - pattern: strpos($_FILES[$K]['type'], ...)
+      - pattern: preg_match($R, $_FILES[$K]['type'])

@@ -1,0 +1,56 @@
+rules:
+  - id: claude.php.wordpress.email.wp-mail-user-headers
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      User-controlled input flows into the $headers parameter of wp_mail()
+      (or PHP's mail()). A CRLF sequence in that value injects additional
+      SMTP headers — arbitrary Bcc/Cc, a forged From, or a whole new
+      message body via MIME boundary confusion (CWE-93).
+      sanitize_text_field() collapses \r\n to a space and is safe here.
+      sanitize_email() is also safe: it restricts the value to RFC email
+      characters (a-z A-Z 0-9 !#$%&'*+/=?^_`{|}~.-@) which excludes \r,
+      \n, and : — all characters required for CRLF header injection.
+    metadata:
+      category: security
+      cwe: "CWE-93: Improper Neutralization of CRLF Sequences ('CRLF Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Mail Header Injection"
+      technology: [php, wordpress]
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: filter_input(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: wp_mail($TO, $SUBJ, $MSG, $HDR, ...)
+              - pattern: mail($TO, $SUBJ, $MSG, $HDR, ...)
+          - focus-metavariable: $HDR
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_text_field(...)
+          - pattern: wp_strip_all_tags(...)
+          - pattern: strip_tags(...)
+          # sanitize_email() restricts output to RFC email characters, which
+          # excludes \r, \n, and : — CRLF injection via this value is impossible.
+          - pattern: sanitize_email(...)
+          # Integer values cannot contain CRLF sequences
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          # sanitize_key() → [a-z0-9_-] — no CRLF or : for header injection
+          - pattern: sanitize_key(...)
+          # sanitize_hex_color() → ^#[A-Fa-f0-9]{3,6}$ — no CRLF
+          - pattern: sanitize_hex_color(...)

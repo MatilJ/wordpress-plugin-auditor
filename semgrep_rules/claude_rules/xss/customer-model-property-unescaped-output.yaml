@@ -1,0 +1,129 @@
+rules:
+  - id: claude.php.wordpress.xss.customer-model-property-unescaped-output
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A customer/checkout model object's name or email property flows into an
+      output sink (echo, print, or a value returned from a rendering method)
+      without esc_html() escaping. In API-backed / "headless" commerce plugins
+      (SureCart, EDD-style extensions, membership and form plugins with a
+      Customer/Checkout model), these properties are set verbatim by the
+      customer at checkout or account signup — any authenticated customer
+      (subscriber-tier or above) controls the value without needing an admin
+      role. When the unescaped value reaches wp-admin (a WP_List_Table
+      column_* callback, a customer/order detail screen), it is Stored XSS
+      that executes for every admin who views that screen (PR:N/Subscriber
+      attacker, admin-session impact).
+
+      TRIAGE: Confirm the property genuinely originates from customer input
+      (not an admin-set display name) and that the sink renders as HTML, not
+      merely a JSON payload consumed via a safe DOM method.
+
+      Fix: wrap the property access in esc_html() at the point of output —
+      e.g. esc_html($customer->name) — not a partial filter like
+      wp_kses_post() which still permits markup unsuited to a plain-text
+      field.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — Stored"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/esc_html/
+        - https://cwe.mitre.org/data/definitions/79.html
+    paths:
+      exclude:
+        - "**/freemius/**"
+    pattern-sources:
+      - patterns:
+          - pattern: $OBJ->name
+          - metavariable-regex:
+              metavariable: $OBJ
+              regex: "(?i).*(customer|checkout).*"
+      - patterns:
+          - pattern: $OBJ->email
+          - metavariable-regex:
+              metavariable: $OBJ
+              regex: "(?i).*(customer|checkout).*"
+    pattern-sinks:
+      - pattern-either:
+          - pattern: echo $X;
+          - pattern: print $X;
+          - pattern: print($X);
+          - pattern: return $X;
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: esc_html(...)
+          - pattern: esc_attr(...)
+          - pattern: esc_html__(...)
+          - pattern: esc_attr__(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: sanitize_text_field(...)
+          - pattern: sanitize_email(...)
+          - pattern: wp_strip_all_tags(...)
+          - pattern: tag_escape(...)
+
+  # Pattern-mode companion: property directly concatenated or returned in the
+  # same statement without escaping. Catches simple single-statement cases
+  # not requiring cross-function taint propagation.
+  - id: claude.php.wordpress.xss.customer-model-property-html-concat
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A customer/checkout model object's name or email property is
+      concatenated into an HTML string, or returned directly, without
+      esc_html() wrapping. This property is set by the customer at checkout
+      or account signup — direct concatenation into HTML without escaping is
+      Stored XSS visible to any admin who views the rendered list/screen
+      (PR:N/Subscriber attacker).
+
+      Fix: esc_html($customer->name) at the point of concatenation/return.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — Stored"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/esc_html/
+        - https://cwe.mitre.org/data/definitions/79.html
+    paths:
+      exclude:
+        - "**/freemius/**"
+    patterns:
+      - pattern-either:
+          - pattern: $A . $OBJ->name . $B
+          - pattern: $A . $OBJ->name
+          - pattern: $OBJ->name . $B
+          - pattern: $A . $OBJ->email . $B
+          - pattern: $A . $OBJ->email
+          - pattern: $OBJ->email . $B
+          - pattern: return $OBJ->name;
+          - pattern: return $OBJ->email;
+          - pattern: echo $OBJ->name;
+          - pattern: echo $OBJ->email;
+      - metavariable-regex:
+          metavariable: $OBJ
+          regex: "(?i).*(customer|checkout).*"
+      - pattern-not-inside: esc_html(...)
+      - pattern-not-inside: esc_attr(...)
+      - pattern-not-inside: htmlspecialchars(...)
+      - pattern-not-inside: htmlentities(...)
+      - pattern-not-inside: sanitize_text_field(...)
+      - pattern-not-inside: sanitize_email(...)
+      - pattern-not-inside: wp_kses(...)
+      - pattern-not-inside: wp_kses_post(...)
+      - pattern-not-inside: wp_strip_all_tags(...)

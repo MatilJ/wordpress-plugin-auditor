@@ -1,0 +1,188 @@
+rules:
+  - id: claude.php.wordpress.access-control.recovery-code-validation-skipped-in-sink-branch
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      A password/credential-reset handler branches on whether a recovery or
+      verification code was submitted, then branches AGAIN on whether a new
+      credential value was submitted in the SAME request. The branch that
+      performs the sensitive credential-change sink (wp_set_password() or an
+      equivalent custom password/credential-change function) does so without
+      first calling any code-validity check on the submitted code — the
+      validator call exists elsewhere in the same function, but only
+      executes in the sibling branch (typically the one WITHOUT a new
+      credential value), so it never gates the mutating path (CWE-269:
+      Improper Privilege Management / CWE-841: Improper Enforcement of
+      Behavioral Workflow).
+
+      Because the recovery code and the new-credential value are both
+      accepted as independent, unauthenticated request fields, an attacker
+      who can resolve/target any account (e.g. via a known email or phone
+      number) can submit ANY non-empty, invalid code together with a new
+      password in the SAME request. The outer guard only checks that the
+      code is non-empty (not that it is genuinely valid), branch selection
+      is driven purely by whether a new credential was also supplied, and
+      the handler proceeds straight to the credential-change sink — full
+      account takeover of any resolvable account, including Administrator,
+      requiring no real recovery code and no victim interaction.
+
+      This is a control-flow ordering bug, not a missing check: the plugin
+      DOES implement the validator function, but calls it from the wrong
+      branch of the if/else so the "code + new value supplied together"
+      path bypasses it entirely. The correct fix hoists the validator call
+      so it runs unconditionally once the code is present, BEFORE branching
+      on whether a new credential was supplied — or, alternatively, calls it
+      inline inside the mutating branch itself before the sink.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - The credential-change sink executes inside a nested "new value
+          present" branch, itself nested inside a "code present" branch, and
+          no call using the same user-identifier and code variables occurs
+          anywhere before the sink (neither hoisted above the nested branch
+          nor inline within it).
+        - The only check performed on the code variable before the sink is
+          a non-emptiness check (empty()/isset()), not a lookup/comparison
+          against a stored value.
+
+      FALSE POSITIVE indicators:
+        - A validator/lookup call using the same user-identifier and code
+          variables (or hash_equals() on a derived hash) executes before the
+          sink — whether hoisted above the nested "new value" branch
+          (mirroring the real-world fix shape) or inline within it before
+          the sink call.
+        - The credential-change sink's user identifier is
+          get_current_user_id() rather than a value resolved from
+          request-controlled lookup data (email/phone/login) — i.e. this is
+          a self-service "change my own password while logged in" flow, not
+          an unauthenticated recovery flow.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-269: Improper Privilege Management"
+        - "CWE-841: Improper Enforcement of Behavioral Workflow"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: CRITICAL
+      subcategory: vuln
+      vulnerability_class: "Privilege Escalation / Account Takeover"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/269.html
+        - https://cwe.mitre.org/data/definitions/841.html
+        - https://developer.wordpress.org/reference/functions/wp_set_password/
+    patterns:
+      # NOTE: the code/new-value presence checks are anchored to the
+      # concrete `!empty(...)` idiom (not a bare `<... $CODE ...>` deep
+      # match) deliberately — an unanchored deep match lets $CODE bind
+      # non-deterministically to an outer sub-expression in the positive
+      # pattern while a `pattern-not-inside` clause needs it bound to the
+      # inner variable to find the validator call, so the two clauses can
+      # silently fail to unify and the exclusion never fires. Anchoring to
+      # `!empty($CODE)` forces a single, unambiguous binding for $CODE
+      # (verified empirically: an unanchored version left this rule firing
+      # even on the official patched code).
+      - pattern: |
+          if (<... !empty($CODE) ...>) {
+            ...
+            if (<... !empty($NEWVAL) ...>) {
+              ...
+              <... $SINK($UID, $NEWVAL, ...) ...>;
+              ...
+            }
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $SINK
+          regex: (?i)^.*(change_password|set_password|reset_password|update_password|change_credential|set_credential)[a-z0-9_]*$
+      # Anchor $CODE to a bare local variable (e.g. $vCode, $code, $token),
+      # not a compound expression like $request["reset_password"]. Without
+      # this, the outer request-dispatch condition that merely routes to
+      # the whole reset-password handler can ALSO satisfy the top-level
+      # `if (!empty($CODE)) { ... }` shape (Semgrep's block ellipsis will
+      # search into nested blocks to find the required inner "new value"
+      # if/sink), producing a redundant, coarser match whose $CODE binding
+      # no longer refers to the actual recovery code — which then evades
+      # every validator-based FP guard below (verified empirically: this
+      # produced a false positive on the official patched code, because the
+      # patch's validator call uses the real code variable, not the outer
+      # dispatch variable). Recovery/verification codes are always read
+      # into a plain local variable before this guard in realistic code.
+      - metavariable-regex:
+          metavariable: $CODE
+          regex: ^\$[A-Za-z_][A-Za-z0-9_]*$
+      # FP guard #1 — the real-world fix shape: the validator call is hoisted
+      # to run unconditionally right after the code is confirmed present,
+      # BEFORE the nested "new value supplied" branch (arg order uid, code).
+      - pattern-not-inside: |
+          if (<... !empty($CODE) ...>) {
+            ...
+            <... $VALIDATOR($UID, $CODE) ...>;
+            ...
+            if (<... !empty($NEWVAL) ...>) {
+              ...
+              <... $SINK($UID, $NEWVAL, ...) ...>;
+              ...
+            }
+            ...
+          }
+      # FP guard #2 — same hoisted shape, reversed argument order (code, uid).
+      - pattern-not-inside: |
+          if (<... !empty($CODE) ...>) {
+            ...
+            <... $VALIDATOR($CODE, $UID) ...>;
+            ...
+            if (<... !empty($NEWVAL) ...>) {
+              ...
+              <... $SINK($UID, $NEWVAL, ...) ...>;
+              ...
+            }
+            ...
+          }
+      # FP guard #3 — the validator call is made inline, inside the mutating
+      # branch itself, before the sink (an alternative secure ordering).
+      - pattern-not-inside: |
+          if (<... !empty($CODE) ...>) {
+            ...
+            if (<... !empty($NEWVAL) ...>) {
+              ...
+              <... $VALIDATOR($UID, $CODE) ...>;
+              ...
+              <... $SINK($UID, $NEWVAL, ...) ...>;
+              ...
+            }
+            ...
+          }
+      # FP guard #4 — a hash_equals() comparison inline before the sink
+      # (constant-time token verification idiom) also counts as validation.
+      - pattern-not-inside: |
+          if (<... !empty($CODE) ...>) {
+            ...
+            if (<... !empty($NEWVAL) ...>) {
+              ...
+              <... hash_equals($HASH_A, $HASH_B) ...>;
+              ...
+              <... $SINK($UID, $NEWVAL, ...) ...>;
+              ...
+            }
+            ...
+          }
+      # FP guard #5 — self-service "change my own password" flow: the sink's
+      # user identifier is the caller's own current session, not a value
+      # resolved from request-controlled recovery-lookup data.
+      - pattern-not-inside: |
+          if (<... !empty($CODE) ...>) {
+            ...
+            if (<... !empty($NEWVAL) ...>) {
+              ...
+              <... $SINK(get_current_user_id(), $NEWVAL, ...) ...>;
+              ...
+            }
+            ...
+          }
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"

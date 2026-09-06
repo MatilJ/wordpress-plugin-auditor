@@ -1,0 +1,169 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+# Join rules are validated by scanning real/crafted code, not `semgrep --test`.
+
+rules:
+
+  # A REST route registered with a permissive permission_callback
+  # ('__return_true') whose callback installs or activates a plugin/theme
+  # without an internal capability check is unauthenticated arbitrary
+  # plugin/theme installation -> RCE. This is the exact GutenKit
+  # (CVE-2024-9234), Hunk Companion (CVE-2024-9707/11972) and FunnelKit
+  # (CVE-2025-1562) shape. The fix is an internal current_user_can() in the
+  # callback (GutenKit 2.4.6 added current_user_can('install_plugins')), which
+  # this rule treats as a clean (non-flagged) state.
+
+  - id: claude.php.wordpress.auth.rest-permissive-plugin-theme-install
+    mode: join
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      A REST route is registered with permission_callback => '__return_true'
+      (open to unauthenticated requests) and its callback installs or activates
+      a plugin/theme (activate_plugin, activate_plugins, Plugin_Upgrader/
+      Theme_Upgrader, switch_theme, do_plugin_install, or download_url+unzip_file
+      into the plugins dir) WITHOUT an internal current_user_can() check. Any
+      unauthenticated attacker can install an arbitrary plugin and achieve remote
+      code execution / full site takeover (CWE-862).
+
+      A nonce check in the callback does NOT make this safe: a Subscriber can read
+      the REST nonce from the admin UI, and for unauthenticated requests the
+      relevant nonce is shared. The required fix is an internal
+      current_user_can('install_plugins'|'activate_plugins'|'switch_themes').
+
+      TRIAGE:
+      1. Confirm the install package/slug is attacker-influenced
+         ($request->get_param(), $_POST, php://input).
+      2. The capability check may live in a sub-function — this rule inspects only
+         the direct callback body; trace the call chain before dismissing.
+    join:
+      rules:
+        - id: permissive-rest-registration
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: register_rest_route(..., array(..., 'permission_callback' => '__return_true', ...), ...)
+                - pattern: register_rest_route(..., [..., 'permission_callback' => '__return_true', ...], ...)
+                - pattern: register_rest_route(..., array(..., 'permission_callback' => __return_true, ...), ...)
+                - pattern: register_rest_route(..., [..., 'permission_callback' => __return_true, ...], ...)
+            - pattern-either:
+                - pattern: register_rest_route(..., array(..., 'callback' => array($OBJ, '$CALLBACK'), ...), ...)
+                - pattern: register_rest_route(..., array(..., 'callback' => [$OBJ, '$CALLBACK'], ...), ...)
+                - pattern: register_rest_route(..., [..., 'callback' => [$OBJ, '$CALLBACK'], ...], ...)
+                - pattern: register_rest_route(..., [..., 'callback' => array($OBJ, '$CALLBACK'), ...], ...)
+                - pattern: register_rest_route(..., array(..., 'callback' => '$CALLBACK', ...), ...)
+                - pattern: register_rest_route(..., [..., 'callback' => '$CALLBACK', ...], ...)
+
+        - id: install-sink-no-cap
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      activate_plugin(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      activate_plugins(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      new Plugin_Upgrader(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      new \Plugin_Upgrader(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      new Theme_Upgrader(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      new \Theme_Upgrader(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      switch_theme(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      unzip_file(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      do_plugin_install(...);
+                      ...
+                    }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  is_super_admin();
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... is_super_admin() ...>) {
+                    ...
+                  }
+                  ...
+                }
+
+      on:
+        - 'permissive-rest-registration.path == install-sink-no-cap.path'
+        - 'permissive-rest-registration.$CALLBACK == install-sink-no-cap.$CALLBACK'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/#permissions-callback
+        - https://www.wordfence.com/blog/2024/10/

@@ -1,0 +1,72 @@
+rules:
+  - id: claude.php.wordpress.access-control.strpos-domain-validation-bypass
+    languages: [php]
+    severity: HIGH
+    message: |
+      strpos() or str_contains() is used to validate a domain, hostname, or origin
+      variable against a trusted value. Substring matching is trivially bypassable:
+      an attacker controlling the input can register a domain that contains the trusted
+      string as a substring (e.g., "trustedhost.org.evil.com" passes a strpos check
+      for "trustedhost.org"). Use strict suffix matching with === comparison against
+      the exact domain, or parse the host with wp_parse_url() and compare the extracted
+      host component exactly (CWE-20).
+    metadata:
+      category: security
+      cwe: "CWE-20: Improper Input Validation"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/20.html
+        - https://www.wordfence.com/threat-intel/vulnerabilities/wordpress-plugins/flavor/flavor-flavor-flavor
+    patterns:
+      - pattern-either:
+          - pattern: strpos($DOMAIN, $TRUSTED)
+          - pattern: str_contains($DOMAIN, $TRUSTED)
+      - metavariable-regex:
+          metavariable: $DOMAIN
+          # 'origin' excludes an immediately-following 'al' to avoid matching identifiers like
+          # $originalMessage, where 'origin' is a substring of 'original' rather than a
+          # domain/origin-purpose variable name.
+          regex: \$\w*(domain|host|hostname|remote_host|server_name|ip_domain)\w*|\$\w*origin(?!al)\w*
+      - pattern-not: strpos($DOMAIN, 'www.')
+      - pattern-not: strpos($DOMAIN, '*')
+      - pattern-not: strpos($DOMAIN, '.')
+      - pattern-not: strpos($DOMAIN, '/')
+      - pattern-not: strpos($DOMAIN, '{host}')
+      - pattern-not: str_contains($DOMAIN, 'www.')
+      - pattern-not: str_contains($DOMAIN, '*')
+      - pattern-not: str_contains($DOMAIN, '.')
+      - pattern-not: str_contains($DOMAIN, '/')
+      - pattern-not: str_contains($DOMAIN, '.local')
+      # Excludes local/dev-environment detection: when the enclosing function also computes
+      # the site's own configured URL, the compared value is admin-controlled WP install
+      # config, not an attacker-supplied domain/origin being checked against a trusted value.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $SITEURL = site_url(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $SITEURL = home_url(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $SITEURL = network_site_url(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $SITEURL = get_site_url(...);
+            ...
+          }

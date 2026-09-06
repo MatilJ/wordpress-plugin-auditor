@@ -1,0 +1,70 @@
+rules:
+  - id: claude.php.wordpress.xss.file-upload-name-only-mime-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      An uploaded file is validated with wp_check_filetype() (filename/
+      extension checked against an allow-list) and then persisted to a
+      permanent, web-accessible location via move_uploaded_file() — but
+      wp_check_filetype_and_ext() (which additionally sniffs the file's
+      real content/magic bytes) is never called anywhere in the class.
+
+      Because only the declared filename extension is checked, an attacker
+      can submit a file whose extension matches an allowed type while its
+      actual content is HTML/JavaScript. When the saved file is later
+      opened directly by a victim (e.g. an admin viewing a submission
+      attachment), a browser may content-sniff it as HTML and execute the
+      injected script — Stored XSS via file upload (CWE-79).
+
+      TRIAGE:
+        1. Confirm the upload endpoint is reachable without admin
+           privileges (unauthenticated / Subscriber / Customer).
+        2. Confirm no content-based check (wp_check_filetype_and_ext(),
+           finfo_file(), getimagesize(), exif_imagetype()) runs anywhere in
+           the class before the file is persisted.
+        3. Confirm at least one allowed extension is of a type browsers may
+           render/sniff as HTML when the file is requested directly (the
+           response is not forced to Content-Disposition: attachment).
+        4. Verify the saved file is retrievable via a direct,
+           unauthenticated URL.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Stored Cross-Site Scripting"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/79.html
+        - https://developer.wordpress.org/reference/functions/wp_check_filetype_and_ext/
+        - https://developer.wordpress.org/reference/functions/wp_check_filetype/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern: |
+          function $FN(...) {
+            ...
+            wp_check_filetype(...);
+            ...
+            <... move_uploaded_file($SRC, $DST) ...>;
+            ...
+          }
+      # The patch for the seeding CVE added a real content-type check
+      # (wrapping wp_check_filetype_and_ext()) via a sibling helper method
+      # on the same class rather than inline in the upload handler itself.
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $FN2(...) {
+              ...
+              wp_check_filetype_and_ext(...);
+              ...
+            }
+            ...
+          }

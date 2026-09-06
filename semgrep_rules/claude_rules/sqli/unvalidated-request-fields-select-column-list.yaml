@@ -1,0 +1,135 @@
+rules:
+  - id: claude.php.wordpress.sqli.unvalidated-request-fields-select-column-list
+    languages: [php]
+    severity: HIGH
+    message: |
+      A SQL string interpolates a bare (unquoted, uncast) PHP variable directly
+      in the SELECT column-list position ("SELECT $var FROM ...") — commonly the
+      imploded result of a request-controlled "fields"/"columns" array — and that
+      string reaches a $wpdb execution method, either directly or via
+      $wpdb->prepare() called with no placeholder bound for that value (CWE-89).
+
+      This is a COLUMN/FIELD-NAME (identifier) position injection, a distinct
+      class from value-position SQLi: the value sits unquoted in the query text,
+      so quote-escaping functions provide no protection, and even
+      $wpdb->prepare() is commonly misused here — handing it an already fully
+      interpolated string with zero %s/%d/%i arguments is a no-op that looks
+      protective but binds nothing.
+
+      Fix: build the column list only from names verified against a real
+      allow-list before the implode — either the live table schema
+      (`$wpdb->get_col("SHOW COLUMNS FROM $table")`) or a hardcoded list checked
+      with `in_array()`/`array_intersect()` — never from a value that was merely
+      character-stripped, escaped, or passed through `$wpdb->prepare()`.
+
+      TRIAGE GUIDANCE
+      ───────────────────────────────────────────────────────────────────
+      TRUE POSITIVE indicators:
+        - The interpolated variable (or an alias of it) traces back — directly,
+          or via explode()/implode() of an array — to $_GET/$_POST/$_REQUEST
+          ['fields'|'columns'|'select'|...], a REST request parameter, or any
+          other request-controlled source, with no allow-list check (schema-
+          derived whitelist, in_array/array_intersect against a fixed list)
+          applied to each element before the implode.
+        - The REST route or AJAX action exposing this code path has no
+          permission_callback, or one reachable by Subscriber/unauthenticated.
+
+      FALSE POSITIVE indicators:
+        - The column-list variable is entirely developer-controlled (a
+          hardcoded array/string never touched by request data).
+        - Each element was validated against a real allow-list (schema-derived
+          whitelist, in_array/array_intersect against a fixed column list)
+          before the implode, even where this pattern's coarse
+          pattern-not-inside guard cannot see it (e.g. the check lives in a
+          separate helper function) — confirm manually.
+        - $wpdb->prepare() binds this value with a %i (WP 6.2+) identifier
+          placeholder rather than baking it into the format string first.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      # DETECTION RATIONALE
+      # ─────────────────────────────────────────────────────────────────────
+      # Pattern-mode, not taint: OSS Semgrep PHP taint does not reliably
+      # propagate through explode() -> foreach per-element reassignment ->
+      # implode() -> string interpolation chains (same limitation documented
+      # in sanitize-text-field-array-implode-sql-injection.yaml). This rule
+      # instead matches the resulting SQL-string SHAPE directly: a bare
+      # variable sitting between the SELECT and FROM keywords in a string that
+      # reaches a $wpdb execution method.
+      #
+      # KNOWN LIMITATION: cannot verify an allow-list helper called from a
+      # different function/file validated the array before the implode; the
+      # pattern-not-inside guard only catches the allow-list check when it
+      # appears in the SAME enclosing function as the string build.
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+        - https://developer.wordpress.org/reference/functions/sanitize_sql_orderby/
+    patterns:
+      - pattern-either:
+          # Assignment / append form — the SQL string (optionally wrapped by a
+          # $wpdb->prepare() call with no placeholder for this value) is built
+          # as a local variable before reaching any $wpdb execution method.
+          - pattern: $Q = $S;
+          - pattern: $Q .= $S;
+          - pattern: $Q = $WPDB->prepare($S);
+          # Direct inline form — the string reaches a $wpdb execution method
+          # straight away, with or without a no-op $wpdb->prepare() wrapper.
+          - pattern: $WPDB->query($S, ...)
+          - pattern: $WPDB->get_results($S, ...)
+          - pattern: $WPDB->get_row($S, ...)
+          - pattern: $WPDB->get_var($S, ...)
+          - pattern: $WPDB->get_col($S, ...)
+          - pattern: $WPDB->query($WPDB->prepare($S), ...)
+          - pattern: $WPDB->get_results($WPDB->prepare($S), ...)
+          - pattern: $WPDB->get_row($WPDB->prepare($S), ...)
+          - pattern: $WPDB->get_var($WPDB->prepare($S), ...)
+          - pattern: $WPDB->get_col($WPDB->prepare($S), ...)
+      - metavariable-regex:
+          metavariable: $S
+          # Leading ".*" required: metavariable-regex is prefix-anchored.
+          # Excludes "SELECT *" (the safe, literal all-columns wildcard) via
+          # the negative lookahead directly after "select".
+          regex: "(?is).*\\bselect\\b(?!\\s*\\*)(?:(?!\\bfrom\\b).)*\\$[a-z_][a-z0-9_]*\\s+from\\b.*"
+      # Fix-derived FP guard: the seeding CVE's patch added a helper that
+      # queries the live schema ("SHOW COLUMNS FROM $table") and keeps only
+      # field names present in that result before they are ever used to build
+      # the column list — this is the actual neutralizer the patch introduced.
+      # Nested formula (not a sibling metavariable-regex): $SHOWCOLS is bound
+      # only inside this negative branch, so its regex constraint must live
+      # in the same pattern-not-inside formula, not at the top level.
+      - pattern-not-inside:
+          patterns:
+            - pattern-inside: |
+                function $FUNC(...) {
+                  ...
+                  $WHITELIST = $WPDB->get_col($SHOWCOLS);
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $SHOWCOLS
+                regex: "(?is).*show\\s+columns.*"
+      # Equivalent, already-recognized-in-this-corpus allow-list defense
+      # (see wpdb-orderby-unsafe-sanitizer.yaml): a hardcoded column list
+      # checked via in_array()/array_intersect() before the implode. The
+      # deep operator inside the if-condition matches the check whether it
+      # is the sole condition or combined/negated with other expressions.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... in_array($ELEM, $ALLOWED, ...) ...>) { ... }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... array_intersect($ARR, $ALLOWED) ...>) { ... }
+            ...
+          }

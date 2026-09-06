@@ -1,0 +1,85 @@
+rules:
+  - id: claude.php.wordpress.xss.color-setting-getter-unsanitized-return
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A method whose name identifies it as a color-setting getter (e.g.
+      primaryColor(), get_background_color()) returns a stored or
+      request-derived value directly — a bare property/array-index read,
+      optionally guarded only by a `?? $default` fallback — with no call to
+      sanitize_hex_color(), sanitize_hex_color_no_hash(), or another
+      CSS-safe sanitizer anywhere in the method body (CWE-79). Color-picker
+      settings are commonly spliced, unescaped, into inline CSS (a
+      "<style>...</style>" block or wp_add_inline_style()) several call
+      frames away from this getter, so a simple superglobal-to-echo taint
+      rule will not catch it: the value already left the request/storage
+      layer by the time it reaches the CSS sink, and the getter is the last
+      point that can still validate it. WordPress core's
+      print_inline_style() (class-wp-styles.php) and typical
+      "<style>{$value}</style>" templates output CSS content unescaped; a
+      browser treats a <style> element's body as raw text up to the first
+      literal "</style>" sequence, so a color value containing
+      "</style><script>alert(1)</script>" breaks out of CSS context into
+      HTML/JavaScript. Fix: validate with sanitize_hex_color() /
+      sanitize_hex_color_no_hash() (or safecss_filter_attr() for non-hex CSS
+      values) before returning.
+
+      TRIAGE: confirm the getter's return value is actually reachable from a
+      CSS/style-output sink (wp_add_inline_style(), a "<style>" template, an
+      inline style="" attribute) somewhere in the plugin, and that no
+      sanitizer wraps the value anywhere in the function body. A hit is a
+      false positive if the method only feeds a non-CSS consumer (e.g. JSON
+      REST serialization with its own escaping) or already calls one of the
+      listed sanitizers before every return.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: LOW
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Stored Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/79.html
+        - https://developer.wordpress.org/reference/functions/sanitize_hex_color/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $METHOD(...) {
+                ...
+                return <... $OBJ->$PROP ...>;
+              }
+          - pattern: |
+              function $METHOD(...) {
+                ...
+                return <... $ARR[$KEY] ...>;
+              }
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: (?i)^(get)?[a-z0-9_]*colou?r[a-z0-9_]*$
+      - pattern-not-inside: |
+          function $METHOD(...) {
+            ...
+            sanitize_hex_color(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $METHOD(...) {
+            ...
+            sanitize_hex_color_no_hash(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $METHOD(...) {
+            ...
+            safecss_filter_attr(...);
+            ...
+          }
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/vendor-prefixed/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"

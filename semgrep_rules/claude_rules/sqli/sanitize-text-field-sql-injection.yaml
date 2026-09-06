@@ -1,0 +1,121 @@
+rules:
+  - id: claude.php.wordpress.sqli.sanitize-text-field-sql-injection
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A value processed by sanitize_text_field() or sanitize_textarea_field() is
+      interpolated directly into a SQL query without $wpdb->prepare() or esc_sql().
+      These sanitizers strip HTML tags but do NOT escape SQL metacharacters (single
+      quotes, backslashes, semicolons). Interpolating their output into SQL is
+      SQL injection (CWE-89).
+
+      This rule targets the second-order pattern: user writes a meta_key, option
+      name, or other field containing single quotes; a plugin reads it back via
+      $wpdb->get_results() or similar; sanitize_text_field() is applied; and the
+      result is interpolated into a bulk INSERT...SELECT or WHERE clause without
+      parameterization.
+
+      Fix: replace direct interpolation with $wpdb->prepare() or esc_sql():
+        $meta_key = esc_sql($meta_info->meta_key);
+        $sql = "SELECT ..., '$meta_key', ...";
+      Or use $wpdb->insert() / individual $wpdb->prepare() calls per row.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      # TRIAGE GUIDANCE
+      # ─────────────────────────────────────────────────────────────────────
+      # This rule fires when sanitize_text_field() / sanitize_textarea_field()
+      # output reaches a $wpdb query method without prepare() or esc_sql().
+      #
+      # Step 1 — Trace the argument to sanitize_text_field($ARG):
+      #   a. $ARG is $_POST/$_GET/$_REQUEST (user superglobal) → first-order SQLi
+      #      (also caught by wpdb-query-user-input-taint; confirm both).
+      #   b. $ARG is a field from $wpdb->get_results() / get_post_meta() /
+      #      get_user_meta() / get_option() on a table with user-writable rows
+      #      (e.g. wp_postmeta.meta_key via add_post_meta, wp_usermeta via
+      #      update_user_meta) → second-order SQLi. Verify whether an attacker-
+      #      controlled write path exists for that column.
+      #   c. $ARG is a developer-controlled constant or hardcoded array → FALSE POSITIVE.
+      #
+      # Step 2 — Verify SQL context:
+      #   Quoted context ('$var'): single quote breakout trivially exploitable.
+      #   Unquoted context (ORDER BY $var): SQL function injection (SLEEP etc.)
+      #   still possible even after sanitize_text_field().
+      #
+      # Step 3 — Check bulk query construction:
+      #   Second-order SQLi often appears in copy/duplicate functionality that reads
+      #   all meta for a post and re-inserts it via bulk INSERT...SELECT UNION.
+      #   The taint may flow through an array ($parts[] = "...$var...") then
+      #   implode() before reaching $wpdb->query() — Semgrep tracks this.
+      #
+      # NOTE: This rule intentionally overlaps wpdb-query-user-input-taint for
+      # first-order cases. The primary value here is detecting second-order paths
+      # where a DB read breaks the superglobal→SQL taint chain in the other rule.
+      #
+      # KNOWN LIMITATION — array accumulation pattern:
+      #   This rule does NOT detect taint through PHP array push + implode:
+      #     $meta_key = sanitize_text_field($row->meta_key);
+      #     $parts[] = "SELECT ..., '$meta_key', ...";   // taint lost here
+      #     $wpdb->query(implode(" UNION ALL ", $parts)); // missed
+      #   Semgrep taint does not propagate through $arr[] = "...$var..." + implode().
+      #   Use sanitize-text-field-array-implode-sql-injection.yaml for this pattern.
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/classes/wpdb/#protect-queries-against-sql-injection-attacks
+        - https://developer.wordpress.org/reference/functions/sanitize_text_field/
+    pattern-sources:
+      - pattern-either:
+          # sanitize_text_field() and sanitize_textarea_field() pass single quotes,
+          # semicolons, and SQL operators unchanged — their output is still SQL-injectable.
+          - pattern: sanitize_text_field(...)
+          - pattern: sanitize_textarea_field(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $wpdb->query($Q, ...)
+              - pattern: $wpdb->get_results($Q, ...)
+              - pattern: $wpdb->get_row($Q, ...)
+              - pattern: $wpdb->get_var($Q, ...)
+              - pattern: $wpdb->get_col($Q, ...)
+          - focus-metavariable: $Q
+    pattern-sanitizers:
+      - pattern-either:
+          # Parameterized queries — full SQL injection protection
+          - pattern: $wpdb->prepare(...)
+          # esc_sql: mysqli_real_escape_string — safe in quoted ('$val') contexts
+          - pattern: esc_sql(...)
+          # Numeric casts: no SQL metacharacters possible
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          # sanitize_key: [a-z0-9_-] only — no SQL metacharacters
+          - pattern: sanitize_key(...)
+          # sanitize_sql_orderby: [a-z0-9_] + ASC/DESC + RAND() — safe for ORDER BY
+          - pattern: sanitize_sql_orderby(...)
+          # wp_parse_id_list: array of absint — safe for IN() clauses
+          - pattern: wp_parse_id_list(...)
+          # Array-level numeric sanitization — safe for IN() and numeric columns
+          - pattern: array_map('absint', ...)
+          - pattern: array_map('intval', ...)
+          - pattern: array_map('sanitize_key', ...)
+          # sanitize_text_field wrapping a $wpdb read with a static string literal argument:
+          # the DB query has no user input, so this is not injectable as second-order SQLi.
+          # Prevents spurious firing when sanitize_text_field (source) nests around get_var (sink).
+          - pattern: sanitize_text_field($wpdb->get_var("..."))
+          - pattern: sanitize_text_field($wpdb->get_var("...", ...))
+          - pattern: sanitize_text_field($wpdb->get_results("..."))
+          - pattern: sanitize_text_field($wpdb->get_results("...", ...))
+          - pattern: sanitize_text_field($wpdb->get_row("..."))
+          - pattern: sanitize_text_field($wpdb->get_row("...", ...))
+          - pattern: sanitize_text_field($wpdb->get_col("..."))
+          - pattern: sanitize_text_field($wpdb->get_col("...", ...))

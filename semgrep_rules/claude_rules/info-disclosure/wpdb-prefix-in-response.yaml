@@ -1,0 +1,43 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.wpdb-prefix-in-response
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      The WordPress database table prefix ($wpdb->prefix) flows directly into a
+      JSON response or REST API return value. The table prefix is a defense-in-
+      depth measure against SQL injection; disclosing it to unauthenticated users
+      aids targeted exploitation of SQL injection vulnerabilities in other plugins.
+      Verify the endpoint is accessible without authentication and that the prefix
+      value itself (not just query results from prefixed tables) is returned.
+    metadata:
+      category: security
+      cwe: "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: LOW
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Sensitive Data Exposure"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/200.html
+    pattern-sources:
+      - pattern-either:
+          - pattern: $wpdb->prefix
+          - pattern: $table_prefix
+    pattern-sinks:
+      - pattern-either:
+          - pattern: wp_send_json($X, ...)
+          - pattern: wp_send_json_success($X, ...)
+          - pattern: wp_send_json_error($X, ...)
+          - pattern: new WP_REST_Response($X, ...)
+          - pattern: rest_ensure_response($X)
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: $wpdb->get_results(...)
+          - pattern: $wpdb->get_row(...)
+          - pattern: $wpdb->get_var(...)
+          - pattern: $wpdb->get_col(...)
+          - pattern: $wpdb->query(...)
+          - pattern: $wpdb->prepare(...)

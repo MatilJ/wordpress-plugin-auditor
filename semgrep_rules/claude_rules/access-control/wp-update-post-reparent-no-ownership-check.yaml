@@ -1,0 +1,69 @@
+rules:
+  - id: claude.php.wordpress.access-control.wp-update-post-reparent-no-ownership-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      wp_update_post() re-parents a post (sets 'post_parent') using an ID that may be
+      caller-controlled, with no per-resource ownership check (current_user_can('edit_post', $id)
+      or equivalent). WordPress does not verify that the caller owns the target post before
+      changing its parent. Any code path that sets 'post_parent' on an externally supplied
+      'ID' without verifying ownership enables an attacker to re-parent arbitrary posts
+      (attachments, pages, products, product variations) to their own resource — disrupting
+      content hierarchy, order file associations, and site navigation
+      (CWE-862 Missing Authorization, CWE-639 IDOR).
+
+      TRIAGE REQUIRED:
+      1. Trace where the 'ID' value originates. If it comes from $_POST, WooCommerce order
+         meta written from $_POST, or any other user-supplied source — confirm as TP.
+         If $ID is always system-determined (e.g., result of a server-side query of the
+         caller's own posts) — likely FP.
+      2. Check whether the enclosing function verifies ownership of $ID before this call:
+           current_user_can('edit_post', $id)
+           get_post_field('post_author', $id) === get_current_user_id()
+           or an equivalent plugin-specific ownership wrapper.
+      3. wp_update_post() does NOT internally check post ownership. Authorization must be
+         implemented by the calling code.
+      4. Pay special attention to WooCommerce checkout hooks
+         (woocommerce_checkout_update_order_meta, woocommerce_checkout_order_created):
+         the 'ID' often originates from order meta written from $_POST, making this
+         exploitable by unauthenticated guest checkout attackers (PR:N).
+
+      Remediation: add a per-resource ownership check before the call:
+        if ( ! current_user_can( 'edit_post', $attachment_id ) ) { return; }
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Insecure Direct Object Reference (IDOR)"
+      technology: [php, wordpress, woocommerce]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_update_post/
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+        - https://owasp.org/www-project-top-ten/2021/A01_2021-Broken_Access_Control
+        - https://cwe.mitre.org/data/definitions/862.html
+    patterns:
+      # wp_update_post called with both 'ID' and 'post_parent' keys — a re-parenting operation.
+      # Covers array() and short [] syntax; both key orderings.
+      - pattern-either:
+          - pattern: wp_update_post(array('ID' => $ID, 'post_parent' => $PARENT))
+          - pattern: wp_update_post(array('post_parent' => $PARENT, 'ID' => $ID))
+          - pattern: wp_update_post(['ID' => $ID, 'post_parent' => $PARENT])
+          - pattern: wp_update_post(['post_parent' => $PARENT, 'ID' => $ID])
+      # Exclude: any current_user_can() call in the same function — covers capability checks
+      # and per-resource ownership gates (e.g. current_user_can('edit_post', $id)).
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can(...) ...>) { ... }
+            ...
+          }

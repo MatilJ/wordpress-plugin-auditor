@@ -1,0 +1,76 @@
+rules:
+  - id: claude.php.wordpress.rce.shortcode-render-missing-strip-shortcodes
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A shortcode-rendering function (name matches the common `*shortcode*`
+      callback convention) captures buffered template output via
+      ob_get_clean() and returns or echoes it directly, without calling
+      strip_shortcodes() on the buffered string first (CWE-94).
+
+      If any field embedded in that buffered output originates from
+      previously-submitted, persisted user data (a comment, display name, or
+      similar free-text field rendered by the template), an attacker can
+      plant literal shortcode bracket syntax — e.g. "[some_registered_shortcode]"
+      — in that field. esc_html()/sanitize_text_field()/wp_kses_post() do NOT
+      strip shortcode bracket syntax, so none of them neutralize this even if
+      applied inside the template. When the shortcode callback's return value
+      is substituted back into the surrounding post content, WordPress Core's
+      own do_shortcode() pass (bound to 'the_content' at priority 11, which
+      runs after do_blocks() at priority 9) re-scans the resulting string and
+      executes the planted shortcode tag — Arbitrary Shortcode Execution with
+      no explicit do_shortcode()/apply_shortcodes() call anywhere in the
+      vulnerable plugin itself.
+
+      TRIAGE: confirm at least one field written into the output buffer can
+      contain attacker-influenced free text (not just numeric/enum values),
+      and that the buffered string is returned/echoed as-is.
+
+      Mitigation: call strip_shortcodes() on the buffered/assembled output
+      immediately before it is returned or echoed.
+    metadata:
+      category: security
+      cwe: "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Arbitrary Shortcode Execution"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/94.html
+        - https://developer.wordpress.org/reference/functions/do_shortcode/
+        - https://developer.wordpress.org/reference/functions/strip_shortcodes/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    pattern-sources:
+      - patterns:
+          - pattern: ob_get_clean()
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+              }
+          - metavariable-regex:
+              metavariable: $FUNC
+              regex: "(?i).*shortcode"
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: return $X;
+              - pattern: echo $X;
+          - pattern-inside: |
+              function $SINKFUNC(...) {
+                ...
+              }
+          - metavariable-regex:
+              metavariable: $SINKFUNC
+              regex: "(?i).*shortcode"
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: strip_shortcodes(...)
+          - pattern: wp_strip_all_tags(...)

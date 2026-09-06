@@ -1,0 +1,111 @@
+rules:
+  - id: claude.php.wordpress.xss.is-string-only-sanitizer-array-bypass
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A per-field sanitization gate only sanitizes a value on one side of an
+      is_string()/is_array() type check, with no matching branch handling the
+      other shape anywhere in the same conditional. PHP's request parsing
+      (and REST JSON body decoding) accepts bracket/nested notation on any
+      normally-scalar field (field[]=x, field[key]=x), and conversely a
+      caller can submit a plain scalar for a field the code otherwise expects
+      as an array — so an attacker picks whichever shape the code does NOT
+      sanitize and skips the sanitizer call entirely. The raw value then
+      survives into storage (or whatever this function returns) completely
+      unsanitized. If it later reaches an HTML/attribute output context
+      without independent escaping, this is Stored XSS (CWE-79).
+
+      Two confirmed shapes: (1) a foreach loop's is_string($VALUE) gate
+      sanitizes the value, with no is_array($VALUE) sibling branch anywhere
+      in the loop, so an array-shaped field bypasses it entirely; (2) an
+      is_array($X) branch sanitizes the array's contents (typically specific
+      sub-keys, e.g. a paired 'date'/'time' field), but the accompanying else
+      branch assigns the raw value straight through with no sanitizer call
+      at all, so submitting the field as a plain scalar instead of the
+      expected array bypasses the array-only sanitization.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      # This is a write-side structural gap only — Semgrep cannot trace how the
+      # array/hook parameter this function receives was populated (typically a
+      # multi-hop path through a REST controller and a WP filter/action hook), nor
+      # whether the render path escapes the value later. Every hit requires two
+      # manual checks before confirming: (1) is this function reachable from
+      # unauthenticated/low-privileged input (trace the enclosing hook/route back
+      # to its registration and permission_callback), and (2) does at least one
+      # render path echo the surviving value (or an imploded/joined form of an
+      # array of it) without esc_html()/esc_attr()/wp_kses().
+      #
+      # Shape 1's remediated form adds an elseif (is_array($VALUE)) (or
+      # equivalent) branch in the SAME loop that itself sanitizes every array
+      # element — excluded via a deep is_array($VALUE) search inside the same
+      # foreach, regardless of whether it appears as a sibling elseif or a
+      # separate later check. Shape 2's remediated form applies a sanitizer
+      # or type-guard on the else branch's assignment itself (e.g.
+      # is_scalar($X) ? sanitize_text_field($X) : '') — excluded because the
+      # bare "$VAR = $X;" shape no longer matches once the right-hand side is
+      # wrapped in a call or ternary. A hit where the alternate branch exists
+      # but forgets to sanitize its own value (copies it through verbatim, or
+      # filters only by key/type without an inner sanitizer call) is still a
+      # TRUE POSITIVE — read the branch body, not just its presence.
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/79.html
+        - https://developer.wordpress.org/apis/security/data-validation/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+        - "**/freemius/**"
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-either:
+                  - pattern-inside: |
+                      foreach ($ARR as &$VALUE) {
+                        if (is_string($VALUE)) {
+                          ...
+                        }
+                      }
+                  - pattern-inside: |
+                      foreach ($ARR as $KEY => $VALUE) {
+                        if (is_string($VALUE)) {
+                          ...
+                        }
+                      }
+              - pattern: $SANITIZER($VALUE, ...)
+              - metavariable-regex:
+                  metavariable: $SANITIZER
+                  regex: "(?i).*(saniti[sz]e|esc_html|esc_attr|esc_textarea|wp_kses|kses|strip_tags|htmlspecialchars|htmlentities|clean).*"
+              - pattern-not-inside: |
+                  if (is_string($VALUE)) {
+                    ...
+                  } elseif (is_array($VALUE)) {
+                    ...
+                  }
+              - pattern-not-inside: |
+                  if (is_string($VALUE)) {
+                    ...
+                  } else if (is_array($VALUE)) {
+                    ...
+                  }
+          - patterns:
+              - pattern: $VAR = $X;
+              - pattern-inside: |
+                  if (<... is_array($X) ...>) {
+                    ...
+                    <... $SANITIZER(...) ...>;
+                    ...
+                  }
+                  else {
+                    ...
+                  }
+              - metavariable-regex:
+                  metavariable: $SANITIZER
+                  regex: "(?i).*(saniti[sz]e|esc_html|esc_attr|esc_textarea|wp_kses|kses|strip_tags|htmlspecialchars|htmlentities|clean|absint|intval).*"

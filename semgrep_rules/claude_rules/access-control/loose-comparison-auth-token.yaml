@@ -1,0 +1,142 @@
+rules:
+  - id: claude.php.wordpress.access-control.loose-comparison-auth-token
+    languages: [php]
+    severity: HIGH
+    message: |
+      A variable whose name suggests an authentication secret (token, secret,
+      password, auth_key, api_key, user_key, nonce, hmac, signature, license) is
+      compared using loose equality (== or !=) instead of strict equality (===)
+      or a timing-safe function like hash_equals(). The comparison is flagged
+      anywhere it occurs, including nested inside a larger boolean expression
+      (e.g. combined with a presence check via &&) — not only when it is the
+      sole if-condition, and independent of snake_case vs camelCase naming for
+      the "*_key"-style variants (e.g. sessionKey, userKey).
+
+      PHP type juggling makes loose comparison dangerous for authentication:
+        - null == false evaluates to true, so a missing request parameter (null)
+          matches a boolean false return from functions like get_transient().
+        - json_decode('true') == "any_string" evaluates to true because PHP
+          casts the boolean true to 1 and then compares 1 == "any_string",
+          which casts the string to 0... except for numeric strings.
+        - "0e12345" == "0e67890" evaluates to true because PHP interprets both
+          as scientific notation for zero (0.0 == 0.0).
+
+      CVE-2024-38770 (WP Time Capsule): loose == on an auth token allowed
+      unauthenticated bypass when the stored token was absent (false) and the
+      attacker omitted the header (null). CVE-2024-7503: same class.
+
+      Fix: use === for strict comparison, or hash_equals() for timing-safe
+      comparison of cryptographic secrets. Always check for empty/false returns
+      from storage functions before comparing.
+    metadata:
+      category: security
+      cwe: "CWE-697: Incorrect Comparison"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://www.php.net/manual/en/language.operators.comparison.php
+        - https://www.php.net/manual/en/function.hash-equals.php
+        - https://www.wordfence.com/threat-intel/vulnerabilities/wordpress-plugins/developer-flavor/wp-time-capsule-1398-authentication-bypass
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/vendor-prefixed/**"
+        - "**/node_modules/**"
+    pattern-either:
+      # == with auth-named variable on the left. Bare-expression pattern (not
+      # wrapped in `if ($X == $Y) { ... }`) so it also matches the comparison
+      # when it is one operand of a larger boolean expression, e.g.
+      # `!empty($stored) && $stored == $input`, not only a standalone condition.
+      - patterns:
+          - pattern: $X == $Y
+          - metavariable-regex:
+              metavariable: $X
+              regex: \$\w*(?:token|secret|password|auth_key|api_key|secret_key|reset_key|login_key|session_key|access_key|nonce|hmac|signature|license)\b
+          # A comparison against the bare null literal is a presence/config
+          # check, not a comparison of two secret values — the type-juggling
+          # risk this rule targets (null == false, "0e..." == "0e...", etc.)
+          # requires both operands to be attacker-influenceable data.
+          - pattern-not: $X == null
+          # Same reasoning extends to '' and false: an emptiness/presence
+          # check on a single stored/admin-configured value, not a two-sided
+          # comparison of a secret against attacker-supplied data.
+          - pattern-not: $X == ''
+          - pattern-not: $X == ""
+          - pattern-not: $X == false
+      # == with auth-named variable on the right
+      - patterns:
+          - pattern: $X == $Y
+          - metavariable-regex:
+              metavariable: $Y
+              regex: \$\w*(?:token|secret|password|auth_key|api_key|secret_key|reset_key|login_key|session_key|access_key|nonce|hmac|signature|license)\b
+          - pattern-not: null == $Y
+          - pattern-not: "'' == $Y"
+          - pattern-not: "\"\" == $Y"
+          - pattern-not: false == $Y
+      # != with auth-named variable on the left
+      - patterns:
+          - pattern: $X != $Y
+          - metavariable-regex:
+              metavariable: $X
+              regex: \$\w*(?:token|secret|password|auth_key|api_key|secret_key|reset_key|login_key|session_key|access_key|nonce|hmac|signature|license)\b
+          - pattern-not: $X != null
+          - pattern-not: $X != ''
+          - pattern-not: $X != ""
+          - pattern-not: $X != false
+      # != with auth-named variable on the right
+      - patterns:
+          - pattern: $X != $Y
+          - metavariable-regex:
+              metavariable: $Y
+              regex: \$\w*(?:token|secret|password|auth_key|api_key|secret_key|reset_key|login_key|session_key|access_key|nonce|hmac|signature|license)\b
+          - pattern-not: null != $Y
+          - pattern-not: "'' != $Y"
+          - pattern-not: "\"\" != $Y"
+          - pattern-not: false != $Y
+      # == / != on a "*key"-style variable name written in camelCase rather than
+      # snake_case (e.g. userKey, sessionKey) — same class as the branches above,
+      # matched case-insensitively and restricted to the "user_key" compound so
+      # unrelated camelCase identifiers containing "token"/"secret"/etc. in a
+      # different casing are not swept in by a blanket case-insensitive flag.
+      - patterns:
+          - pattern: $X == $Y
+          - metavariable-regex:
+              metavariable: $X
+              regex: (?i)\$\w*user_?key\b
+          - pattern-not: $X == null
+          - pattern-not: $X == ''
+          - pattern-not: $X == ""
+          - pattern-not: $X == false
+      - patterns:
+          - pattern: $X == $Y
+          - metavariable-regex:
+              metavariable: $Y
+              regex: (?i)\$\w*user_?key\b
+          - pattern-not: null == $Y
+          - pattern-not: "'' == $Y"
+          - pattern-not: "\"\" == $Y"
+          - pattern-not: false == $Y
+      - patterns:
+          - pattern: $X != $Y
+          - metavariable-regex:
+              metavariable: $X
+              regex: (?i)\$\w*user_?key\b
+          - pattern-not: $X != null
+          - pattern-not: $X != ''
+          - pattern-not: $X != ""
+          - pattern-not: $X != false
+      - patterns:
+          - pattern: $X != $Y
+          - metavariable-regex:
+              metavariable: $Y
+              regex: (?i)\$\w*user_?key\b
+          - pattern-not: null != $Y
+          - pattern-not: "'' != $Y"
+          - pattern-not: "\"\" != $Y"
+          - pattern-not: false != $Y

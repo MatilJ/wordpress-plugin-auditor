@@ -1,0 +1,101 @@
+rules:
+  # Detects sprintf() with format strings containing href= or src= where
+  # arguments are not wrapped in esc_url().
+  - id: claude.php.wordpress.xss.sprintf-url-attr-no-esc-url
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      sprintf() interpolates a variable into an HTML href or src attribute
+      without esc_url() wrapping. If the variable originates from user-controlled
+      storage (shortcode attributes, post meta, option values), an attacker can
+      inject javascript: protocol URIs. wp_kses_post() does NOT strip javascript:
+      strings from shortcode attribute text values, so the payload survives the
+      post_content save pipeline and executes on the frontend (CWE-79).
+
+      Fix: wrap each URL argument with esc_url() before passing to sprintf():
+        sprintf('<a href="%s">', esc_url($url))
+
+      TRIAGE: Verify the variable source reaches user-controlled data (shortcode
+      props, post meta, widget settings). Hardcoded URLs or admin-only option
+      values are false positives. Also FP if the sprintf result is passed through
+      esc_url() or wp_kses() before echo.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    patterns:
+      - pattern: sprintf($FMT, ...)
+      - metavariable-regex:
+          metavariable: $FMT
+          regex: ".*(href|src|action)\\s*=\\s*[\"']%.*"
+      - pattern-not: sprintf($FMT, ..., esc_url(...), ...)
+      - pattern-not: sprintf($FMT, ..., esc_url_raw(...), ...)
+      - pattern-not: sprintf($FMT, ..., \esc_url(...), ...)
+      - pattern-not: sprintf($FMT, ..., \esc_url_raw(...), ...)
+      # menu_page_url() unconditionally applies esc_url() to its return value
+      # before returning (or echoing), regardless of the $display argument —
+      # verified against WP core's wp-admin/includes/plugin.php implementation.
+      - pattern-not: sprintf($FMT, ..., menu_page_url(...), ...)
+      - pattern-not: sprintf($FMT, ..., \menu_page_url(...), ...)
+      - pattern-not-inside: esc_url(...)
+      - pattern-not-inside: esc_url_raw(...)
+      - pattern-not-inside: esc_attr(...)
+      - pattern-not-inside: wp_kses(...)
+      - pattern-not-inside: wp_kses_post(...)
+      # A bare string literal can never carry attacker-controlled bytes —
+      # this is the common "hardcoded support/vendor URL in a translated
+      # error message" idiom, not user-controlled data reaching the attribute.
+      # Covers both the single-placeholder and two-placeholder (URL + link
+      # text, both literal) forms of that idiom.
+      - pattern-not: sprintf($FMT, "...")
+      - pattern-not: sprintf($FMT, '...')
+      # Single-placeholder form where the argument is a literal prefix
+      # concatenated with a plugin-defined UPPERCASE constant (e.g. a relative
+      # admin-page path built from a page-slug constant) rather than a bare
+      # literal — same hardcoded-URL reasoning, one concatenation deep.
+      - pattern-not:
+          patterns:
+            - pattern: sprintf($FMT, "..." . $CONST)
+            - metavariable-regex:
+                metavariable: $CONST
+                regex: "^[A-Z_][A-Z0-9_]*$"
+      - pattern-not:
+          patterns:
+            - pattern: sprintf($FMT, '...' . $CONST)
+            - metavariable-regex:
+                metavariable: $CONST
+                regex: "^[A-Z_][A-Z0-9_]*$"
+      - pattern-not: sprintf($FMT, "...", "...")
+      - pattern-not: sprintf($FMT, "...", '...')
+      - pattern-not: sprintf($FMT, '...', "...")
+      - pattern-not: sprintf($FMT, '...', '...')
+      # Three-placeholder hardcoded form: two bare string-literal URLs plus a
+      # relative admin-page path built from a literal prefix concatenated with
+      # a plugin-defined UPPERCASE constant (not request input) — same
+      # "hardcoded support/vendor URL" idiom as the exclusions above, extended
+      # to a third placeholder built from a literal + constant.
+      - pattern-not:
+          patterns:
+            - pattern: sprintf($FMT, "...", "...", "..." . $CONST)
+            - metavariable-regex:
+                metavariable: $CONST
+                regex: "^[A-Z_][A-Z0-9_]*$"
+      - pattern-not:
+          patterns:
+            - pattern: sprintf($FMT, '...', '...', '...' . $CONST)
+            - metavariable-regex:
+                metavariable: $CONST
+                regex: "^[A-Z_][A-Z0-9_]*$"
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"

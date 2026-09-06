@@ -1,0 +1,155 @@
+rules:
+  - id: claude.php.wordpress.access-control.hardcoded-hash-literal-nonce-gate
+    languages: [php]
+    severity: HIGH
+    message: |
+      A request-supplied value ($_REQUEST/$_GET/$_POST/$_COOKIE, optionally
+      passed through a wrapper/sanitizer function or method first) is compared
+      against md5()/sha1()/hash() of a fixed string literal, and this
+      comparison is the security gate for the surrounding function. Because
+      the hash input is a literal baked into the plugin's own source code,
+      the resulting "token" is identical on every installation of the plugin
+      and requires no site-specific secret to compute — any attacker who has
+      read the (typically public) plugin source already knows the expected
+      value. Unlike a real nonce created with wp_create_nonce()/verified with
+      wp_verify_nonce(), this value never varies per site, per session, or
+      over time, so it provides neither CSRF protection nor privilege
+      verification (CWE-862, CWE-330).
+
+      TRIAGE REQUIRED:
+      1. Confirm the hashed literal is NOT combined with a genuine per-site
+         secret (AUTH_KEY, AUTH_SALT, wp_salt(), a random value generated at
+         install time and stored in options) — if a real secret is mixed into
+         the hash input, the token is not statically knowable and this is a
+         false positive.
+      2. Confirm no wp_verify_nonce() / check_ajax_referer() /
+         check_admin_referer() / current_user_can() also gates the same
+         sensitive operation elsewhere in the function — if a real check is
+         present in addition to the literal-hash comparison, the fake check
+         is redundant rather than the sole gate.
+      3. Confirm the gated operation has real impact: file write/upload,
+         option/settings write, data import/export, or another state-changing
+         action. A gate around a pure read has lower severity.
+      4. Determine reachability: is the containing function/file reachable by
+         an unauthenticated visitor — registered on a *_nopriv_* hook, or a
+         standalone PHP file lacking a `defined('ABSPATH') || exit;` guard
+         that self-executes when requested directly over HTTP?
+
+      Confirmed pattern: a standalone, directly web-reachable PHP file (no
+      ABSPATH guard) that processes an uploaded file only after comparing
+      $_REQUEST['nonce'] against md5() of a hardcoded string literal, with no
+      current_user_can() anywhere in the class — any unauthenticated visitor
+      who has read the plugin's public source can compute the "nonce" and
+      upload attacker-controlled data.
+
+      Remediation: replace the literal-hash comparison with
+      wp_verify_nonce($_REQUEST['nonce'], 'plugin_specific_action') paired
+      with current_user_can('appropriate_capability'), and ensure the file
+      cannot be requested directly outside the WordPress bootstrap.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-330: Use of Insufficiently Random Values"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization / Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://cwe.mitre.org/data/definitions/330.html
+        - https://developer.wordpress.org/apis/security/nonces/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    patterns:
+      # Scope: reason about one function/method body at a time so the
+      # pattern-not-inside exclusions below can see the whole enclosing gate.
+      - pattern-inside: |
+          function $FUNC(...) {
+            ...
+          }
+      # Anchor: comparison of a request-derived value against a hash of a
+      # fixed string literal, in either operand order and with either
+      # loose or strict equality. The hit is reported on this expression.
+      - pattern-either:
+          - pattern: $X === md5("...")
+          - pattern: md5("...") === $X
+          - pattern: $X == md5("...")
+          - pattern: md5("...") == $X
+          - pattern: $X === sha1("...")
+          - pattern: sha1("...") === $X
+          - pattern: $X == sha1("...")
+          - pattern: sha1("...") == $X
+          - pattern: $X === hash("...", "...")
+          - pattern: hash("...", "...") === $X
+          - pattern: $X == hash("...", "...")
+          - pattern: hash("...", "...") == $X
+      # Constrain $X to a superglobal read, either bare or wrapped by exactly
+      # one sanitizer/helper call (function, or $obj->method()/Class::method()).
+      - metavariable-pattern:
+          metavariable: $X
+          patterns:
+            - pattern-either:
+                - pattern: $_REQUEST[$K]
+                - pattern: $_GET[$K]
+                - pattern: $_POST[$K]
+                - pattern: $_COOKIE[$K]
+                - pattern: $FN($_REQUEST[$K])
+                - pattern: $FN($_GET[$K])
+                - pattern: $FN($_POST[$K])
+                - pattern: $FN($_COOKIE[$K])
+                - pattern: $OBJ->$METHOD($_REQUEST[$K])
+                - pattern: $OBJ->$METHOD($_GET[$K])
+                - pattern: $OBJ->$METHOD($_POST[$K])
+                - pattern: $OBJ->$METHOD($_COOKIE[$K])
+      # Exclude: a genuine WordPress nonce/capability check also guards this
+      # function — the literal-hash comparison is then redundant, not the
+      # sole gate (mirrors the real fix: replacing the literal check with
+      # wp_verify_nonce() neutralizes this rule because the vulnerable
+      # expression is gone entirely).
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            wp_verify_nonce(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... wp_verify_nonce(...) ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            check_ajax_referer(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            check_admin_referer(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can(...) ...>) {
+              ...
+            }
+            ...
+          }

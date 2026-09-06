@@ -1,0 +1,77 @@
+rules:
+  - id: claude.php.wordpress.xss.unserialized-array-foreach-unescaped-echo
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      An array produced by unserialize()/maybe_unserialize() — typically a
+      previously-stored user submission fetched back from a database column
+      — is iterated with foreach, and a loop value reaches an echo/print
+      sink without HTML escaping. Plugins that persist submitted array data
+      (form entries, log/history viewers, "database add-on" style admin
+      screens) via serialize() for later display often escape most render
+      branches but miss one (e.g. a file-name or secondary-key branch),
+      producing Stored XSS when that surviving raw branch is reachable with
+      attacker-controlled content. Fix: wrap every render branch with
+      esc_html()/esc_attr()/esc_url() as appropriate to the output context.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://owasp.org/www-community/attacks/xss/
+    pattern-sources:
+      - pattern-either:
+          - pattern: unserialize(...)
+          - pattern: maybe_unserialize(...)
+    pattern-sinks:
+      - pattern-either:
+          - pattern: echo $X;
+          - pattern: print $X;
+          - pattern: print($X);
+          - pattern: printf($F, ...)
+    pattern-propagators:
+      - pattern: foreach ($FROM as $KEY => $TO) { ... }
+        from: $FROM
+        to: $TO
+      - pattern: foreach ($FROM as $TO) { ... }
+        from: $FROM
+        to: $TO
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: esc_html(...)
+          - pattern: esc_attr(...)
+          - pattern: esc_url(...)
+          - pattern: esc_textarea(...)
+          - pattern: esc_html__(...)
+          - pattern: esc_attr__(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          - pattern: sanitize_text_field(...)
+          - pattern: sanitize_textarea_field(...)
+          - pattern: sanitize_file_name(...)
+          - pattern: strip_tags(...)
+          - pattern: wp_strip_all_tags(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: wp_json_encode(...)
+          - pattern: json_encode(...)
+          - pattern: wp_send_json(...)
+          - pattern: wp_send_json_success(...)
+          - pattern: wp_send_json_error(...)

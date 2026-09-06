@@ -1,0 +1,184 @@
+rules:
+  - id: claude.php.wordpress.access-control.oauth-profile-email-verified-flag-ignored
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      A multi-provider OAuth adapter's user-profile object (the standard
+      getUserProfile()-style accessor exposed by widely-embedded OAuth
+      aggregation libraries) is used to resolve a WordPress account by its
+      ->email property, and that account is then looked up/matched
+      (get_user_by('email', ...), email_exists(...)) with no check anywhere
+      in the function of the SAME profile object's own verified-email flag
+      (->emailVerified / ->email_verified).
+
+      Completing a legitimate OAuth handshake only proves the requester owns
+      SOME account at the provider — it does NOT prove the provider itself
+      verified that account's email address. Many providers let a user
+      register with, or later add, an email address they do not control and
+      never confirm. If the plugin trusts ->email for identity resolution
+      without also checking the profile object's own verified-email flag, an
+      attacker who owns a provider account can enter an arbitrary victim's
+      email address as their own (unverified) profile email, complete the
+      OAuth flow honestly, and be logged into the victim's WordPress account
+      — full authentication bypass, including administrators.
+
+      Fix: before using the profile email for account resolution or
+      creation, reject the flow (or require additional verification) when
+      the profile's own verified-email flag is falsy — e.g.
+      `if (empty($profile->emailVerified)) { deny(); }` before any
+      get_user_by()/email_exists()/wp_insert_user() call keyed on that email.
+
+      A second, narrower shape: a per-provider profile-normalizer function
+      (the common "map this OAuth API's raw JSON response into one
+      standard array/object of profile fields" step keyed on a provider
+      name) assigns its output email field directly from the decoded
+      response's ->email property (at any nesting depth), with no
+      verified-flag check anywhere in that same assignment. Some providers'
+      user-info endpoints never expose a verified-email flag at all, so
+      trusting the field unconditionally is equivalent to skipping the
+      check outright — a later lookup keyed on that field elsewhere in the
+      codebase inherits the same unverified-identity risk.
+
+      A third shape: an OAuth/SSO callback re-confirms an EXISTING WordPress
+      account (often gated behind an administrator-role check) by a
+      case-normalized string comparison between that account's own field
+      (e.g. user_email) and a resource-owner/profile attribute pulled from
+      the provider's response, then completes login via
+      wp_set_auth_cookie()/wp_set_current_user() — with no check anywhere in
+      the function for a verified-flag on the resource-owner/profile
+      structure that attribute came from. Matching an unverified attribute
+      against a KNOWN account's real value only proves the two strings are
+      equal, not that the provider confirmed the requester controls that
+      attribute — an attacker who can set an arbitrary (unverified) value for
+      the mapped attribute at the provider can still log into any matched
+      account whose value they can guess or discover, including admins.
+    metadata:
+      category: security
+      cwe: "CWE-287: Improper Authentication"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/287.html
+        - https://developer.wordpress.org/reference/functions/get_user_by/
+        - https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/
+    patterns:
+      - pattern-either:
+          # Variant 1: a HybridAuth-style adapter's getUserProfile() object is
+          # used for account resolution/creation in the same function, with no
+          # verified-flag check anywhere in that function.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PROFILE = $ADAPTER->getUserProfile();
+                        ...
+                        <... $PROFILE->email ...>;
+                        ...
+                        get_user_by("email", ...);
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PROFILE = $ADAPTER->getUserProfile();
+                        ...
+                        <... $PROFILE->email ...>;
+                        ...
+                        email_exists(...);
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PROFILE = $ADAPTER->getUserProfile();
+                        ...
+                        <... $PROFILE->email ...>;
+                        ...
+                        wp_insert_user(...);
+                        ...
+                      }
+              # The fix: a check on the SAME profile object's own verified-email
+              # flag anywhere in the function neutralizes the match (camelCase).
+              - pattern-not: |
+                  function $FUNC(...) {
+                    ...
+                    $PROFILE = $ADAPTER->getUserProfile();
+                    ...
+                    <... $PROFILE->emailVerified ...>;
+                    ...
+                  }
+              # Same neutralizer, snake_case property-naming variant.
+              - pattern-not: |
+                  function $FUNC(...) {
+                    ...
+                    $PROFILE = $ADAPTER->getUserProfile();
+                    ...
+                    <... $PROFILE->email_verified ...>;
+                    ...
+                  }
+          # Variant 2: a per-provider profile-normalizer assigns its output
+          # email field directly from a decoded OAuth API response object's
+          # ->email property (any nesting depth), independent of any
+          # getUserProfile()-adapter shape. The neutralizer is scoped to the
+          # SAME assignment statement (not "anywhere in the function") because
+          # multi-provider normalizers are commonly one large per-provider
+          # if/elseif ladder where other branches may legitimately check a
+          # verified flag while the vulnerable provider's branch does not.
+          - patterns:
+              - pattern-either:
+                  - pattern: $ARR['email'] = <... $PROFILE->email ...>;
+                  - pattern: $OBJ->email = <... $PROFILE->email ...>;
+              - pattern-not: $ARR['email'] = <... $PROFILE->email_verified ...>;
+              - pattern-not: $ARR['email'] = <... $PROFILE->emailVerified ...>;
+              - pattern-not: $ARR['email'] = <... $PROFILE->verified ...>;
+              - pattern-not: $OBJ->email = <... $PROFILE->email_verified ...>;
+              - pattern-not: $OBJ->email = <... $PROFILE->emailVerified ...>;
+              - pattern-not: $OBJ->email = <... $PROFILE->verified ...>;
+          # Variant 3: an admin-role-gated SSO callback re-confirms an
+          # existing account by a case-normalized comparison of its own field
+          # against a resource-owner-derived value, then logs in — no check
+          # anywhere in the function for a verified-flag (regex proxy: the
+          # literal "verified", matching how these checks are actually named:
+          # email_verified, isVerified..., while not matching unrelated
+          # "verification"/"verifier" text such as nonce or OAuth1 comments).
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        if (in_array("administrator", $USER->roles, true)) {
+                          ...
+                          $OWNVAL = $USER->$FIELD;
+                          ...
+                          if (strtolower($OWNVAL) !== strtolower($ATTR)) {
+                            ...
+                          }
+                          ...
+                        }
+                        ...
+                        wp_set_auth_cookie(...);
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        if (in_array("administrator", $USER->roles, true)) {
+                          ...
+                          $OWNVAL = $USER->$FIELD;
+                          ...
+                          if (strtolower($OWNVAL) === strtolower($ATTR)) {
+                            ...
+                            wp_set_auth_cookie(...);
+                            ...
+                          }
+                          ...
+                        }
+                        ...
+                      }
+              - pattern-not-regex: (?i).*verified.*

@@ -1,0 +1,125 @@
+rules:
+  - id: claude.php.wordpress.xss.esc-url-raw-html-attribute-misuse
+    languages: [php]
+    severity: HIGH
+    message: |
+      A value produced by esc_url_raw() or sanitize_url() (an alias of
+      esc_url_raw() since WP 5.9) is spliced into a single-quote-delimited
+      href/src/action HTML attribute instead of esc_url() (CWE-79, root
+      cause CWE-116). Both functions are documented for "database or
+      redirect usage" and intentionally skip the 'display'-context step
+      that HTML-entity-encodes a literal single quote (' -> &#039;) — the
+      one encoding step that keeps a value safe inside a single-quoted
+      HTML attribute. Their shared character-class filter does not strip
+      ' (or (, ), =) at all, so an attacker-controlled quote reaches the
+      browser and terminates the attribute early, permitting arbitrary
+      attribute injection (e.g. autofocus/onfocus='...').
+
+      Fix: use esc_url() (its default 'display' context) for any value
+      that will be echoed into HTML markup. Reserve esc_url_raw()/
+      sanitize_url() strictly for values written to the database or
+      passed to wp_redirect()/header().
+
+      TRIAGE: confirm (1) the attribute is single-quote delimited at the
+      sink (esc_url_raw()/sanitize_url() DOES strip a literal " outright,
+      so a double-quoted attribute is not exploitable via this mechanism),
+      and (2) the value assembled into the attribute can reach
+      non-hardcoded, non-admin-controlled content (shortcode attributes,
+      merge/personalization tags, request-derived values, stored option or
+      post-meta URLs).
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/esc_url_raw/
+        - https://developer.wordpress.org/reference/functions/esc_url/
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+        - https://cwe.mitre.org/data/definitions/116.html
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/vendor_prefixed/**"
+        - "**/node_modules/**"
+    # Four branches: (1)/(2) direct-inline call at the concat/sprintf site;
+    # (3)/(4) the sanitizer assigned to a variable earlier in the same
+    # function, then that variable reaching a single-quoted attribute via
+    # concatenation or via interpolation/preg_replace-replacement-text (the
+    # shape used by template/merge-tag engines that build the attribute
+    # string as a single literal before substitution).
+    pattern-either:
+      - patterns:
+          - pattern-either:
+              - pattern: $LEFT . sanitize_url(...) . $RIGHT
+              - pattern: $LEFT . esc_url_raw(...) . $RIGHT
+          - metavariable-regex:
+              metavariable: $LEFT
+              regex: ".*(?:href|src|action)\\s*=\\s*'\\s*['\\\"]$"
+      - patterns:
+          - pattern-either:
+              - pattern: sprintf($FMT, ..., sanitize_url(...), ...)
+              - pattern: sprintf($FMT, ..., esc_url_raw(...), ...)
+          - metavariable-regex:
+              metavariable: $FMT
+              regex: ".*(?:href|src|action)\\s*=\\s*'%.*"
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  function $F(...) {
+                    ...
+                    $VAR = sanitize_url(...);
+                    ...
+                  }
+              - pattern-inside: |
+                  function $F(...) {
+                    ...
+                    $VAR = esc_url_raw(...);
+                    ...
+                  }
+          - pattern: $LEFT . $VAR . $RIGHT
+          - metavariable-regex:
+              metavariable: $LEFT
+              regex: ".*(?:href|src|action)\\s*=\\s*'\\s*['\\\"]$"
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  function $F(...) {
+                    ...
+                    $VAR = sanitize_url(...);
+                    ...
+                  }
+              - pattern-inside: |
+                  function $F(...) {
+                    ...
+                    $VAR = esc_url_raw(...);
+                    ...
+                  }
+          - pattern-either:
+              - pattern: $DEST = $STR
+              - pattern: $DEST .= $STR
+              - pattern: preg_replace($PAT, $STR, $SUBJ)
+          # $STR must not itself be a bare function/method call (e.g. the
+          # preg_replace(...) call as a whole, when matched via the
+          # $DEST = $STR alternative above) — otherwise the shape regex
+          # below can accidentally match against an unrelated $variable
+          # appearing anywhere later in that call's other arguments
+          # (e.g. the preg_replace() subject argument), rather than the
+          # href='...' replacement text itself.
+          - metavariable-pattern:
+              metavariable: $STR
+              patterns:
+                - pattern-not: $FUNC(...)
+                - pattern-not: $OBJ->$METHOD(...)
+          - metavariable-regex:
+              metavariable: $STR
+              regex: "(?s).*(?:href|src|action)\\s*=\\s*'[^']*\\{?\\$[A-Za-z_][A-Za-z0-9_]*.*"
+          - metavariable-regex:
+              metavariable: $STR
+              regex: "(?s)^(?!.*(?:esc_url|esc_attr|esc_html|wp_kses)\\().*"

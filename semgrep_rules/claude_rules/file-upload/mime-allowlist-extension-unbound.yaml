@@ -1,0 +1,113 @@
+rules:
+  - id: claude.php.wordpress.file-upload.mime-allowlist-extension-unbound
+    languages: [php]
+    severity: HIGH
+    message: |
+      An upload handler validates a detected/reported MIME type by iterating
+      an extension-keyed allow-list (extension => pipe/comma-separated MIME
+      string(s)) and testing membership with
+      in_array($mimeType, explode(...)) — but the loop body never restricts
+      the match to the entry whose KEY equals the uploaded file's OWN
+      extension. Because the check accepts a MIME-type match against ANY
+      entry in the whole allow-list, an attacker can submit a file with a
+      dangerous extension (e.g. ".php") whose reported/detected MIME type
+      happens to match a completely different, otherwise-safe extension's
+      allowed MIME string (an image polyglot, or a spoofable Content-Type /
+      finfo result) — passing validation while the dangerous extension is
+      preserved for execution (CWE-434).
+
+      Gate the membership test on the entry keyed by the file's own
+      extension (e.g. `if ($ext === $extension) { $isAllowed =
+      in_array(...); }`) so a mismatched extension/MIME pair is rejected
+      even when the MIME type happens to appear elsewhere in the allow-list.
+
+      TRIAGE:
+        1. Confirm the MIME value is derived from request/file content
+           (finfo_file, getimagesize, mime_content_type, Content-Type
+           header) and the extension is derived from the attacker-
+           controlled uploaded filename.
+        2. Confirm the file is actually persisted to a web-accessible
+           directory using the original/attacker-controlled extension after
+           this check passes (move_uploaded_file, wp_handle_upload with the
+           original name preserved, or a same-purpose save call) rather
+           than being renamed to a fixed/derived safe extension.
+        3. Confirm the upload endpoint is reachable without admin
+           privileges (unauthenticated / Subscriber / Customer).
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/434.html
+        - https://owasp.org/Top10/A04_2021-Insecure_Design/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              foreach ($MAP as $EXT => $MIMES) {
+                ...
+                $ISALLOWED = in_array($MIMETYPE, explode($SEP, $MIMES));
+                ...
+              }
+          - pattern: |
+              foreach ($MAP as $EXT => $MIMES) {
+                ...
+                if (in_array($MIMETYPE, explode($SEP, $MIMES))) {
+                  ...
+                }
+                ...
+              }
+          - pattern: |
+              foreach ($MAP as $EXT => $MIMES) {
+                ...
+                if ($ISALLOWED = in_array($MIMETYPE, explode($SEP, $MIMES))) {
+                  ...
+                }
+                ...
+              }
+      # The official fix for the seeding CVE (and the general neutralizer
+      # for this class): gate the membership test behind a comparison of
+      # the loop key against the file's own extension, in either operand
+      # order and with either equality operator.
+      - pattern-not: |
+          foreach ($MAP as $EXT => $MIMES) {
+            ...
+            if ($EXT === $EXTENSION) {
+              ...
+            }
+            ...
+          }
+      - pattern-not: |
+          foreach ($MAP as $EXT => $MIMES) {
+            ...
+            if ($EXT == $EXTENSION) {
+              ...
+            }
+            ...
+          }
+      - pattern-not: |
+          foreach ($MAP as $EXT => $MIMES) {
+            ...
+            if ($EXTENSION === $EXT) {
+              ...
+            }
+            ...
+          }
+      - pattern-not: |
+          foreach ($MAP as $EXT => $MIMES) {
+            ...
+            if ($EXTENSION == $EXT) {
+              ...
+            }
+            ...
+          }

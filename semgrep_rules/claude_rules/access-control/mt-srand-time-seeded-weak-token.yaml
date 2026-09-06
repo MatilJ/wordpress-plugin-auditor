@@ -1,0 +1,37 @@
+rules:
+  - id: claude.php.wordpress.access-control.mt-srand-time-seeded-weak-token
+    languages: [php]
+    severity: HIGH
+    message: |
+      mt_srand() is explicitly reseeded with a value derived from the current time
+      (microtime()/time()). This collapses the effective keyspace of every mt_rand()
+      call that follows to roughly the number of seed values inside an attacker's
+      guessable timing window, instead of relying on PHP's own (already broader)
+      internal auto-seed. When the resulting bytes are used to build a
+      security-relevant token — an authentication/identity-verification hash,
+      session key, password-reset code, or API key — an attacker can precompute or
+      brute-force the small seed space offline and forge a valid token (CWE-330),
+      bypassing authentication or escalating privilege wherever that token is later
+      trusted (e.g., passed to wp_set_current_user()).
+
+      Never manually reseed mt_rand()/rand() from a time-based value. For any
+      security-relevant token use a CSPRNG: random_bytes(), wp_generate_password()
+      (length, true, true), or wp_generate_uuid4().
+    metadata:
+      category: security
+      cwe: "CWE-330: Use of Insufficiently Random Values"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/330.html
+        - https://www.php.net/manual/en/function.mt-srand.php
+    patterns:
+      - pattern: mt_srand($SEED)
+      - metavariable-regex:
+          metavariable: $SEED
+          regex: (?is).*\b(microtime|time|date)\s*\(.*

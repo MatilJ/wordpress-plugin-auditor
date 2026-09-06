@@ -1,0 +1,122 @@
+rules:
+  - id: claude.php.wordpress.access-control.visibility-blacklist-gate-ownership-bypass
+    languages: [php]
+    severity: HIGH
+    message: |
+      A request-controlled visibility/scope value (e.g. an "access",
+      "visibility", or "mode" parameter on a query for private records) is
+      downgraded to a safe/public value ONLY when it exactly matches one of a
+      hardcoded, enumerated list of "sensitive" values via
+      in_array($VALUE, array(...)). The nested ownership check
+      (get_current_user_id() !== absint($OWNER)) — which is supposed to force
+      the downgrade for any requester who isn't the target user — is
+      therefore only reachable for the enumerated values. Any other value for
+      the same parameter (a synonym like "any"/"all", a value the list's
+      author never anticipated, or simply the caller omitting a listed
+      value) skips the ownership check entirely and passes the
+      attacker-controlled value straight through to the query, disclosing
+      private records belonging to other users (CWE-639: Authorization
+      Bypass Through User-Controlled Key).
+
+      This is an incomplete-blacklist authorization gap, not a missing
+      check: a check exists, but it only fires for values the author
+      enumerated. The durable fix is default-deny: compare against the ONE
+      known-safe value instead of enumerating unsafe ones
+      ($VALUE !== $SAFE_DEFAULT), so the ownership check runs for every value
+      except the explicitly safe one.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - $VALUE originates from request data (a shortcode/ajax attribute
+          array built from $_REQUEST/$_GET/$_POST, or a REST parameter), not
+          a hardcoded literal.
+        - The enumerated array names only a subset of the plausible values
+          the field can take (e.g. two of three visibility levels), so an
+          unlisted value is reachable by the caller.
+        - The downgraded value is subsequently used to filter/query records
+          that can belong to a user other than the requester (a user_id /
+          owner_id / author_id also present in the same request).
+
+      FALSE POSITIVE indicators:
+        - The enumerated array is exhaustive over a closed, small type (e.g.
+          a strict two-value boolean-like enum with no third option ever
+          reachable) AND every value not equal to the safe default triggers
+          the downgrade elsewhere.
+        - A companion `$VALUE !== $SAFE_DEFAULT` (or equivalent default-deny)
+          check already exists elsewhere in the same function alongside this
+          one, so the enumerated check is redundant rather than the sole
+          gate.
+        - $OWNER is not attacker-influenceable (e.g. always the currently
+          logged-in user's own ID, never taken from request input).
+    metadata:
+      category: security
+      cwe:
+        - "CWE-639: Authorization Bypass Through User-Controlled Key"
+        - "CWE-184: Incomplete Blacklist"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Insecure Direct Object Reference (IDOR)"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/639.html
+        - https://cwe.mitre.org/data/definitions/184.html
+        - https://owasp.org/www-community/vulnerabilities/Insecure_Direct_Object_Reference
+    patterns:
+      - pattern-either:
+          # array(...) literal, braced inner if
+          - pattern: |
+              if ( in_array( $VIS, array( ... ) ) ) {
+                if ( get_current_user_id() !== $INTCAST( $OWNER ) ) {
+                  $VIS = $SAFE;
+                  ...
+                }
+                ...
+              }
+          # array(...) literal, unbraced (single-statement) inner if
+          - pattern: |
+              if ( in_array( $VIS, array( ... ) ) ) {
+                if ( get_current_user_id() !== $INTCAST( $OWNER ) )
+                  $VIS = $SAFE;
+                ...
+              }
+          # [...] literal, braced inner if
+          - pattern: |
+              if ( in_array( $VIS, [ ... ] ) ) {
+                if ( get_current_user_id() !== $INTCAST( $OWNER ) ) {
+                  $VIS = $SAFE;
+                  ...
+                }
+                ...
+              }
+          # [...] literal, unbraced (single-statement) inner if
+          - pattern: |
+              if ( in_array( $VIS, [ ... ] ) ) {
+                if ( get_current_user_id() !== $INTCAST( $OWNER ) )
+                  $VIS = $SAFE;
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $INTCAST
+          regex: ^(absint|intval)$
+      # The real fix for the seeding CVE: replace the enumerated blacklist
+      # gate with a default-deny comparison against the one safe value. A
+      # function that already does this for the same $VIS/$SAFE pair is not
+      # vulnerable to this variant, even if an old in_array() gate lingers
+      # elsewhere in the file.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if ( $VIS !== $SAFE ) {
+              ...
+            }
+            ...
+          }
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"

@@ -1,0 +1,95 @@
+rules:
+  - id: claude.php.wordpress.lfi.exploded-segments-template-path-no-basename
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A string is split with explode()/preg_split(), and the resulting
+      segments — individually or rejoined via string interpolation,
+      concatenation, implode(), or an array collector built across several
+      statements/branches — flow into a WordPress template-loading
+      function (locate_template, load_template, get_template_part) or
+      directly into include/require, with no basename()/
+      sanitize_file_name()/sanitize_key()/preg_replace()/realpath()/
+      validate_file() applied anywhere in between. Splitting on a
+      delimiter (commonly '-' or '/') does not strip '/' or '..' from
+      INSIDE any individual segment, so a segment carrying a
+      path-traversal sequence survives untouched into the assembled
+      filename. load_template() performs no path validation and
+      locate_template() does not check its template names for traversal
+      sequences (WP Core template.php), so when the split string is
+      reachable from an unauthenticated request — directly via a
+      superglobal, or indirectly via a public query var / feed name / REST
+      param handed to this function as a parameter — this is
+      unauthenticated Local File Inclusion / Path Traversal (CWE-98 /
+      CWE-22). Fix by applying basename() (or another filename-safe
+      sanitizer) to each segment immediately after the explode/preg_split,
+      or by validating the final assembled name against a resolved-path
+      containment check before it reaches the sink.
+
+      TRIAGE:
+        1. Confirm the exploded/split string is reachable from an
+           unauthenticated (or low-privilege) request — a superglobal, a
+           REST/AJAX param, or a function parameter whose call chain
+           traces back to a public query var / feed name / route segment.
+           A hardcoded or developer-controlled string is a false positive.
+        2. Confirm no basename()/sanitize_file_name()/sanitize_key()/
+           preg_replace()/realpath()/validate_file() call exists anywhere
+           in the enclosing function — any of these neutralizes traversal
+           for the flagged value.
+        3. Confirm the sink is actually reachable with attacker-chosen
+           segment values (e.g. not gated behind a switch/case that only
+           ever supplies hardcoded branch values).
+    metadata:
+      category: security
+      cwe:
+        - "CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program ('PHP Remote File Inclusion')"
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - "https://cwe.mitre.org/data/definitions/98.html"
+        - "https://cwe.mitre.org/data/definitions/22.html"
+    pattern-sources:
+      - pattern-either:
+          - pattern: explode($SEP, $INPUT, ...)
+          - pattern: preg_split($SEP, $INPUT, ...)
+    pattern-sinks:
+      - pattern-either:
+          - pattern: locate_template($X, ...)
+          - pattern: load_template($X, ...)
+          - pattern: get_template_part($X, ...)
+          - pattern: self::locate_template($X, ...)
+          - pattern: static::locate_template($X, ...)
+          - pattern: $OBJ->locate_template($X, ...)
+          - pattern: self::load_template($X, ...)
+          - pattern: static::load_template($X, ...)
+          - pattern: $OBJ->load_template($X, ...)
+          - pattern: include $X;
+          - pattern: include($X);
+          - pattern: include_once $X;
+          - pattern: include_once($X);
+          - pattern: require $X;
+          - pattern: require($X);
+          - pattern: require_once $X;
+          - pattern: require_once($X);
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_file_name(...)
+          - pattern: basename(...)
+          - pattern: sanitize_key(...)
+          - pattern: realpath(...)
+          - pattern: preg_replace(...)
+          - pattern: validate_file(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          - pattern: sanitize_title(...)
+          - pattern: sanitize_html_class(...)

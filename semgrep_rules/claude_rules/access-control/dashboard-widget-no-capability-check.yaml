@@ -1,0 +1,110 @@
+rules:
+  - id: claude.php.wordpress.access-control.dashboard-widget-no-capability-check
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A callback registered via wp_add_dashboard_widget() contains no
+      current_user_can() call anywhere in its body. WordPress core renders
+      every registered dashboard widget for ANY authenticated user who loads
+      /wp-admin/index.php — the only requirement is the 'read' capability
+      (Subscriber+). Unlike admin menu pages (add_menu_page()/add_submenu_page()
+      take an explicit $capability argument), wp_add_dashboard_widget() has no
+      capability parameter at all; WP core applies no per-widget access
+      restriction of its own. If the callback queries or displays data that
+      has its own, stricter capability model elsewhere in the plugin (a custom
+      post type gated to a higher role, site-wide settings, other users'
+      records), this widget is a separate, ungated path to that same data
+      (CWE-862 / CWE-200).
+
+      TRIAGE REQUIRED:
+        1. Confirm the callback actually renders privileged or sensitive data
+           — a widget that only shows the current user's own content, or
+           generic site information already visible to all roles elsewhere,
+           is a false positive.
+        2. Confirm no capability check exists in a wrapper this rule cannot
+           see (a shared render-helper method). An early-return capability
+           gate in the SAME function immediately before the
+           wp_add_dashboard_widget() call IS a valid, WP-idiomatic exclusion
+           (already auto-suppressed by this rule) — since wp_dashboard_setup
+           re-fires on every /wp-admin/index.php request, that guard runs
+           fresh each time and genuinely prevents registration for that
+           request's user. A capability check performed once elsewhere (e.g.
+           at plugin activation) does NOT gate later page loads and remains
+           a true positive.
+        3. Confirm the underlying data source (post type, option, table) is
+           NOT already intentionally world-readable to every logged-in user
+           — if so, this widget adds no new exposure.
+
+      KNOWN LIMITATION: only covers the array($this, 'method') OOP callback
+      shape. A bare function-name string callback registered from top-level
+      procedural code is not detected by this rule — review those manually.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - "https://developer.wordpress.org/reference/functions/wp_add_dashboard_widget/"
+        - "https://cwe.mitre.org/data/definitions/862.html"
+        - "https://cwe.mitre.org/data/definitions/200.html"
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    # Scoped to the OOP array($this, 'method') callback shape — the shape used
+    # by every real-world example encountered so far. A bare function-name
+    # string callback in top-level procedural code is not covered: correlating
+    # the registration call with a same-named sibling function requires a
+    # shared enclosing container for pattern-not-inside to anchor on, which
+    # two top-level statements outside any class/function do not provide in
+    # Semgrep PHP (confirmed empirically — a bare statement-sequence
+    # pattern-not-inside does not suppress reliably at the top level).
+    patterns:
+      # Anchor: the registration call itself — the hit is reported here, not
+      # spanning the whole enclosing class/callback body.
+      - pattern: wp_add_dashboard_widget( $ID, $TITLE, array( $THIS, '$CB' ), ...)
+      # Exclude: a same-name callback method exists somewhere in the same
+      # class and DOES contain a current_user_can() call. $CB is shared with
+      # the anchor pattern above, so this only suppresses when the SPECIFIC
+      # registered callback (not just any method in the class) is itself
+      # capability-checked.
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $CB(...) {
+              ...
+              <... current_user_can(...) ...>;
+              ...
+            }
+            ...
+          }
+      # Exclude: the enclosing function performing the registration call is
+      # itself gated by an early-return capability check before that call.
+      # wp_dashboard_setup fires fresh on every /wp-admin/index.php request,
+      # so — unlike a one-time activation-time check — a guard placed before
+      # wp_add_dashboard_widget() in the SAME hook-callback function correctly
+      # prevents registration (and therefore rendering) for that request's
+      # user; this is the same idiom WP core itself uses to gate several of
+      # its own default dashboard widgets.
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FN(...) {
+                  ...
+                  if (! <... $GATE(...) ...>) {
+                    ...
+                  }
+                  ...
+                  wp_add_dashboard_widget( $ID, $TITLE, array( $THIS, '$CB' ), ...);
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $GATE
+                regex: "(?i).*(current_user_can|is_current_user_admin|is_admin_user|can_access|has_cap|user_can|is_super_admin).*"

@@ -1,0 +1,106 @@
+rules:
+  - id: claude.php.wordpress.access-control.rest-user-controller-unblocked-role-field
+    languages: [php]
+    severity: HIGH
+    message: |
+      A custom REST controller subclassing a WordPress/WooCommerce user-object
+      controller (Users/Customers/Members/Vendor) overrides the object-prep
+      method (prepare_item_for_database / prepare_object_for_database) and
+      forwards the request straight to parent::, with no check anywhere in
+      the method rejecting or stripping a 'role'/'roles' request parameter
+      first (CWE-266 — Incorrect Privilege Assignment). WP core's
+      WP_REST_Users_Controller (and controllers that extend it, such as
+      WooCommerce's WC_REST_Customers_Controller) copies a submitted
+      'roles'/'role' request value onto the prepared user object and persists
+      it via wp_insert_user()/wp_update_user() whenever the parameter is
+      present, with no restriction on which role may be requested. Any caller
+      whose object-level permission check for this endpoint is weaker than an
+      explicit edit_users/promote_users capability test — e.g. a
+      "vendor"/"seller"/"member" identity check that says nothing about which
+      fields that caller may set — can include role=administrator in the
+      create/update request body and self-escalate, or elevate a target
+      account.
+
+      Fix: explicitly reject the request when get_param('role') or
+      get_param('roles') (or the equivalent array-access form) is present,
+      unless the caller already holds promote_users/edit_users, before
+      delegating to the parent prepare-for-database method.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - The overriding method's only object-level gate is a role/identity
+          check unrelated to per-field authorization (e.g. "is this caller a
+          vendor/seller/member"), not an edit_users/promote_users capability
+          check.
+        - Nothing in the method inspects the request for a role/roles
+          parameter before the parent:: delegation.
+
+      FALSE POSITIVE indicators:
+        - The method rejects or strips the request's role/roles parameter
+          (get_param() or array access) before calling parent::.
+        - The overridden method requires current_user_can('promote_users')
+          or current_user_can('edit_users') before delegating.
+        - The parent class is unrelated to user/customer/member/vendor
+          objects (e.g. a posts/products/orders controller), so a role field
+          has no meaning for this endpoint.
+    metadata:
+      category: security
+      cwe: "CWE-266: Incorrect Privilege Assignment"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/266.html
+        - https://developer.wordpress.org/reference/classes/wp_rest_users_controller/
+        - https://developer.wordpress.org/reference/functions/wp_insert_user/
+    patterns:
+      - pattern-inside: |
+          class $CLASS extends $PARENT {
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $PARENT
+          regex: (?i).*(user|customer|member|vendor)s?_?controller.*
+      - pattern-inside: |
+          function $METHOD($REQUEST, ...) {
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: (?i)^prepare_(item|object)_for_database$
+      - pattern: parent::$METHOD($REQUEST, ...)
+      # Fix-derived FP guard: the patch for the seeding CVE added exactly
+      # this shape — a check anywhere in the same method that inspects the
+      # request for a 'role'/'roles' parameter (get_param() or array-access)
+      # before the parent:: delegation.
+      - pattern-not-inside:
+          patterns:
+            - pattern-either:
+                - pattern: |
+                    function $METHOD($REQUEST, ...) {
+                      ...
+                      if (<... $REQUEST->get_param($RK) ...>) {
+                        ...
+                      }
+                      ...
+                    }
+                - pattern: |
+                    function $METHOD($REQUEST, ...) {
+                      ...
+                      if (<... $REQUEST[$RK] ...>) {
+                        ...
+                      }
+                      ...
+                    }
+            - metavariable-regex:
+                metavariable: $RK
+                regex: (?i)^['"]roles?['"]$
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"

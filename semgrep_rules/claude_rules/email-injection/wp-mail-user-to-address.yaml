@@ -1,0 +1,100 @@
+rules:
+  - id: claude.php.wordpress.email.wp-mail-user-to-address
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      User-controlled input flows into the TO address (first argument) of
+      wp_mail() or PHP's mail() without passing through sanitize_email()
+      or is_email() validation. An attacker can use the site as a spam
+      relay or phishing platform by specifying arbitrary recipient addresses,
+      potentially with injected headers via newline characters (CWE-94).
+      Validate with is_email() and sanitize with sanitize_email() before
+      passing to wp_mail().
+    metadata:
+      category: security
+      cwe:
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+        - "CWE-183: Permissive List of Allowed Inputs"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Email Injection"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_mail/
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — arbitrary recipient with user-controlled body:
+      #   wp_mail($_POST['email'], 'Subject', $_POST['message']);
+      #   → Attacker controls BOTH recipient and message body. Full spam
+      #   relay — can send phishing emails from the site's domain.
+      #
+      # LOWER RISK — arbitrary recipient with preset body:
+      #   wp_mail($_POST['email'], 'Password Reset', $fixed_template);
+      #   → Attacker controls recipient but not content. Limited to sending
+      #   preset messages. Still abusable for email enumeration or
+      #   notification spam. Lower severity but still worth reporting if
+      #   the endpoint is unauthenticated.
+      #
+      # FALSE POSITIVE — contact form sending TO site admin:
+      #   wp_mail(get_option('admin_email'), 'Contact', $_POST['message']);
+      #   → Recipient is the site admin (hardcoded from options), not user
+      #   controlled. The user controls the message body (handled by other
+      #   rules for XSS). The TO address is not user-controlled.
+      #
+      # FALSE POSITIVE — recipient re-resolved from the account's own DB record:
+      #   $user = get_user_by('email', $_POST['email']);
+      #   $to = $user->get('user_email'); // or $user->user_email
+      #   wp_mail($to, 'Password Reset', $body);
+      #   → The attacker picks WHICH existing account to target (by email or
+      #   username lookup), but the value that reaches wp_mail() is that
+      #   account's own genuine registered email, never an arbitrary attacker
+      #   string. Standard password-reset/account-notification idiom.
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: wp_mail($TO, ...)
+              - pattern: mail($TO, ...)
+          - focus-metavariable: $TO
+          # Validate-then-use guard clause: is_email() checked as an early-return
+          # condition (not just wrapped inline around the value) still validates
+          # every use of the recipient for the remainder of the function.
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                if (!is_email($X)) {
+                  ...
+                }
+                ...
+              }
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_email(...)
+          - pattern: is_email(...)
+          - pattern: filter_var($X, FILTER_VALIDATE_EMAIL)
+          - pattern: (int) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          # get_option() returns server-stored values, not user input
+          - pattern: get_option(...)
+          - pattern: get_user_meta(...)
+          - pattern: get_post_meta(...)
+          # WP_User's own on-file email, resolved via get_user_by()/get_userdata() —
+          # the account's canonical registered address, not the raw request value.
+          - pattern: $USER->user_email
+          - pattern: $USER->get('user_email')

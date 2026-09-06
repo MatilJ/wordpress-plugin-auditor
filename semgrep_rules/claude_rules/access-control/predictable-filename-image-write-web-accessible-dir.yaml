@@ -1,0 +1,85 @@
+rules:
+  - id: claude.php.wordpress.access-control.predictable-filename-image-write-web-accessible-dir
+    languages: [php]
+    severity: HIGH
+    message: |
+      A per-user/per-request secret is rendered into an image (e.g. a QR
+      code encoding a one-time magic-login link, password-reset token, or
+      2FA secret) and written to disk with a hardcoded, static filename
+      inside a web-accessible directory (the base wp_upload_dir() folder,
+      WP_CONTENT_DIR, WP_PLUGIN_DIR, or plugin_dir_path()) rather than a
+      per-user/per-request unpredictable name. Because every invocation
+      writes the SAME filename, the file is directly guessable
+      (/wp-content/uploads/<literal-name>) and — during the window between
+      the write and any later cleanup/delete call — any visitor who
+      requests that exact path can retrieve whatever secret the most
+      recent write produced for a DIFFERENT user, without needing that
+      user's credentials (CWE-269 — Improper Privilege Management via
+      Insufficiently Protected Credentials). This is worse than an
+      ordinary sensitive-file disclosure: the static name means
+      concurrent/near-concurrent requests from unrelated users collide on
+      one shared, public path.
+
+      Fix: never persist a secret-bearing render to a web-accessible path
+      at all (embed it in-memory, e.g. base64-encode the image and attach
+      it directly to the outgoing email, or stream it straight to the
+      browser via an authenticated download handler) — or, at minimum,
+      use a cryptographically random, single-use filename
+      (wp_generate_password()/random_bytes()) inside a directory that is
+      also access-controlled.
+
+      TRIAGE:
+        1. Confirm the filename argument is a bare string literal with no
+           per-user/per-request component (no user ID, nonce, uniqid(),
+           random_bytes(), or wp_generate_password() in the
+           concatenation).
+        2. Confirm the base directory resolves to a directly
+           web-accessible location (wp_upload_dir()'s basedir/baseurl
+           root, not a random, unlisted, .htaccess-protected, or
+           outside-webroot subfolder).
+        3. Confirm the rendered image/content actually encodes something
+           secret (an auth token, login URL, reset key) rather than
+           public data (a logo, a chart of public statistics).
+    metadata:
+      category: security
+      cwe: "CWE-269: Improper Privilege Management"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/269.html
+    patterns:
+      - pattern-either:
+          - pattern: $FUNC($IMG, $PATH)
+          - pattern: $FUNC($IMG, $PATH, $QUALITY)
+      - metavariable-regex:
+          metavariable: $FUNC
+          regex: ^(imagepng|imagejpeg|imagegif|imagewebp)$
+      - metavariable-pattern:
+          metavariable: $PATH
+          patterns:
+            - pattern-either:
+                - pattern: $this->$PROP . '...'
+                - pattern: $this->$PROP . "..."
+      - pattern-inside: |
+          class $CLASS {
+            ...
+            function $ANYMETHOD(...) {
+              ...
+              $DIRVAR = $DIRSRC;
+              ...
+            }
+            ...
+          }
+      - metavariable-pattern:
+          metavariable: $DIRSRC
+          patterns:
+            - pattern-either:
+                - pattern: wp_upload_dir(...)
+                - pattern: WP_CONTENT_DIR
+                - pattern: WP_PLUGIN_DIR
+                - pattern: plugin_dir_path(...)

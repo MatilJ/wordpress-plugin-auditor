@@ -1,0 +1,29 @@
+rules:
+  - id: claude.php.wordpress.access-control.hardcoded-hmac-key
+    languages: [php]
+    severity: HIGH
+    message: |
+      hash_hmac() is called with a string literal as the secret key argument.
+      Hard-coded HMAC keys are committed to the repository — any attacker with
+      source-code access can compute valid tokens for arbitrary input values
+      (CWE-321). Replace the literal with a site-specific secret such as
+      AUTH_SALT, SECURE_AUTH_SALT, or a wp-config constant so the secret is
+      never stored in the codebase.
+    metadata:
+      category: security
+      cwe: "CWE-321: Use of Hard-coded Cryptographic Key"
+      owasp: "A02:2021 - Cryptographic Failures"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Cryptographic Failures"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/321.html
+        - https://developer.wordpress.org/reference/functions/wp_hash/
+    # Matches hash_hmac() calls where the third argument (the secret key) is a
+    # string literal. String-literal keys are committed to the repository and
+    # allow any reader to forge valid tokens for arbitrary input values.
+    patterns:
+      - pattern: hash_hmac($ALGO, $DATA, "...")

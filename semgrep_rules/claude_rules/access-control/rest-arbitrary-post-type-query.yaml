@@ -1,0 +1,112 @@
+rules:
+  - id: claude.php.wordpress.access.rest-arbitrary-post-type-query
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A REST API or AJAX handler passes a user-supplied value directly as the
+      'post_type' argument to get_posts() or WP_Query without restricting it to
+      an explicit allowlist or verifying the caller's read capability for the
+      requested post type. get_posts() and WP_Query do NOT enforce CPT capability
+      arrays defined via register_post_type() — only the WP REST API router enforces
+      those. Any Contributor-accessible endpoint using this pattern exposes post IDs
+      and titles for any registered CPT, including private CPTs whose capabilities
+      are intended to prevent lower-privileged users from reading them (CWE-862).
+
+      TRIAGE REQUIRED:
+      1. Confirm the endpoint is accessible to lower-privileged roles (e.g.,
+         permission_callback requires only 'edit_posts' or 'read').
+      2. Verify no post_type allowlist exists between the source and the sink
+         (e.g., no in_array($type, $allowed_types) check).
+      3. Verify no per-CPT capability check exists (e.g., no
+         current_user_can(get_post_type_object($type)->cap->read)).
+      4. Determine what data is returned — post IDs + titles, meta keys, or
+         full post content. Higher disclosure = higher severity.
+
+      Remediation: restrict 'post_type' to a developer-defined allowlist using
+      in_array() before passing to get_posts()/WP_Query, or verify
+      current_user_can() against the requested CPT's read capability.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization / Information Disclosure"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/get_posts/
+        - https://developer.wordpress.org/reference/functions/register_post_type/
+        - https://cwe.mitre.org/data/definitions/862.html
+    paths:
+      exclude:
+        - "**/freemius/**"
+    pattern-sources:
+      - pattern-either:
+          # WP REST API request parameters
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: $REQUEST->get_json_params()
+          # AJAX superglobals
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              # get_posts() — square bracket array syntax (post_type first or after other keys)
+              - pattern: get_posts(['post_type' => $TYPE, ...])
+              - pattern: get_posts(["post_type" => $TYPE, ...])
+              - pattern: get_posts([..., 'post_type' => $TYPE, ...])
+              - pattern: get_posts([..., "post_type" => $TYPE, ...])
+              # get_posts() — array() function syntax (post_type first or after other keys)
+              - pattern: get_posts(array('post_type' => $TYPE, ...))
+              - pattern: get_posts(array("post_type" => $TYPE, ...))
+              - pattern: get_posts(array(..., 'post_type' => $TYPE, ...))
+              - pattern: get_posts(array(..., "post_type" => $TYPE, ...))
+              # WP_Query constructor — square bracket array syntax
+              - pattern: new WP_Query(['post_type' => $TYPE, ...])
+              - pattern: new WP_Query(["post_type" => $TYPE, ...])
+              - pattern: new WP_Query([..., 'post_type' => $TYPE, ...])
+              - pattern: new WP_Query([..., "post_type" => $TYPE, ...])
+              # WP_Query constructor — array() function syntax
+              - pattern: new WP_Query(array('post_type' => $TYPE, ...))
+              - pattern: new WP_Query(array("post_type" => $TYPE, ...))
+              - pattern: new WP_Query(array(..., 'post_type' => $TYPE, ...))
+              - pattern: new WP_Query(array(..., "post_type" => $TYPE, ...))
+          - focus-metavariable: $TYPE
+          # Exclude handlers with any capability check — triage manually to
+          # determine whether the check covers the post_type authorization concern.
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                current_user_can(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... current_user_can(...) ...>) {
+                  ...
+                }
+                ...
+              }
+    pattern-sanitizers:
+      - pattern-either:
+          # Numeric values cannot be post type slugs
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          # DB-read functions return developer-configured data, not attacker input
+          - pattern: get_option(...)
+          - pattern: get_post_meta(...)
+          - pattern: get_user_meta(...)
+          - pattern: get_transient(...)
+          - pattern: get_site_option(...)
+          # get_post_type() derives the type from an existing post object —
+          # the returned value is the registered post type slug, not user input
+          - pattern: get_post_type(...)

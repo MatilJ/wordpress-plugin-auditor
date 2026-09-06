@@ -1,0 +1,142 @@
+rules:
+  - id: claude.php.wordpress.ssti.twig-loader-string
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      Twig_Loader_String renders an arbitrary template *string* as code.
+      If any user-controlled value reaches this loader (directly or via
+      render($tpl, ...)), the attacker controls the template body and
+      Twig will evaluate it as code. In unsandboxed Twig 1.x this is
+      reliable RCE via {{ _self.env.registerUndefinedFilterCallback(...) }}
+      (CWE-1336 / CWE-94).
+      Remove the string loader; use file-based loaders with fixed
+      templates, or if user content must appear in a template render it
+      as a variable with autoescape or `| e` applied.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-1336: Improper Neutralization of Special Elements Used in a Template Engine"
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Server-Side Template Injection"
+      technology: [php, wordpress, twig]
+    pattern-either:
+      - pattern: new Twig_Loader_String(...)
+      - pattern: new \Twig_Loader_String(...)
+
+  - id: claude.php.wordpress.ssti.twig-createtemplate-user-input
+    mode: taint
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      User-controlled input flows into Twig's createTemplate().
+      Whatever string is passed here is compiled as a Twig template and
+      executed. In an unsandboxed environment, template syntax has full
+      access to PHP via _self.env (CWE-1336).
+      Do not pass user input as the template body. Render user data as a
+      *variable* into a fixed template, with autoescape enabled.
+    metadata:
+      category: security
+      cwe: "CWE-1336: Improper Neutralization of Special Elements Used in a Template Engine"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Server-Side Template Injection"
+      technology: [php, wordpress, twig]
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+    pattern-sinks:
+      - patterns:
+          # Only createTemplate() is Twig-specific: it compiles a raw string as a template.
+          # parse() was removed: Twig's parse() takes a TokenStream (not a raw string), and
+          # many other PHP libraries (LESS, XML, Markdown) also expose ->parse(), causing FPs
+          # when user input reaches any ->parse() call regardless of the object type.
+          - pattern: $TWIG->createTemplate($SRC, ...)
+          - focus-metavariable: $SRC
+
+  - id: claude.php.wordpress.ssti.twig-string-loader-tainted-field-value
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A request-derived value ($_GET/$_POST/$_REQUEST) is written into an
+      array element's 'value' key inside a class that also builds a Twig
+      environment on a string loader (Twig_Loader_String), i.e. a class
+      that compiles arbitrary strings as executable Twig template *source*
+      rather than loading templates from trusted files. Weak sanitizers
+      such as sanitize_text_field() do not strip Twig delimiter characters
+      ('{', '}').
+      This is the source-side half of a common form-builder anti-pattern:
+      the field's generated HTML (including this value) is later spliced
+      into the template string handed to Twig's render(), so an attacker
+      who controls the value controls Twig template syntax in what becomes
+      the compiled template body — Server-Side Template Injection / Remote
+      Code Execution (CWE-94, CWE-1336).
+      Strip or HTML-entity-encode '{' and '}' from request-derived values
+      before they can reach any Twig string-loader render() call, or
+      ensure the value is only ever passed as render() context data, never
+      concatenated into the template source string itself.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+        - "CWE-1336: Improper Neutralization of Special Elements Used in a Template Engine"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Server-Side Template Injection"
+      technology: [php, wordpress, twig]
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+    pattern-sinks:
+      - patterns:
+          - pattern: $FIELD['value'] = $VAL;
+          - focus-metavariable: $VAL
+          - pattern-either:
+              # Loader constructed inline as a Twig_Environment constructor argument.
+              - pattern-inside: |
+                  class $CLASS {
+                    ...
+                    function $M(...) {
+                      ...
+                      $TWIG = new Twig_Environment(new Twig_Loader_String(...), ...);
+                      ...
+                    }
+                    ...
+                  }
+              # Loader assigned to its own variable first, then passed by reference.
+              - pattern-inside: |
+                  class $CLASS {
+                    ...
+                    function $M(...) {
+                      ...
+                      $LOADER = new Twig_Loader_String(...);
+                      ...
+                      $TWIG = new Twig_Environment($LOADER, ...);
+                      ...
+                    }
+                    ...
+                  }
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: str_replace(['{', '}'], $TO, $X)
+          - pattern: str_replace(['}', '{'], $TO, $X)
+          - pattern: preg_replace('/[{}]/', $TO, $X)

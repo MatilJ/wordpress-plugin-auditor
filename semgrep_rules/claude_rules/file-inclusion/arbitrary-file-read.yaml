@@ -1,0 +1,202 @@
+rules:
+  - id: claude.php.wordpress.file.arbitrary-file-read
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      User-controlled input flows into file_get_contents() / readfile() as
+      a path. An attacker can traverse to wp-config.php (which yields DB
+      credentials and auth salts) or any readable file on the host (CWE-22).
+      Canonicalize with realpath() and enforce a prefix check.
+
+      filesize() is also flagged: it still resolves and stats the
+      attacker-chosen path, so even without content disclosure it confirms
+      existence/size (a probe/oracle primitive) and frequently sits next to
+      a sibling file_get_contents()/read call on the same tainted value in
+      the same plugin flow.
+
+      GD image-decode functions (imagecreatefromjpeg/png/gif/webp/etc.) and
+      getimagesize() are also flagged: image-proxy/resize/thumbnail scripts
+      commonly restrict the read to a file extension without restricting the
+      directory location, so the extension check alone does not prevent
+      traversal to any readable image-named file on the host.
+    metadata:
+      category: security
+      cwe: "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          # $_FILES['field']['name'] and ['full_path'] are attacker-controlled
+          # (the original client-supplied filename). Do NOT include $_FILES itself
+          # or ['tmp_name'] — that key is the PHP-generated server-side temp path
+          # and cannot be influenced by the attacker to traverse directories.
+          - pattern: $_FILES[$K]['name']
+          - pattern: $_FILES[$K]['full_path']
+          - pattern: filter_input(...)
+          # WP REST API request parameters — the request object carries
+          # user-supplied route/query/body parameters.
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: $REQUEST->get_body()
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: file_get_contents($PATH, ...)
+              - pattern: readfile($PATH, ...)
+              - pattern: file($PATH, ...)
+              # WP_Filesystem read — equivalent to file_get_contents but using
+              # the WordPress filesystem abstraction layer.
+              - pattern: $FILESYSTEM->get_contents($PATH, ...)
+              # fopen() is where the attacker-controlled path is consumed;
+              # fread()/fpassthru() are output mechanics on the returned handle.
+              - pattern: fopen($PATH, ...)
+              # filesize() resolves and stats the path directly — no content
+              # is returned, but it is a common same-flow companion to the
+              # content-disclosure sinks above and still confirms/leaks
+              # existence and size for an attacker-chosen path (probe/oracle
+              # primitive within the same CWE-22 class).
+              - pattern: filesize($PATH)
+              # GD image-decode functions open and parse the file at $PATH from
+              # disk — the same content-disclosure sink shape as
+              # file_get_contents()/readfile(), commonly reached by image-proxy/
+              # resize/thumbnail scripts that build $PATH from request data and
+              # restrict only the file extension, not the directory location.
+              - pattern: imagecreatefromjpeg($PATH)
+              - pattern: imagecreatefrompng($PATH)
+              - pattern: imagecreatefromgif($PATH)
+              - pattern: imagecreatefromwebp($PATH)
+              - pattern: imagecreatefrombmp($PATH)
+              - pattern: imagecreatefromxbm($PATH)
+              - pattern: imagecreatefromxpm($PATH)
+              - pattern: imagecreatefromgd2($PATH)
+              - pattern: imagecreatefromgd($PATH)
+              # getimagesize() resolves and parses the path directly — same
+              # existence/size/type oracle rationale as filesize() above.
+              - pattern: getimagesize($PATH)
+              # imagecreatefromfile() is not a PHP/GD builtin; it recurs across
+              # WP plugins as a hand-rolled "auto-detect extension, dispatch to
+              # the matching imagecreatefrom*() call" helper (often guarded by
+              # function_exists() in case a future PHP version defines it) —
+              # treated as a sink name in its own right since OSS taint mode
+              # does not track the wrapper's own body back to its real GD call.
+              - pattern: imagecreatefromfile($PATH)
+          - focus-metavariable: $PATH
+          # Guard-clause delegation: a boolean-returning validation method gates
+          # the same path variable immediately before the sink, and the negative
+          # branch halts execution. WP plugins commonly delegate the actual
+          # realpath()+prefix containment check to a sibling/private method
+          # rather than inlining it at the sink. (taint-mode `pattern-sanitizers`
+          # with `by-side-effect: true` does not reliably suppress this guard
+          # shape, so the exclusion is applied at the sink instead.)
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if ( ! $OBJ->$METHOD($PATH) ) {
+                  ...
+                }
+                ...
+              }
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_file_name(...)
+          - pattern: basename(...)
+          - pattern: esc_url_raw(...)
+          - pattern: esc_url(...)
+          # sanitize_key() restricts output to [a-z0-9_-] — no slashes or dots,
+          # so path traversal is impossible. Confirmed safe: litespeed-cache
+          # debug2.cls.php uses sanitize_key($_GET['log']) before readfile().
+          - pattern: sanitize_key(...)
+          # Strict allowlist: permits only [a-zA-Z0-9_\-\+], stripping . and /
+          # entirely — path traversal requires at least one of these characters.
+          - pattern: preg_replace('/[^a-zA-Z0-9_\-\+]/', '', ...)
+          - pattern: preg_replace("/[^a-zA-Z0-9_\\-\\+]/", '', ...)
+          # realpath() resolves .. and symlinks — canonical traversal prevention.
+          # The rule message recommends it but it was missing from the sanitizer list.
+          - pattern: realpath(...)
+          # Integer/float values cannot be file paths
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          # sanitize_title() → [a-z0-9%-_] — no slashes or dots
+          - pattern: sanitize_title(...)
+          # sanitize_html_class() → [A-Za-z0-9_-] — no path separators
+          - pattern: sanitize_html_class(...)
+          # validate_file() returns 0=valid, 1/2/3=invalid. Effective when
+          # checked. Ignored-result cases caught by dedicated rule.
+          - pattern: validate_file(...)
+          # str_replace('..', '', $PATH) — a common WP-plugin fix idiom that
+          # strips parent-directory traversal segments from a request-derived
+          # path in place, without calling a named sanitizer helper.
+          # Deliberately scoped to the literal '..' search string (both
+          # quote styles) so it does not swallow unrelated str_replace()
+          # calls used to build a path from a component name (e.g.
+          # str_replace('_', '/', $name)), which is not a sanitizer.
+          - pattern: str_replace('..', $REPL, $X)
+          - pattern: str_replace("..", $REPL, $X)
+          # WP Core media accessors: both always resolve to a path/URL the
+          # caller cannot arbitrarily direct — get_avatar_url() derives its
+          # URL from WP's own hashing over a user/email/comment identity
+          # (never a raw path string the caller supplies), and
+          # wp_get_original_image_path() looks up the already-stored
+          # _wp_attached_file postmeta for an attachment ID, returning that
+          # attachment's own file within the uploads dir. An attacker-supplied
+          # ID selects WHICH existing attachment/avatar is resolved, not WHAT
+          # arbitrary path is read — a capability/ownership question for a
+          # separate access-control rule, not a path-traversal primitive.
+          - pattern: get_avatar_url(...)
+          - pattern: wp_get_original_image_path(...)
+          # A request value used only as the opaque lookup KEY of a WordPress
+          # storage-read function — the returned value is developer-controlled
+          # data set earlier via the matching set_*()/update_*() call, never a
+          # reflection of the key's own content, so taint should not
+          # propagate from the key argument through the return value.
+          - pattern: get_transient(...)
+          - pattern: get_site_transient(...)
+          - pattern: get_option(...)
+          - pattern: get_post_meta(...)
+          - pattern: get_user_meta(...)
+          - pattern: get_comment_meta(...)
+      # Allowlist-membership gate (by-side-effect): the tainted value is
+      # checked with STRICT in_array(..., true) membership against an
+      # existing-values array (e.g. a scandir()-derived filename list)
+      # before the sink runs — positively confining it to only values
+      # already present in that array, not an arbitrary attacker-chosen
+      # path. Requires the strict-comparison 3rd argument; the loose form
+      # is a materially weaker (type-juggling-prone) gate and is NOT
+      # treated as a sanitizer.
+      - patterns:
+          - pattern: in_array($X, $ALLOWLIST, true)
+          - focus-metavariable: $X
+        by-side-effect: true
+      # Named-resolver delegation: a static or instance method whose own name
+      # signals path-safety validation (contains safe/valid/sanitiz/is_allowed)
+      # is called with the tainted value and its return is trusted directly —
+      # the common WP-plugin idiom of delegating the actual realpath()+prefix
+      # containment check to a sibling method rather than inlining it at the
+      # sink. This is ordinary flow-sensitive sanitization (not a function-wide
+      # exclusion): if the sink variable is LATER reassigned in the same
+      # function from a separate, unsanitized source, taint tracking correctly
+      # re-taints it from that point forward — only the resolver call's own
+      # return value is trusted.
+      - patterns:
+          - pattern-either:
+              - pattern: $OBJ::$METHOD(...)
+              - pattern: $OBJ->$METHOD(...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: "(?i).*(safe|valid|sanitiz|is_allowed).*"

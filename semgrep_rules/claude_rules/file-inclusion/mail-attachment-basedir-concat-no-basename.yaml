@@ -1,0 +1,177 @@
+rules:
+  - id: claude.php.wordpress.file.mail-attachment-basedir-concat-no-basename
+    languages: [php]
+    severity: HIGH
+    message: |
+      A filename value taken from a stored field/array — post meta, user
+      meta, or a submitted form field the code treats as a "file" type
+      (e.g. a booking/checkout/contact-form field whose raw value was
+      captured earlier without a basename() strip) — is concatenated
+      directly onto the WordPress uploads base directory
+      (wp_upload_dir()/wp_get_upload_dir() 'basedir') to build a filesystem
+      path, and that path is appended straight into a mail-attachment array
+      later handed to wp_mail()/PHPMailer — with no basename()/
+      sanitize_file_name() applied to the filename component and no
+      realpath() + prefix-containment check anywhere in the function
+      (CWE-22). PHPMailer opens and reads whatever path sits in the
+      attachments array and embeds its contents in the outgoing message;
+      if the filename component still carries "../" sequences, the email
+      recipient — frequently the submitter's own address on an
+      unauthenticated public-facing form — receives the contents of an
+      arbitrary file on the host, e.g. wp-config.php. Strip the value to a
+      bare filename with basename()/sanitize_file_name() before
+      concatenation, then realpath() the joined result and verify it still
+      starts with the canonicalized base directory before adding it to the
+      attachments list.
+    metadata:
+      category: security
+      cwe: "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - "https://cwe.mitre.org/data/definitions/22.html"
+        - "https://owasp.org/www-community/attacks/Path_Traversal"
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — raw filename field concatenated onto basedir, appended
+      # straight into the attachments array with no sanitizer anywhere in the
+      # function:
+      #   foreach ($booking->getMeta($field['key']) as $f) {
+      #       $settings['attachments'][] = implode('/', array_filter(array(
+      #           wp_get_upload_dir()['basedir'], trim($f['subdir'], '/'), $f['file']
+      #       )));
+      #   }
+      #   -> $f['file'] is the raw value captured from the submitted form
+      #      field at booking time; a "../../../wp-config.php" payload
+      #      survives implode() untouched and is later fopen()'d by
+      #      PHPMailer when the confirmation email is composed.
+      #
+      # FALSE POSITIVE — basename() + realpath() containment before append:
+      #   $candidate = implode('/', array_filter(array($basedir, $subdir, basename((string) $f['file']))));
+      #   $real = realpath($candidate);
+      #   if ($real && strpos($real, $uploads_basedir) === 0) { $settings['attachments'][] = $real; }
+      #
+      # CONTEXT CHECK:
+      #   1. Does the filename component originate from data submitted on a
+      #      public-facing form (a custom checkout/booking/contact "file"
+      #      field), not a value the plugin itself generated (its own
+      #      unique-id-prefixed name, or a WP attachment ID it resolved
+      #      through get_attached_file())?
+      #   2. Is basename()/sanitize_file_name()/realpath() genuinely absent
+      #      for THIS variable (verify manually — the rule only checks
+      #      presence anywhere in the enclosing function, not per-variable
+      #      dataflow)?
+      #   3. Does the built array actually reach wp_mail()'s $attachments
+      #      argument (directly, or via a settings object later read by the
+      #      mail-sending call)?
+      #
+      # TRUE POSITIVE (second shape, CVE-2026-5710, drag-and-drop-multiple-
+      # file-upload-contact-form-7 <= 1.3.9.6) — the base directory never
+      # appears directly at the append site; instead an earlier statement in
+      # the same function builds the path indirectly via str_replace(),
+      # swapping a URL prefix for the local base directory (a URL->path
+      # "conversion" idiom distinct from the direct-concat shape above), and
+      # that bare result variable is what reaches the attachments array with
+      # no basename()/realpath() containment anywhere in the function:
+      #   $new_file_name = str_replace($uploads_dir['upload_url'], $uploads_dir['upload_dir'], $_file);
+      #   if ($submission && file_exists($new_file_name)) {
+      #       $components['attachments'][] = $new_file_name;
+      #   }
+      #   -> $_file is an attacker-controlled mfile-field value (propagated
+      #      via a wpcf7_posted_data filter) never traversal-checked before
+      #      this point; file_exists() is not a containment check. The real
+      #      fix reassigns via realpath()+wp_normalize_path() and adds a
+      #      strpos() prefix check before the append — caught by the
+      #      existing function-wide realpath() pattern-not-inside below, no
+      #      new exclusion needed.
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-either:
+                  - pattern: $ARR['attachments'][] = implode($SEP, array_filter(array($BASE, ...)));
+                  - pattern: $ARR['attachments'][] = implode($SEP, array_filter([$BASE, ...]));
+                  - pattern: $ATTACH[] = implode($SEP, array_filter(array($BASE, ...)));
+                  - pattern: $ATTACH[] = implode($SEP, array_filter([$BASE, ...]));
+                  - pattern: $ARR['attachments'][] = $BASE . $REST;
+                  - pattern: $ATTACH[] = $BASE . $REST;
+              - metavariable-regex:
+                  metavariable: $BASE
+                  regex: ".*\\b(basedir|base_dir|upload_dir|uploads_dir|wp_upload_dir|wp_get_upload_dir)\\b.*"
+          # Second shape (CVE-2026-5710): the base directory is consumed one
+          # statement earlier, inside a str_replace() call that swaps a URL
+          # prefix for the local base dir to "convert" an attacker-controlled
+          # value into a filesystem path. Requires the SAME variable name in
+          # both the assignment and the append (pattern-inside shares
+          # $NEWFILE with the outer pattern), the same adjacency idiom used
+          # by claude.php.wordpress.file.strpos-prefix-containment-no-realpath's
+          # second shape.
+          - patterns:
+              - pattern-either:
+                  - pattern: $ARR['attachments'][] = $NEWFILE;
+                  - pattern: $ATTACH[] = $NEWFILE;
+              - pattern-either:
+                  - pattern-inside: |
+                      function $FUNC(...) {
+                        ...
+                        $NEWFILE = str_replace($URLPART, $BASE, $TAINTED);
+                        ...
+                      }
+                  - pattern-inside: |
+                      class $CLASS {
+                        ...
+                        function $ANY(...) {
+                          ...
+                          $NEWFILE = str_replace($URLPART, $BASE, $TAINTED);
+                          ...
+                        }
+                        ...
+                      }
+              - metavariable-regex:
+                  metavariable: $BASE
+                  # `\b` is non-functional in this semgrep engine's
+                  # metavariable-regex — boundary hand-rolled via character
+                  # classes instead (see strpos-prefix-containment-no-realpath.yaml).
+                  regex: ".*(^|[^A-Za-z0-9_])(basedir|base_dir|upload_dir|uploads_dir|wp_upload_dir|wp_get_upload_dir)([^A-Za-z0-9_]|$).*"
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            basename(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            sanitize_file_name(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            realpath(...);
+            ...
+          }
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $ANY(...) {
+              ...
+              basename(...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $ANY(...) {
+              ...
+              realpath(...);
+              ...
+            }
+            ...
+          }

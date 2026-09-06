@@ -1,0 +1,135 @@
+rules:
+  - id: claude.php.wordpress.rce.token-meta-write-missing-serialize
+    languages: [php]
+    severity: HIGH
+    message: |
+      An external-data accessor (a `->get_X()` getter call, or a `$arr['key']`
+      subscript) is passed directly — with no serialize()/maybe_serialize()/
+      wp_json_encode()/json_encode() wrapping — into the value slot of a
+      plugin-defined key/value persistence call (method name suggesting a
+      meta/token/log store), or into a literal 'meta_value' array-literal
+      slot destined for one. Plugins that reimplement a WordPress-style
+      key/value meta table with their own save/log wrapper frequently store
+      external-data-derived scalars unwrapped. If ANY read path for that same
+      column later calls unserialize()/maybe_unserialize() on the raw value
+      (a very common companion pattern for custom meta tables — see the
+      sibling rule wpdb-meta-table-unserialize), an attacker-controlled
+      string that merely satisfies is_serialized() will be deserialized on
+      read, independent of whatever object graph the plugin intended to
+      store (CWE-502).
+
+      TRIAGE:
+      1. Confirm the accessor value is genuinely external/low-privilege-
+         controlled (form field, webhook payload, contact/CRM record created
+         via a public opt-in, request parameter) — not an admin-only setting
+         or a value already constrained to be numeric.
+      2. Find every read path for the same column/token: does it call
+         unserialize()/maybe_unserialize() on the raw stored value? If every
+         read path avoids deserializing the column (e.g. echoes it as plain
+         text), this is not exploitable as PHP Object Injection.
+      3. If a read path does deserialize it, confirm the write path above is
+         reachable without deserialize()-breaking sanitization (sanitize_text_field()-
+         style tag-stripping does NOT reliably break a valid serialized-value
+         string and is not a fix — only serialize()/maybe_serialize()/
+         wp_json_encode()/json_encode() wrapping, or an allowed_classes
+         restriction on the read side, closes this).
+    metadata:
+      category: security
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+      owasp: "A08:2021 - Software and Data Integrity Failures"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Insecure Deserialization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/502.html
+        - https://owasp.org/www-community/vulnerabilities/PHP_Object_Injection
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern: $OBJ->$METHOD("...", $VALUE, $...ARGS)
+              - metavariable-regex:
+                  metavariable: $METHOD
+                  regex: "(?i).*(save|meta|token).*"
+              # A "set*"-prefixed method name is the standard PHP convention
+              # for an in-memory property mutator, not a persistence call —
+              # even when its name also happens to contain "meta"/"token"
+              # (e.g. setMeta()). The actual DB/file write lives in a
+              # differently-named sibling method (save*/persist*/store*/
+              # write*/insert*/update*) that this exclusion does not touch.
+              - metavariable-regex:
+                  metavariable: $METHOD
+                  regex: "(?i)^(?!set).*$"
+              - metavariable-pattern:
+                  metavariable: $VALUE
+                  patterns:
+                    - pattern-either:
+                        - patterns:
+                            - pattern: $ACC->$GETTER()
+                            - metavariable-regex:
+                                metavariable: $GETTER
+                                regex: "(?i)^get_.*"
+                        - pattern: $ARR[$IDX]
+              - pattern-not: $OBJ->$METHOD("...", maybe_serialize(...), $...ARGS)
+              - pattern-not: $OBJ->$METHOD("...", serialize(...), $...ARGS)
+              - pattern-not: $OBJ->$METHOD("...", wp_json_encode(...), $...ARGS)
+              - pattern-not: $OBJ->$METHOD("...", json_encode(...), $...ARGS)
+          - patterns:
+              - pattern-either:
+                  - pattern: array(..., "meta_key" => $KEY2, ..., "meta_value" => $VALUE, ...)
+                  - pattern: array(..., 'meta_key' => $KEY2, ..., 'meta_value' => $VALUE, ...)
+              - metavariable-pattern:
+                  metavariable: $VALUE
+                  patterns:
+                    - pattern-not: array(...)
+              # $VALUE is a bare string literal (single- or double-quoted, no
+              # interpolation) — developer-fixed content, not attacker input.
+              # Common shape: WP_Query/get_posts() default-args boilerplate
+              # carrying 'meta_key' => '', 'meta_value' => '' alongside every
+              # other query arg, unrelated to any actual meta/token write.
+              - metavariable-regex:
+                  metavariable: $VALUE
+                  regex: (?s)^(?!('[^']*'|"[^"$]*")$).*$
+              # Row-copy idiom: meta_key and meta_value both read from the same source
+              # object's own properties (e.g. a $wpdb->get_results() row being copied to
+              # a new row) — this is a verbatim existing-value copy, not attacker-supplied
+              # key/value construction.
+              - pattern-not: array(..., "meta_key" => $ENTRY->meta_key, ..., "meta_value" => $ENTRY->meta_value, ...)
+              - pattern-not: array(..., 'meta_key' => $ENTRY->meta_key, ..., 'meta_value' => $ENTRY->meta_value, ...)
+              - pattern-not: array(..., "meta_key" => $ENTRY->meta_key, ..., 'meta_value' => $ENTRY->meta_value, ...)
+              - pattern-not: array(..., 'meta_key' => $ENTRY->meta_key, ..., "meta_value" => $ENTRY->meta_value, ...)
+              - pattern-not: array(..., "meta_key" => $KEY2, ..., "meta_value" => maybe_serialize(...), ...)
+              - pattern-not: array(..., 'meta_key' => $KEY2, ..., 'meta_value' => maybe_serialize(...), ...)
+              - pattern-not: array(..., "meta_key" => $KEY2, ..., "meta_value" => serialize(...), ...)
+              - pattern-not: array(..., 'meta_key' => $KEY2, ..., 'meta_value' => serialize(...), ...)
+              - pattern-not: array(..., "meta_key" => $KEY2, ..., "meta_value" => wp_json_encode(...), ...)
+              - pattern-not: array(..., 'meta_key' => $KEY2, ..., 'meta_value' => wp_json_encode(...), ...)
+              - pattern-not: array(..., "meta_key" => $KEY2, ..., "meta_value" => json_encode(...), ...)
+              - pattern-not: array(..., 'meta_key' => $KEY2, ..., 'meta_value' => json_encode(...), ...)
+              # Same-function backward-reassignment FP guard: $VALUE was itself
+              # reassigned to the wrapped form (maybe_serialize($VALUE)/
+              # serialize($VALUE)) as a separate statement earlier in the same
+              # function, before being placed unwrapped into the array literal —
+              # the wrapping already happened, just not inline at the write site.
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    $VALUE = maybe_serialize($VALUE);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    $VALUE = serialize($VALUE);
+                    ...
+                  }
+              # get_posts()/WP_Query/query_posts()/get_children() all accept the legacy
+              # top-level 'meta_key'/'meta_value' args as a READ-side query filter (not
+              # a persistence call) — this array literal is query args, not a meta-table
+              # write, even though the key names are textually identical to the write shape.
+              - pattern-not-inside: get_posts(...)
+              - pattern-not-inside: new WP_Query(...)
+              - pattern-not-inside: query_posts(...)
+              - pattern-not-inside: get_children(...)

@@ -1,0 +1,31 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.rest-sensitive-cpt-show-in-rest
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A custom post type with a name suggesting sensitive data (orders,
+      appointments, payments, customers, submissions, etc.) is registered with
+      show_in_rest => true. This exposes the post type via the WordPress REST API
+      at /wp-json/wp/v2/{type}/, making all posts of this type queryable by
+      unauthenticated users unless a custom REST controller restricts access.
+      Real-world example: CVE-2026-2262 (Easy Appointments, CVSS 7.5 — customer
+      PII exposed via REST). Verify whether a custom rest_controller_class with
+      permission checks is specified.
+    metadata:
+      category: security
+      cwe: "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Sensitive Data Exposure"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/200.html
+        - https://developer.wordpress.org/reference/functions/register_post_type/
+    patterns:
+      - pattern: register_post_type($TYPE, array(..., 'show_in_rest' => true, ...))
+      - metavariable-regex:
+          metavariable: $TYPE
+          regex: "(?i).*(order|appointment|booking|payment|subscription|invoice|transaction|customer|lead|submission|application|ticket|credential|secret|private|internal).*"

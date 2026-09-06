@@ -1,0 +1,41 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.rest-callback-system-info-exposure
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      Server environment data (phpversion(), global $wp_version, or the raw
+      database table prefix string) flows into a JSON response or REST API
+      return value. If the enclosing function is registered as a REST API
+      callback without a capability-based permission_callback, any
+      unauthenticated visitor can retrieve the PHP version, WordPress version,
+      or database table prefix (CWE-200).
+      The table prefix is a defense-in-depth measure against SQL injection;
+      disclosing it aids targeted exploitation of other plugins on the same
+      site. Ensure the endpoint requires an appropriate capability
+      (e.g. current_user_can('manage_options')) in its permission_callback.
+    metadata:
+      category: security
+      cwe: "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Sensitive Data Exposure"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/#permissions-callback
+        - https://cwe.mitre.org/data/definitions/200.html
+    pattern-sources:
+      - pattern-either:
+          - pattern: phpversion()
+          - pattern: $wp_version
+          - pattern: PHP_VERSION
+    pattern-sinks:
+      - pattern-either:
+          - pattern: wp_send_json($X, ...)
+          - pattern: wp_send_json_success($X, ...)
+          - pattern: wp_send_json_error($X, ...)
+          - pattern: new WP_REST_Response($X, ...)
+          - pattern: rest_ensure_response($X)

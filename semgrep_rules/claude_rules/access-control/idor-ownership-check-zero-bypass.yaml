@@ -1,0 +1,69 @@
+rules:
+  - id: claude.php.wordpress.access-control.idor-ownership-check-zero-bypass
+    languages: [php]
+    severity: HIGH
+    message: |
+      An ownership check uses PHP truthiness on an integer user-ID that can be 0
+      (guest / anonymous record). When the stored user_id is 0, the condition
+      `if ($ownerUserId && ...)` short-circuits to false and the authorization
+      denial is never reached. Any authenticated user can access resources that
+      belong to guest/anonymous records.
+
+      Pattern detected:
+        $ownerUserId = (int)($record['user_id'] ?? 0);
+        if ($ownerUserId && $currentUser !== $ownerUserId && !current_user_can($cap)) {
+          /* 403 denial never reached when ownerUserId === 0 */
+        }
+
+      Fix: replace the truthiness guard with an explicit comparison:
+        if ($ownerUserId !== 0 && $currentUserId !== $ownerUserId && !current_user_can('manage_options')) {
+            return new WP_Error('forbidden', ..., ['status' => 403]);
+        }
+        // Guest records should require admin access or a signed token mechanism.
+    metadata:
+      category: security
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Insecure Direct Object Reference (IDOR)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+        - https://owasp.org/www-project-top-ten/2021/A01_2021-Broken_Access_Control
+    patterns:
+      - pattern-either:
+          # (int)() cast — comparison: $cur !== $owner — with capability check
+          - patterns:
+              - pattern: |
+                  $OWNER_ID = (int)($EXPR);
+                  ...
+                  if ($OWNER_ID && $CUR_USER !== $OWNER_ID && !current_user_can($CAP)) {
+                    ...
+                  }
+          # (int)() cast — reversed comparison: $owner !== $cur — with capability check
+          - patterns:
+              - pattern: |
+                  $OWNER_ID = (int)($EXPR);
+                  ...
+                  if ($OWNER_ID && $OWNER_ID !== $CUR_USER && !current_user_can($CAP)) {
+                    ...
+                  }
+          # intval() form — comparison with capability check
+          - patterns:
+              - pattern: |
+                  $OWNER_ID = intval($EXPR);
+                  ...
+                  if ($OWNER_ID && $CUR_USER !== $OWNER_ID && !current_user_can($CAP)) {
+                    ...
+                  }
+          # intval() form — reversed comparison with capability check
+          - patterns:
+              - pattern: |
+                  $OWNER_ID = intval($EXPR);
+                  ...
+                  if ($OWNER_ID && $OWNER_ID !== $CUR_USER && !current_user_can($CAP)) {
+                    ...
+                  }

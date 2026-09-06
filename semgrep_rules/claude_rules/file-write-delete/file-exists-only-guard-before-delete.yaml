@@ -1,0 +1,230 @@
+rules:
+  - id: claude.php.wordpress.file-write-delete.file-exists-only-guard-before-delete
+    languages: [php]
+    severity: HIGH
+    message: |
+      file_exists() (or is_file()) is the ONLY check guarding a delete sink
+      (unlink()/wp_delete_file()/rmdir()) whose path argument is either (a)
+      built by concatenating a base-directory expression with another
+      variable, or (b) assigned from an expression that url-decodes an
+      attacker-influenced URL/path string (a stored "file URL" converted to
+      a local path via a naive prefix substitution, e.g.
+      str_replace(baseurl, basedir, ...), with no scheme/containment check
+      applied afterward). file_exists() confirms the resolved path points at
+      a real file — it does NOT confirm that path stays inside the intended
+      directory, and it does NOT reject stream-wrapper schemes. If the
+      variable portion of the path was ever written from attacker-influenced
+      data (a stored field value, serialized metadata, an option) rather
+      than being purely developer-controlled, a traversal sequence — or a
+      phar:// URI pointing at an attacker-placed archive — survives all the
+      way to the delete call. Path traversal/deletion is CWE-22/CWE-73; an
+      unvalidated phar:// path also triggers PHP's automatic Phar metadata
+      deserialization the moment file_exists()/is_file() touches it,
+      independent of any literal unserialize() call (CWE-502).
+
+      A third shape guards the SAME sink with the check inverted: the
+      function throws/returns early when file_exists()/is_file() is FALSE,
+      then falls through to the unconditional delete a few statements later
+      (no wrapping if-block around the delete itself). This "guard clause"
+      idiom is functionally identical to the nested-if shape and is just as
+      commonly the entire fix's blind spot — e.g. a REST "delete attachment"
+      handler that base64_decode()s a client-supplied token straight into
+      "$ABSPATH . 'wp-content/uploads/' . base64_decode($token)" with no
+      realpath()/prefix check anywhere in the function.
+
+      TRIAGE:
+        1. Trace where the concatenated/converted variable was written — a
+           DB column, post/user meta, serialized option, or a client-
+           supplied request/REST parameter (raw, or decoded with
+           base64_decode()/urldecode()/rawurldecode()/hex2bin()) is a TP; a
+           hardcoded/developer-only value is a FP.
+        2. Confirm no realpath()+prefix check, basename(), sanitize_file_name(),
+           or validate_file() exists anywhere in the enclosing function —
+           realpath() ALONE (without a subsequent prefix/containment check on
+           the resolved value) does not neutralize the traversal, and
+           decoding the value alone does not neutralize a phar:// scheme.
+        3. Confirm the delete call is unconditional once file_exists() passes
+           (or, for the guard-clause shape, is reached whenever file_exists()
+           does NOT throw/return) — not additionally gated by an allow-list
+           keyed on a validated ID.
+        4. If an unrestricted-upload path exists elsewhere in the plugin (any
+           file type accepted, no MIME/extension allow-list), treat this as a
+           potential PHP Object Injection primitive (CWE-502) pending a
+           POP-chain gadget check, not only as Arbitrary File Deletion.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+        - "CWE-73: External Control of File Name or Path"
+        - "CWE-502: Deserialization of Untrusted Data"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Arbitrary File Deletion / PHP Object Injection (Phar Deserialization)"
+      technology: [php, wordpress]
+      references:
+        - "https://cwe.mitre.org/data/definitions/22.html"
+        - "https://cwe.mitre.org/data/definitions/73.html"
+        - "https://cwe.mitre.org/data/definitions/502.html"
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          # Variant 1: base-directory expression concatenated with another
+          # variable directly at the guard/sink call site.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      if (file_exists($PATH)) {
+                        ...
+                        unlink($PATH);
+                      }
+                  - pattern: |
+                      if (file_exists($PATH)) {
+                        ...
+                        @unlink($PATH);
+                      }
+                  - pattern: |
+                      if (file_exists($PATH)) {
+                        ...
+                        wp_delete_file($PATH);
+                      }
+                  - pattern: |
+                      if (file_exists($PATH)) {
+                        ...
+                        rmdir($PATH);
+                      }
+                  - pattern: |
+                      if (is_file($PATH)) {
+                        ...
+                        unlink($PATH);
+                      }
+                  - pattern: |
+                      if (is_file($PATH)) {
+                        ...
+                        @unlink($PATH);
+                      }
+              # Anchor to the concatenated-path shape this class actually takes: a
+              # base-directory array/property access joined with another variable,
+              # not a single bare variable or a purely hardcoded literal.
+              - metavariable-pattern:
+                  metavariable: $PATH
+                  patterns:
+                    - pattern-either:
+                        - pattern: $BASE[$KEY] . $REST
+                        - pattern: $BASE->$PROP . $REST
+          # Variant 2: the path is assigned (directly, or via any wrapping
+          # call/expression) from an expression containing urldecode()/
+          # rawurldecode() on an attacker-influenced URL/path string, then
+          # used bare in the same guard/sink sequence. The decode call is
+          # the intrinsic marker that the value originated as a URL rather
+          # than a developer-controlled path — covers converters factored
+          # into a helper function, where the concatenation itself is not
+          # visible at the guard/sink call site.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      $PATH = <... $DECODE($URL) ...>;
+                      ...
+                      if (file_exists($PATH)) {
+                        ...
+                        unlink($PATH);
+                      }
+                  - pattern: |
+                      $PATH = <... $DECODE($URL) ...>;
+                      ...
+                      if (file_exists($PATH)) {
+                        ...
+                        @unlink($PATH);
+                      }
+                  - pattern: |
+                      $PATH = <... $DECODE($URL) ...>;
+                      ...
+                      if (is_file($PATH)) {
+                        ...
+                        unlink($PATH);
+                      }
+              - metavariable-regex:
+                  metavariable: $DECODE
+                  regex: (?i)^(urldecode|rawurldecode|base64_decode|hex2bin)$
+          # Variant 3: same decoded-path marker as Variant 2, but the guard is
+          # a "throw/return early when NOT found" clause instead of a
+          # "wrap the delete in a found" block — the delete call is a
+          # sibling statement AFTER the guard, not nested inside it. This is
+          # the dominant shape for REST/AJAX handlers (validate, then act),
+          # e.g. CVE-2025-10916 (formgent <= 1.0.3): a REST "delete
+          # attachment" endpoint builds the path from
+          # base64_decode($request->get_param('file_token')) with no
+          # containment check before wp_delete_file().
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      $PATH = <... $DECODE($URL) ...>;
+                      ...
+                      if (!file_exists($PATH)) {
+                        ...
+                      }
+                      ...
+                      unlink($PATH);
+                  - pattern: |
+                      $PATH = <... $DECODE($URL) ...>;
+                      ...
+                      if (!file_exists($PATH)) {
+                        ...
+                      }
+                      ...
+                      @unlink($PATH);
+                  - pattern: |
+                      $PATH = <... $DECODE($URL) ...>;
+                      ...
+                      if (!file_exists($PATH)) {
+                        ...
+                      }
+                      ...
+                      wp_delete_file($PATH);
+                  - pattern: |
+                      $PATH = <... $DECODE($URL) ...>;
+                      ...
+                      if (!is_file($PATH)) {
+                        ...
+                      }
+                      ...
+                      unlink($PATH);
+                  - pattern: |
+                      $PATH = <... $DECODE($URL) ...>;
+                      ...
+                      if (!is_file($PATH)) {
+                        ...
+                      }
+                      ...
+                      wp_delete_file($PATH);
+              - metavariable-regex:
+                  metavariable: $DECODE
+                  regex: (?i)^(urldecode|rawurldecode|base64_decode|hex2bin)$
+      # realpath()/validate_file() are excluded function-wide: the real fix for
+      # this class assigns the resolved path to a new variable before the
+      # file_exists() guard, so by the time that happens $PATH is no longer
+      # the raw concatenation/conversion this rule anchors on — the exclusion
+      # below is a belt-and-suspenders backstop for guards written the other
+      # way round.
+      # sanitize_file_name()/basename() are deliberately NOT excluded
+      # function-wide: a delete handler of this shape routinely also handles
+      # a *new* upload elsewhere in the same function and sanitizes THAT
+      # filename, which would blind the rule to the real bug. Confirm inline
+      # sanitizer use on the deleted path itself during triage.
+      - pattern-not-inside: |
+          function $F(...) {
+            ...
+            realpath(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $F(...) {
+            ...
+            validate_file(...);
+            ...
+          }

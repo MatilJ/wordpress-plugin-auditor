@@ -1,0 +1,282 @@
+rules:
+  - id: claude.php.wordpress.xss.json-encode-echo-unsanitized
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      json_encode() or wp_json_encode() result is directly echoed without esc_attr()
+      or esc_html() wrapping. In PHP template files, if this echo appears inside a
+      single-quote-delimited HTML attribute (e.g., value='<?php echo json_encode($data); ?>'),
+      stored data containing a literal single quote terminates the attribute early and
+      allows injection of arbitrary event handlers — no HTML tags required.
+
+      TRIAGE: Check the surrounding template markup. Vulnerable only when the echo falls
+      inside a single-quoted HTML attribute. False positive if inside a <script> block
+      (JSON context is safe) or a double-quoted attribute.
+
+      Fix: echo esc_attr( json_encode( $data, JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP ) );
+
+      TRIAGE (updated): echo inside a single-quoted HTML attribute is the classic vulnerable
+      case. BUT a <script>-block echo is NOT automatically safe: json_encode() escapes /
+      to \/ (preventing </script> breakout) but does NOT escape < or >. If the JavaScript
+      side reads the value via dangerouslySetInnerHTML, innerHTML, or a similar DOM-write
+      sink, payloads containing < and > (e.g., <img src=x onerror=alert(1)>) pass through
+      unescaped and execute. Verify how the JS app consumes the output before dismissing
+      a <script>-context hit as a false positive.
+
+      AJAX/REST response handlers are NOT a blanket false positive. "The echo is inside a
+      wp_ajax_* callback, not a template" is not sufficient to dismiss a hit: the JSON is
+      almost always consumed by JS that renders it as UI. Confirmed vulnerable shape: a
+      DB-backed value (postmeta/usermeta/wpdb column) reaches an AJAX callback's bare
+      echo json_encode()/wp_json_encode(), and the client-side consumer inserts the
+      returned field into HTML rather than treating it as plain text — via raw string
+      concatenation into .html()/a jQuery(htmlString) constructor (e.g. building
+      '<option>' + value + '</option>' from the response before insertion), or via an
+      autocomplete/Select2-style widget whose escapeMarkup option has been overridden to
+      a no-op (identity return) while its templateResult/formatResult callback
+      concatenates response fields into markup — Select2's own default escapeMarkup
+      already HTML-escapes safely, so an explicit override is itself a signal, not
+      routine config. TRUE false-positive AJAX/REST shapes: the response is consumed only
+      via .text()/.val()/textContent, via a JSON.parse()'d value used as a plain JS
+      variable (arithmetic, comparisons, non-DOM logic), or the endpoint is a genuine file
+      download (see JSON file-download FP note below) rather than data rendered in a page.
+
+      SAFE (FP) contexts: wp_localize_script() callers, and <script>-block data used
+      only as plain JS values (not rendered as HTML via dangerouslySetInnerHTML/innerHTML).
+
+      BLIND SPOT — element-wise pre-escaping is invisible to this rule: a fix that maps
+      esc_attr()/esc_html() over each array element BEFORE json_encode() (e.g.
+      array_map('esc_attr', $values)) still leaves a bare echo json_encode(...) at the
+      call site with no wrapper the pattern can see — this rule will still fire on the
+      remediated code. This is not a false alarm to auto-dismiss: confirm by hand whether
+      the elementwise mapping is (a) present, (b) applied to every element on every code
+      path (not skipped for non-scalar elements), and (c) still exercised after any later
+      refactor of the array-building call — element-wise sanitizers are easy to silently
+      break (e.g. array_walk_recursive() with a callback parameter taken by value instead
+      of by reference is a no-op that leaves the array completely unescaped).
+
+      INDIRECT WRAPPER FORM: a bare call to a getter/helper (method or function) whose
+      name contains "json" — e.g. a class method that internally builds and returns
+      json_encode()'d data — reaching the same unescaped echo is the same vulnerable
+      shape, even though the json_encode() call itself is invisible to single-statement
+      matching because it lives inside the callee. Apply the same single-quoted-attribute
+      triage before confirming.
+
+      DEFERRED-ECHO MECHANISM — assignment to an HTML-builder variable, no echo in the
+      same function: WordPress controller/MVC-style plugins commonly build an "*_html"
+      local (e.g. $content_html, $item_html) via string concatenation, hand it to a
+      vars/view-data array, and echo it unescaped later from a separate template file.
+      $VAR = $PREFIX . wp_json_encode(...) . $SUFFIX; assigned to such a variable is the
+      same sink as the echo forms above — the absence of an echo in this function only
+      means it lives elsewhere. Not a false positive merely because no echo is visible
+      here; confirm the variable is later output raw (not re-escaped) by its consumer.
+
+      DISTINCT MECHANISM — bare API/AJAX endpoint with no Content-Type header: when the
+      echo is NOT inside an HTML template at all but IS the entire HTTP response body of
+      an endpoint (a direct request handler that reflects request parameters back as
+      JSON, then exits), the relevant threat model is response Content-Type confusion,
+      not attribute breakout: absent an explicit header() call declaring the response as
+      JSON, it is served under the framework's default content type and a browser that
+      is induced to render the body as markup (e.g. via direct navigation to the
+      endpoint) will execute an unescaped <script> payload with no attribute context
+      needed at all. An explicit header() call in the same function declaring the
+      response as JSON (the standard wp_send_json()-style mitigation) is treated as a
+      safe pattern by this rule and also resolves the previously-undismissable JSON
+      file-download FP case below, since that case's header() call independently
+      declares the same content type.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      # Complements claude.php.wordpress.xss.json-encode-in-html-attribute (taint mode).
+      # The taint rule requires the data source to be traceable to get_post_meta/get_option
+      # within the same inter-procedural scope. This pattern rule fires regardless of
+      # source, surfacing cross-file chains where data flows through a helper function
+      # return value before reaching the json_encode echo in the template.
+      # Note: echo deep-expression matching is unreliable for wp_json_encode in Semgrep
+      # PHP; explicit patterns are used for each structural form instead.
+      #
+      # TRIAGE — JSON file download / export handler — FP.
+      # Pattern: handler sets Content-type: application/json + Content-disposition: attachment
+      # headers, then calls echo wp_json_encode($data); exit; to send a file download.
+      # This is NOT rendered in any browser HTML context — it is received as a file.
+      # Form A now suppresses this shape structurally: a header() call anywhere in the
+      # same function whose argument contains "application/json" is a pattern-not-inside
+      # guard (see Form A below), since that same declaration is also the general fix for
+      # the bare-endpoint Content-Type-confusion mechanism documented above.
+      # Confirmed FP: ultimate-dashboard 3.8.16 modules/tool/inc/process-export.php:132 —
+      # WP Settings API export form, manage_options required, Content-disposition: attachment.
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/esc_attr/
+        - https://www.php.net/manual/en/function.json-encode.php
+        - https://html.spec.whatwg.org/#attribute-value-(single-quoted)-state
+    paths:
+      exclude:
+        - "**/freemius/**"
+    pattern-either:
+      # Form A: json_encode() as the sole argument to echo (direct call).
+      - patterns:
+          - pattern: echo json_encode(...);
+          - pattern-not: echo esc_attr(json_encode(...));
+          - pattern-not: echo esc_html(json_encode(...));
+          # Safe: an explicit header() call declaring an application/json response
+          # anywhere in the enclosing function is the standard Content-Type-confusion
+          # fix (wp_send_json()-style) for a bare API/AJAX endpoint's reflected echo.
+          - pattern-not:
+              patterns:
+                - pattern-inside: |
+                    function $FUNC(...) {
+                      ...
+                      header($HDR, ...);
+                      ...
+                    }
+                - metavariable-regex:
+                    metavariable: $HDR
+                    regex: ".*application/json.*"
+      # Form B: wp_json_encode() as the sole argument to echo (direct call).
+      - patterns:
+          - pattern: echo wp_json_encode(...);
+          - pattern-not: echo esc_attr(wp_json_encode(...));
+          - pattern-not: echo esc_html(wp_json_encode(...));
+          # JSON_HEX_TAG hex-encodes < and > to </> — literal < > cannot appear in output.
+          - pattern-not: echo wp_json_encode($DATA, <... JSON_HEX_TAG ...>);
+          # Same application/json Content-Type guard as Form A.
+          - pattern-not:
+              patterns:
+                - pattern-inside: |
+                    function $FUNC(...) {
+                      ...
+                      header($HDR, ...);
+                      ...
+                    }
+                - metavariable-regex:
+                    metavariable: $HDR
+                    regex: ".*application/json.*"
+      # Form C: ternary with json_encode in the true branch — common template pattern.
+      # Confirmed TP form: echo (!empty($posts)) ? json_encode($posts) : "[]";
+      - patterns:
+          - pattern: "echo $COND ? json_encode($DATA) : $DEFAULT;"
+          - pattern-not: "echo $COND ? esc_attr(json_encode($DATA)) : $DEFAULT;"
+          - pattern-not: "echo $COND ? esc_html(json_encode($DATA)) : $DEFAULT;"
+      # Form D: ternary with wp_json_encode in the true branch.
+      - patterns:
+          - pattern: "echo $COND ? wp_json_encode($DATA) : $DEFAULT;"
+          - pattern-not: "echo $COND ? esc_attr(wp_json_encode($DATA)) : $DEFAULT;"
+          - pattern-not: "echo $COND ? esc_html(wp_json_encode($DATA)) : $DEFAULT;"
+      # Form E: json_encode() inline in a string concatenation echo.
+      # Catches: echo "value='" . json_encode($data) . "'";
+      - patterns:
+          - pattern: echo $PREFIX . json_encode(...) . $SUFFIX;
+          - pattern-not: echo $PREFIX . esc_attr(json_encode(...)) . $SUFFIX;
+          - pattern-not: echo $PREFIX . esc_html(json_encode(...)) . $SUFFIX;
+      # Form F: wp_json_encode() inline in a string concatenation echo.
+      - patterns:
+          - pattern: echo $PREFIX . wp_json_encode(...) . $SUFFIX;
+          - pattern-not: echo $PREFIX . esc_attr(wp_json_encode(...)) . $SUFFIX;
+          - pattern-not: echo $PREFIX . esc_html(wp_json_encode(...)) . $SUFFIX;
+          - pattern-not: echo $PREFIX . wp_json_encode($DATA, <... JSON_HEX_TAG ...>) . $SUFFIX;
+          # Safe: the encoded variable was assigned via esc_url() on a prior
+          # line. esc_url()'s allowlist (see wp-core-reference.md) excludes
+          # `<`, `>`, and `"` outright, so no attribute/script/body breakout
+          # character can survive into the JSON-encoded output regardless of
+          # what the surrounding $PREFIX/$SUFFIX literal context turns out
+          # to be. Confirmed FP: kirki 6.1.1
+          # libraries/framework/Supports/Url.php:75-76 — esc_url($redirect_url)
+          # assigned to $safe_url, then echoed via
+          # '<script>...' . wp_json_encode($safe_url) . '...</script>'.
+          # pattern-not-inside (not pattern-not) is required here: the
+          # exclusion spans two statements (the assignment, then the echo)
+          # while the anchor above matches only the echo statement itself —
+          # containment, not exact-node equivalence, is what correlates them.
+          - pattern-not-inside: |
+              function $FN(...) {
+                ...
+                $SAFE = esc_url(...);
+                ...
+                echo $PREFIX . wp_json_encode($SAFE) . $SUFFIX;
+                ...
+              }
+      # Form G: json_encode result assigned to variable, embedded in concat echo.
+      # Catches: $enc = json_encode($data); ... echo "prefix" . $enc . "suffix";
+      - patterns:
+          - pattern: |
+              $ENCODED = json_encode(...);
+              ...
+              echo $PREFIX . $ENCODED . $SUFFIX;
+          - pattern-not: |
+              $ENCODED = json_encode(...);
+              ...
+              echo $PREFIX . esc_attr($ENCODED) . $SUFFIX;
+          - pattern-not: |
+              $ENCODED = json_encode(...);
+              ...
+              echo $PREFIX . esc_html($ENCODED) . $SUFFIX;
+      # Form H: wp_json_encode result assigned to variable, embedded in concat echo.
+      - patterns:
+          - pattern: |
+              $ENCODED = wp_json_encode(...);
+              ...
+              echo $PREFIX . $ENCODED . $SUFFIX;
+          - pattern-not: |
+              $ENCODED = wp_json_encode(...);
+              ...
+              echo $PREFIX . esc_attr($ENCODED) . $SUFFIX;
+          - pattern-not: |
+              $ENCODED = wp_json_encode(...);
+              ...
+              echo $PREFIX . esc_html($ENCODED) . $SUFFIX;
+          - pattern-not: |
+              $ENCODED = wp_json_encode($DATA, <... JSON_HEX_TAG ...>);
+              ...
+              echo ...;
+      # Form I: bare call to an object method whose name contains "json" (e.g. a
+      # getter that internally returns json_encode(...)), echoed directly. The
+      # json_encode() call is invisible to Forms A/B since it lives in the callee.
+      - patterns:
+          - pattern: echo $OBJ->$METHOD();
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: "(?i).*json.*"
+          - pattern-not: echo esc_attr($OBJ->$METHOD());
+          - pattern-not: echo esc_html($OBJ->$METHOD());
+      # Form J: bare call to a standalone function whose name contains "json",
+      # echoed directly — same rationale as Form I for procedural-style helpers.
+      - patterns:
+          - pattern: echo $METHOD();
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: "(?i).*json.*"
+          - pattern-not: echo esc_attr($METHOD());
+          - pattern-not: echo esc_html($METHOD());
+      # Form K: wp_json_encode() concatenated directly into an assignment to an
+      # "*_html"-named variable (not an immediate echo) — the "build the HTML
+      # string now, echo it later" idiom common to WordPress controller/MVC-
+      # style plugins: a controller method assigns an HTML-builder local,
+      # stores it on a vars/view-data array, and a separate template file
+      # echoes it raw. No echo needs to appear in this function for this to be
+      # the same sink — its absence here only means the echo lives elsewhere.
+      # Restricting $VAR to names containing "html" targets the widespread
+      # naming convention for these locals (*_html, html_*) and keeps the
+      # assignment-only match bounded.
+      - patterns:
+          - pattern: $VAR = $PREFIX . wp_json_encode(...) . $SUFFIX;
+          - metavariable-regex:
+              metavariable: $VAR
+              regex: "(?i).*html.*"
+          - pattern-not: $VAR = $PREFIX . esc_attr(wp_json_encode(...)) . $SUFFIX;
+          - pattern-not: $VAR = $PREFIX . esc_html(wp_json_encode(...)) . $SUFFIX;
+          - pattern-not: $VAR = $PREFIX . wp_json_encode($DATA, <... JSON_HEX_TAG ...>) . $SUFFIX;
+      # Form L: json_encode() variant of Form K.
+      - patterns:
+          - pattern: $VAR = $PREFIX . json_encode(...) . $SUFFIX;
+          - metavariable-regex:
+              metavariable: $VAR
+              regex: "(?i).*html.*"
+          - pattern-not: $VAR = $PREFIX . esc_attr(json_encode(...)) . $SUFFIX;
+          - pattern-not: $VAR = $PREFIX . esc_html(json_encode(...)) . $SUFFIX;
+          - pattern-not: $VAR = $PREFIX . json_encode($DATA, <... JSON_HEX_TAG ...>) . $SUFFIX;

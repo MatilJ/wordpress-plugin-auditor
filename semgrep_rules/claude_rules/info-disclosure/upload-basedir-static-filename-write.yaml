@@ -1,0 +1,103 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.upload-basedir-static-filename-write
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      Content is written to a hardcoded, non-randomized filename directly under
+      wp_upload_dir()'s basedir/baseurl root rather than a per-user or
+      per-session-scoped subdirectory. Because the filename never varies
+      between requests or users, the resulting URL is 100% predictable without
+      ever calling the plugin's own handler, and — unless the file is served
+      only through a separate capability-checked read path — any
+      unauthenticated visitor who requests that exact static path can read
+      whatever content the most recently completed write produced, including
+      content originally scoped to a different, authenticated user
+      (CWE-552 / CWE-200).
+
+      Fix: write to a per-request/per-user-scoped, randomized filename
+      (wp_generate_password()/wp_generate_uuid4()/random_bytes()-derived), or
+      avoid writing a world-readable file at all and stream the content
+      directly to the authenticated requester instead.
+
+      TRIAGE:
+        1. Confirm the filename component is a bare string literal (or a
+           literal concatenated only with a fixed extension) — no user ID,
+           session ID, nonce, uniqid(), or random-generator call anywhere in
+           the filename construction.
+        2. Confirm the directory resolves to wp_upload_dir()'s basedir/baseurl
+           itself, not a per-user/per-session subdirectory built from a
+           randomized or otherwise unique path component.
+        3. Confirm the written content originates from privileged or
+           user-scoped data (an API response, a private record) rather than
+           a public/static asset that carries no confidentiality value.
+    metadata:
+      category: security
+      cwe: "CWE-552: Files or Directories Accessible to External Parties"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Information Disclosure"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/552.html
+        - https://cwe.mitre.org/data/definitions/200.html
+        - https://developer.wordpress.org/reference/functions/wp_upload_dir/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $UPLOADVAR = wp_upload_dir(...);
+              ...
+              $PATHVAR = $UPLOADVAR[$KEY] . $SEP . $NAME;
+              ...
+              $FH = fopen($PATHVAR, ...);
+          - pattern: |
+              $UPLOADVAR = wp_upload_dir(...);
+              ...
+              $FH = fopen($UPLOADVAR[$KEY] . $SEP . $NAME, ...);
+          - pattern: |
+              $UPLOADVAR = wp_upload_dir(...);
+              ...
+              $PATHVAR = $UPLOADVAR[$KEY] . $SEP . $NAME;
+              ...
+              file_put_contents($PATHVAR, ...);
+          - pattern: |
+              $UPLOADVAR = wp_upload_dir(...);
+              ...
+              file_put_contents($UPLOADVAR[$KEY] . $SEP . $NAME, ...);
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i)^['"](base_?dir|base_?url)['"]$
+      # PHP string concatenation is a flattened n-ary chain in Semgrep's parser,
+      # not a strict binary tree: without a structural constraint on BOTH $SEP
+      # and $NAME, Semgrep can shift the match boundary so an unconstrained
+      # $SEP silently absorbs several middle segments of a longer chain (e.g.
+      # a per-session subdirectory component) while $NAME still cleanly binds
+      # to just the trailing literal — defeating the "exactly two concatenation
+      # hops" shape this rule targets. Both metavariables are restricted to a
+      # single token (a bare variable/constant reference or a direct string
+      # literal) to prevent that absorption.
+      - metavariable-regex:
+          metavariable: $SEP
+          regex: ^(\$[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*|'[^']*'|"[^"]*")$
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: ^(\$[A-Za-z_][A-Za-z0-9_]*|'[^']*'|"[^"]*")$
+      - metavariable-pattern:
+          metavariable: $NAME
+          patterns:
+            - pattern-either:
+                - pattern: "'...'"
+                - pattern: '"..."'
+      # Constant-propagation-covered escape hatches: if the literal filename
+      # variable was itself derived from a randomized/unique source earlier
+      # in the same function, Semgrep's constant propagation will not treat
+      # it as a plain string literal, so $NAME will already fail to match —
+      # these two exclusions additionally cover the common one-hop-further
+      # idiom of building the literal from a random value via sprintf/concat
+      # immediately before assignment.
+      - pattern-not: |
+          $NAME = wp_generate_password(...);
+      - pattern-not: |
+          $NAME = wp_generate_uuid4(...);

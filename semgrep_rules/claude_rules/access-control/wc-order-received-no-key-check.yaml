@@ -1,0 +1,149 @@
+rules:
+  - id: claude.php.wordpress.access-control.wc-order-received-no-key-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      wc_get_order() is called with a URL-supplied order ID (query_vars['order-received'],
+      query_vars['order-pay'], or query_vars['view-order']) without verifying the WooCommerce
+      order key in the same function. WooCommerce's own order-key gate lives inside the
+      page-content template (the [woocommerce_checkout] shortcode for order-received,
+      checkout/form-pay.php for order-pay, WC_Shortcode_My_Account::view_order() for
+      view-order) — any OTHER callback that independently resolves the same order/subscription
+      by ID and fires on a hook outside that template's control path (wp_head, which fires
+      before the_content; wp_print_footer_scripts, which fires after the content area
+      regardless of whether WC's own key check passed or failed; or any hook not gated by
+      WooCommerce's template_redirect key-validation redirect) can read and emit order data
+      before or independent of that validation — exposing order totals, currency, product
+      IDs, billing PII, and the order_key itself to unauthenticated visitors who supply only
+      a sequential order/subscription ID (IDOR / CWE-639, escalating to CWE-862/CWE-200 when
+      the leaked order_key is itself usable as a bearer-token substitute elsewhere in the
+      same plugin).
+
+      TRIAGE: Confirm the function is hooked to wp_head, wp_print_footer_scripts, wp_footer,
+      or another hook that fires independent of WooCommerce's own content-template key check —
+      OR is a second, independent shortcode/block callback rendered in the same the_content
+      pass as WooCommerce's own key-checking shortcode (a sibling shortcode is processed by
+      do_shortcode() on its own, unaffected by a neighboring shortcode's internal validation).
+      If hooked to template_redirect instead, WooCommerce redirects unauthorized requests
+      before this code runs — likely a false positive. Confirmed TP: woo-stripe-payment 4.0.7
+      AssetDataController::add_default_data() (wp_print_footer_scripts, priority 1) ->
+      ContextHandler::get_order_from_query() -> wc_get_order(absint($wp->query_vars['order-pay']))
+      -> DataTransformer::transform_order() serializes order_key + full billing PII with no
+      key/ownership check, independent of WC core's own key_is_valid() gate on the page content.
+      Confirmed TP: woocommerce-pdf-invoices-packing-slips 5.15.2
+      Frontend::generate_document_shortcode() — a sibling document-download shortcode (not a
+      wp_head/footer hook) resolves order-received/view-order with no key check, then a
+      downstream 'full' access-type setting mints the real order_key into the rendered link.
+
+      Fix: validate the order key before reading order data:
+        $order_key = isset( $_GET['key'] ) ? sanitize_text_field( wp_unslash( $_GET['key'] ) ) : '';
+        if ( ! $order || ! hash_equals( $order->get_order_key(), $order_key ) ) {
+            return;
+        }
+
+      Also matches the variable-indirection shape: an order ID assigned from
+      query_vars into a local variable (rather than passed inline) and consumed
+      by wc_get_order() later in the same function, gated only by a non-empty
+      check on the request's key parameter (isset()/!empty()/!= "") rather than
+      an equality comparison against the resolved order's own key.
+    metadata:
+      category: security
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Insecure Direct Object Reference"
+      technology: [php, wordpress, woocommerce]
+      references:
+        - https://cwe.mitre.org/data/definitions/639.html
+        - https://developer.wordpress.org/reference/functions/add_action/
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+    patterns:
+      - pattern-either:
+          - pattern: wc_get_order($WP_QUERY->query_vars['order-received'])
+          # 'order-pay' variant: WooCommerce's "Pay for order" endpoint. Also
+          # resolves shop_subscription objects transparently when the ID is a
+          # subscription's own post ID (WC_Subscription extends WC_Order).
+          - pattern: wc_get_order(absint($WP->query_vars['order-pay']))
+          - pattern: wc_get_order($WP->query_vars['order-pay'])
+          # 'view-order' variant: WooCommerce My Account "View Order" endpoint
+          # (/my-account/view-order/{id}/) — the same order-key-unaware
+          # resolution shape as 'order-received' above, just reached from a
+          # different WC-registered query var. Confirmed TP:
+          # woocommerce-pdf-invoices-packing-slips 5.15.2
+          # Frontend::generate_document_shortcode() resolves BOTH
+          # 'order-received' and this 'view-order' branch with no key check;
+          # only the 'order-received' branch matched before this variant was added.
+          - pattern: wc_get_order($WP_QUERY->query_vars['view-order'])
+          - pattern: wc_get_order($WP->query_vars['view-order'])
+          - pattern: wc_get_order(absint($WP->query_vars['view-order']))
+          - patterns:
+              - pattern: wc_get_order($OID)
+              - pattern-inside: |
+                  function $FUNC(...) {
+                    ...
+                    $OID = absint($WP->query_vars['view-order']);
+                    ...
+                  }
+          # Variable-indirection shape: order ID assigned from query_vars into
+          # a local variable in an earlier (possibly nested) statement, then
+          # passed to wc_get_order() by variable reference later in the same
+          # function — instead of being passed inline. pattern-inside performs
+          # a deep/recursive containment search, so the intervening "..." spans
+          # arbitrary nesting (e.g. the assignment sitting inside its own
+          # if-block), unlike a plain sequential statement pattern.
+          - patterns:
+              - pattern: wc_get_order($OID)
+              - pattern-inside: |
+                  function $FUNC(...) {
+                    ...
+                    $OID = absint($WP->query_vars['order-received']);
+                    ...
+                  }
+          - patterns:
+              - pattern: wc_get_order($OID)
+              - pattern-inside: |
+                  function $FUNC(...) {
+                    ...
+                    $OID = absint($WP_QUERY->query_vars['order-received']);
+                    ...
+                  }
+      # Safe if the function validates the order key via get_query_var or stores it for comparison.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            get_query_var('order-key');
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $KEY = $ORDER->get_order_key();
+            ...
+          }
+      # Deep-matched inside an if-condition so a key check nested in a guard
+      # (the common shape: `if (!$order->key_is_valid($key)) { ... }`) is
+      # still detected, not just a bare top-level statement.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... $ORDER->key_is_valid(...) ...>) {
+              ...
+            }
+            ...
+          }
+      # hash_equals() is the WP-recommended timing-safe comparator for order
+      # keys; deep-matched inside an if-condition guard for the same reason.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... hash_equals(...) ...>) {
+              ...
+            }
+            ...
+          }

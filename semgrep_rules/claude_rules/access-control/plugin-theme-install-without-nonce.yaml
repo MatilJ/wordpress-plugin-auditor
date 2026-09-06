@@ -1,0 +1,74 @@
+rules:
+  - id: claude.php.wordpress.csrf.plugin-theme-install-without-nonce
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A function performs a plugin/theme install or activation (activate_plugin,
+      activate_plugins, Plugin_Upgrader/Theme_Upgrader, or switch_theme) and
+      checks a capability with current_user_can() but does NOT verify a nonce
+      (wp_verify_nonce / check_admin_referer / check_ajax_referer). A capability
+      check confirms the user's role but NOT intent: a CSRF attack can ride a
+      logged-in administrator's session to install or activate an attacker-chosen
+      plugin/theme without their knowledge — installing a malicious plugin yields
+      remote code execution (CWE-352). CVE-2025-25101 (Munk Sites) is this pattern.
+
+      WordPress auth cookies default to SameSite=Lax: state-changing GET endpoints
+      are exploitable cross-site; cross-site POST is browser-mitigated — verify the
+      request method when scoring impact.
+
+      TRIAGE: this rule flags at current_user_can() and cannot see a nonce verified
+      in a calling function or AJAX dispatcher. Confirm the nonce is truly absent on
+      the request path before reporting. A hardcoded install/activate target is not a
+      meaningful CSRF target.
+    metadata:
+      category: security
+      cwe: "CWE-352: Cross-Site Request Forgery (CSRF)"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: LOW
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Request Forgery"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/nonces/
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern: current_user_can(...)
+      - pattern-inside:
+          pattern-either:
+            - pattern: |
+                function $FUNC(...) { ... activate_plugin(...); ... }
+            - pattern: |
+                function $FUNC(...) { ... activate_plugins(...); ... }
+            - pattern: |
+                function $FUNC(...) { ... new Plugin_Upgrader(...); ... }
+            - pattern: |
+                function $FUNC(...) { ... new \Plugin_Upgrader(...); ... }
+            - pattern: |
+                function $FUNC(...) { ... new Theme_Upgrader(...); ... }
+            - pattern: |
+                function $FUNC(...) { ... new \Theme_Upgrader(...); ... }
+            - pattern: |
+                function $FUNC(...) { ... switch_theme(...); ... }
+      - pattern-not-inside: |
+          function $FUNC(...) { ... wp_verify_nonce(...); ... }
+      - pattern-not-inside: |
+          function $FUNC(...) { ... check_admin_referer(...); ... }
+      - pattern-not-inside: |
+          function $FUNC(...) { ... check_ajax_referer(...); ... }
+      # A custom auth-wrapper call verifies a nonce internally — Semgrep cannot see
+      # into the wrapper's own body from the caller's side.
+      - pattern-not-inside: |
+          function $FUNC(...) { ... __::isAuthentic(...); ... }
+      - pattern-not-inside: |
+          function $FUNC(...) { ... if (<... wp_verify_nonce(...) ...>) { ... } ... }
+      - pattern-not-inside: |
+          function $FUNC(...) { ... if (<... check_admin_referer(...) ...>) { ... } ... }
+      - pattern-not-inside: |
+          function $FUNC(...) { ... if (<... check_ajax_referer(...) ...>) { ... } ... }

@@ -1,0 +1,65 @@
+# NOTE: join mode requires `semgrep login` (experimental feature).
+
+rules:
+  - id: wp-ajax-nopriv-privileged-role-creation
+    mode: join
+    languages: [php]
+    severity: HIGH
+    message: >
+      A wp_ajax_nopriv_ hook (callable by completely unauthenticated visitors)
+      is wired to a callback that assigns a non-standard privileged role via
+      set_role(). Any visitor can self-register as a privileged user if no
+      out-of-band verification gate (invite token, admin approval) is in place
+      (CWE-285 — Improper Authorization / Privilege Escalation).
+
+      Review the registration flow: confirm whether an invite code, admin
+      approval, or other gate prevents arbitrary self-registration into the
+      privileged role. If not, restrict set_role() to 'subscriber' or
+      'customer' for public registration endpoints.
+    metadata:
+      category: security
+      cwe: "CWE-285: Improper Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_create_user/
+        - https://developer.wordpress.org/reference/classes/wp_user/set_role/
+    join:
+      rules:
+        - id: nopriv-hook-source
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_action('$ACTION', [..., '$CALLBACK'], ...);
+                - pattern: add_action('$ACTION', '$CALLBACK', ...);
+            - metavariable-regex:
+                metavariable: $ACTION
+                regex: wp_ajax_nopriv_.*
+
+        - id: set-privileged-role-sink
+          languages: [php]
+          patterns:
+            - pattern: |
+                function $CALLBACK(...) {
+                  ...
+                  $USER->set_role($ROLE);
+                  ...
+                }
+            # Standard low-privilege roles are safe for public self-registration
+            - pattern-not: function $CALLBACK(...) { ... $USER->set_role('subscriber'); ... }
+            - pattern-not: function $CALLBACK(...) { ... $USER->set_role('customer'); ... }
+            # Administrative / elevated WP core roles should never appear in nopriv callbacks
+            # but are excluded here so other rules (privilege escalation to admin) catch them
+            - pattern-not: function $CALLBACK(...) { ... $USER->set_role('contributor'); ... }
+            - pattern-not: function $CALLBACK(...) { ... $USER->set_role('author'); ... }
+            - pattern-not: function $CALLBACK(...) { ... $USER->set_role('editor'); ... }
+            - pattern-not: function $CALLBACK(...) { ... $USER->set_role('administrator'); ... }
+
+      on:
+        - 'nopriv-hook-source.path == set-privileged-role-sink.path'
+        - 'nopriv-hook-source.$CALLBACK == set-privileged-role-sink.$CALLBACK'

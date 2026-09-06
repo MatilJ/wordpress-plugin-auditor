@@ -1,0 +1,98 @@
+rules:
+  - id: claude.php.wordpress.file-write-delete.decoded-file-reference-array-map-merge-unchecked
+    languages: [php]
+    severity: HIGH
+    message: |
+      An array of per-item JSON strings (a client-submitted "keep the
+      previously uploaded file" / resume-submission reference list) is
+      decoded with json_decode() inside an array_map() callback whose only
+      check is that the decode succeeded (is_array($X) ? $X : array() /
+      [] ) before the callback's result is merged wholesale into the
+      trusted file/entry data structure via array_merge(). Nothing
+      confirms the decoded item's file path/URL value actually resolves
+      inside the site's uploads directory, so an attacker can submit a
+      decoded item whose value points at an arbitrary local path. Wherever
+      the merged structure later reaches a delete call
+      (unlink()/wp_delete_file()), a read/attach operation (an email
+      attachment builder, a download stream), or a rendered href, this
+      becomes Arbitrary File Read or Deletion (CWE-22/CWE-73).
+
+      TRIAGE:
+        1. Confirm the array_map's source array ($_SRC) is populated from
+           request data (a $_POST/$_REQUEST key, directly or via an
+           intermediate array assembled earlier in the request lifecycle)
+           rather than a developer-controlled constant.
+        2. Confirm no wp_upload_dir()/wp_get_upload_dir() baseurl/basedir
+           containment check (realpath() plus a prefix comparison against
+           the resolved uploads basedir, or an equivalent helper) is
+           applied to the decoded item's path/URL value before or after
+           this merge.
+        3. Trace where the merged array is later consumed — a delete call,
+           an email/download attachment builder, or an href render
+           confirms Arbitrary File Read/Deletion impact.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+        - "CWE-73: External Control of File Name or Path"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Arbitrary File Read / Deletion (Path Traversal)"
+      technology: [php, wordpress]
+      references:
+        - "https://cwe.mitre.org/data/definitions/22.html"
+        - "https://cwe.mitre.org/data/definitions/73.html"
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          # Variant 1: decode-or-empty-array passthrough (long array() syntax).
+          - pattern: |
+              $OLD = array_map(
+                  function ($ITEM) {
+                      $DECODED = json_decode($ITEM, true);
+                      return is_array($DECODED) ? $DECODED : array();
+                  },
+                  $SRC
+              );
+              ...
+              $DATA = array_merge($DATA, $OLD);
+          # Variant 2: same shape, short array-literal syntax.
+          - pattern: |
+              $OLD = array_map(
+                  function ($ITEM) {
+                      $DECODED = json_decode($ITEM, true);
+                      return is_array($DECODED) ? $DECODED : [];
+                  },
+                  $SRC
+              );
+              ...
+              $DATA = array_merge($DATA, $OLD);
+      # The fix for this class replaces the bare decode-passthrough closure
+      # with a per-item validation step (a containment-check helper call,
+      # or a realpath()-based comparison) before the item is accepted —
+      # excluded function-wide, matching the sibling file-write-delete
+      # rules' FP-guard shape.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            realpath(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            wp_upload_dir(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            wp_get_upload_dir(...);
+            ...
+          }

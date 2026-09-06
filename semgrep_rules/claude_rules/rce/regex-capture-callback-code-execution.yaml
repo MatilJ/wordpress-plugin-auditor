@@ -1,0 +1,114 @@
+rules:
+  - id: claude.php.wordpress.rce.regex-capture-callback-code-execution
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      Content captured by a regex-callback parameter (the conventional
+      $matches/$match array populated by preg_match()/preg_replace_callback())
+      flows into eval()/assert() or a dynamic include/require. Handlers that
+      parse custom tags out of page, comment, or post content and then
+      execute the captured text as code or a file path are a recurring RCE
+      source (CWE-94): whatever the regex matched is executed verbatim, and
+      the only thing standing between an attacker and code execution is (a)
+      whatever gets a crafted tag into the string being matched, and (b)
+      whatever gating check the handler performs before executing.
+      TRIAGE REQUIRED:
+      1. Trace the string passed to preg_match()/preg_replace_callback() back
+         to its origin. If any part of it can contain attacker-influenced
+         content (post/comment content, request headers, third-party
+         integrations, cached page output), the capture is attacker-reachable.
+      2. Check whether the tag format includes a "secret" token embedded in
+         the same content stream. A plain string/constant comparison of that
+         token (===, in_array, strpos) is security-by-obscurity — the token
+         is only as secret as every other place that content can leak from
+         (verbose errors, raw-output bypasses, unrelated disclosure bugs).
+         A constant-time hash_equals() comparison against a value derived
+         from a server-side-only secret (e.g. AUTH_KEY/AUTH_SALT, not the
+         embedded token itself) is a materially stronger gate.
+      3. Prefer replacing eval()/include() entirely with dispatch to a
+         pre-registered allowlist of callables, keyed by a slug rather than
+         executing captured text directly.
+    metadata:
+      category: security
+      cwe: "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Code Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/94.html
+        - https://www.php.net/manual/en/function.preg-replace-callback.php
+        - https://www.php.net/manual/en/function.hash-equals.php
+    pattern-sources:
+      - patterns:
+          - pattern: $MATCHES
+          - pattern-either:
+              # Named function / class method callback: preg_replace_callback(
+              # $pattern, array($this, 'method'), $subject ) or a plain
+              # function used as the callback name.
+              - pattern-inside: |
+                  function $FUNC($MATCHES, ...) {
+                    ...
+                  }
+              # Inline closure registered directly as a callback argument
+              # (e.g. preg_replace_callback($pattern, function ($matches) {...}, $subject)).
+              - pattern-inside: |
+                  $FN(..., function ($MATCHES, ...) {
+                    ...
+                  }, ...)
+          - metavariable-regex:
+              metavariable: $MATCHES
+              regex: "^\\$(matches|match)$"
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: eval(...)
+              - pattern: assert($X)
+              - pattern: include $X;
+              - pattern: include($X);
+              - pattern: include_once $X;
+              - pattern: include_once($X);
+              - pattern: require $X;
+              - pattern: require($X);
+              - pattern: require_once $X;
+              - pattern: require_once($X);
+          # A constant-time comparison against a value not derived from the
+          # matched content itself (e.g. AUTH_KEY/AUTH_SALT-keyed HMAC) is a
+          # materially stronger gate than the plain token-equality checks
+          # these handlers otherwise rely on; treat as handled, not a miss.
+          - pattern-not-inside: |
+              function $FUNC2(...) {
+                ...
+                hash_equals(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC2(...) {
+                ...
+                if (<... hash_equals(...) ...>) {
+                  ...
+                }
+                ...
+              }
+    pattern-sanitizers:
+      - pattern-either:
+          # Integer/float casts cannot produce executable PHP code or a
+          # traversable file path.
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          # sanitize_key() output is [a-z0-9_-] only — cannot form PHP code
+          # or escape a fixed base directory.
+          - pattern: sanitize_key(...)
+          - pattern: sanitize_file_name(...)
+          - pattern: sanitize_html_class(...)
+          - pattern: basename(...)
+          # realpath() canonicalization is the standard traversal-safe gate
+          # for a dynamic include/require path.
+          - pattern: realpath(...)

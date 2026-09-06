@@ -1,0 +1,69 @@
+rules:
+  - id: claude.php.wordpress.access-control.admin-init-conditional-request-hook
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      An admin_init hook is conditionally registered based on a request parameter
+      value ($_REQUEST, $_GET, or $_POST). The admin_init hook fires for all
+      authenticated users visiting any /wp-admin/ URL. Registering a callback
+      at class-load time based on a request parameter — without a capability check
+      or nonce verification inside the callback — means any authenticated user
+      (Subscriber+) can trigger the handler by including the matching parameter in
+      any /wp-admin/ request (CWE-862).
+
+      This pattern is not detectable from the hook registration alone: the security
+      gap is inside the registered callback function. The registration here is the
+      lead; the handler body must be inspected.
+
+      TRIAGE REQUIRED:
+      1. Identify the callback registered as the second argument to add_action().
+      2. Open that callback function and check for current_user_can() and
+         wp_verify_nonce() (or wp_check_ajax_referer). Both should be present.
+      3. If both are absent, determine what the handler does. State-changing
+         operations — option writes, external API calls with stored credentials,
+         file operations — are exploitable by any Subscriber-level user.
+
+      Confirmed TP pattern: hooks() method reads $_REQUEST['action'] at class-load
+      time and calls add_action('admin_init', handler) conditionally. The handler
+      calls wp_remote_post() using a stored bearer token, consuming the site
+      owner's external API quota without authorization.
+
+      Remediation: add current_user_can('appropriate_capability') and
+      wp_verify_nonce() as the first checks inside the registered handler.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/hooks/admin_init/
+        - https://developer.wordpress.org/apis/security/user-capabilities-and-roles/
+        - https://developer.wordpress.org/apis/security/nonces/
+    patterns:
+      # Fire on the add_action('admin_init', ...) call that is inside a conditional
+      # block checking a user-supplied request parameter. Any of the three superglobals
+      # may be used; deep-match catches sanitization wrappers over the array access.
+      - pattern-either:
+          - pattern: |
+              if (<... $_REQUEST[$A] ...>) {
+                ...
+                add_action('admin_init', ...);
+                ...
+              }
+          - pattern: |
+              if (<... $_GET[$A] ...>) {
+                ...
+                add_action('admin_init', ...);
+                ...
+              }
+          - pattern: |
+              if (<... $_POST[$A] ...>) {
+                ...
+                add_action('admin_init', ...);
+                ...
+              }

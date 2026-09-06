@@ -1,0 +1,158 @@
+rules:
+  - id: claude.php.wordpress.access.wp-ajax-static-method-no-auth
+    languages: [php]
+    severity: HIGH
+    message: |
+      A method (static or instance) reads request-controlled data — either
+      directly from a superglobal, or from an array-typed property of a
+      request/params-style wrapper object (a common convention in custom
+      MVC-style plugin dispatch frameworks) — and sends a JSON AJAX response
+      without calling check_ajax_referer() or current_user_can() anywhere in
+      the same function body. If this method is reachable as a wp_ajax_*
+      callback or a dispatched controller action, low-privilege (or, when
+      registered nopriv, unauthenticated) users may invoke it without proper
+      authorization checks. Pay particular attention when sibling action
+      methods in the same class DO perform a capability check — that
+      asymmetry indicates the omission here is unintentional.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+        - https://developer.wordpress.org/reference/functions/check_ajax_referer/
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+    # Detect AJAX/dispatched-action handler methods (static or instance) that read
+    # request-controlled input and return JSON responses without any nonce or
+    # capability gate in the function body.
+    patterns:
+      - pattern: |
+          function $FUNC(...) {
+            ...
+            wp_send_json_success(...);
+            ...
+          }
+      - pattern-either:
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                <... $_REQUEST[$KEY] ...>;
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                <... $_POST[$KEY] ...>;
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                <... $_GET[$KEY] ...>;
+                ...
+              }
+          # Custom MVC-style request-wrapper convention: an array-typed property
+          # (request/params/input/args-named) on any object, indexed by a string
+          # key, standing in for direct superglobal access in framework-based
+          # plugin dispatchers.
+          - patterns:
+              - pattern: |
+                  function $FUNC(...) {
+                    ...
+                    <... $OBJ->$PROP[$KEY] ...>;
+                    ...
+                  }
+              - metavariable-regex:
+                  metavariable: $PROP
+                  regex: "^(req|request|params|input|args)$"
+      # Use deep match (<... ...>) to catch check_ajax_referer() inside if conditions —
+      # e.g. if (!check_ajax_referer('action', false, false)) { wp_send_json_error(...); }
+      # is the standard WP AJAX nonce-fail idiom and is far more common than a bare
+      # top-level call; a non-deep pattern-not misses it entirely.
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            <... check_ajax_referer(...) ...>;
+            ...
+          }
+      # check_admin_referer() verifies WP admin nonce + referer — adequate for admin-page
+      # AJAX handlers where only logged-in users with admin-page access hold the nonce.
+      # Use deep match (<... ...>) to catch check_admin_referer() inside if conditions.
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            <... check_admin_referer(...) ...>;
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            <... current_user_can(...) ...>;
+            ...
+          }
+      # Custom plugin nonce/capability wrapper method named validate_nonce().
+      # A common pattern: a class defines a static validate_nonce($name) that internally
+      # calls both check_ajax_referer() and current_user_can() before returning.
+      # Semgrep cannot trace into the called function body from this function's scope.
+      # Confirmed FP: plugins where Boldgrid_Editor_Ajax::validate_nonce() wraps
+      # wp_verify_nonce() + check_ajax_referer() + current_user_can('edit_posts').
+      # Three surface forms: bare function call, self:: static call, ClassName:: static call.
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            validate_nonce(...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            self::validate_nonce(...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            $CLASS::validate_nonce(...);
+            ...
+          }
+      # Instance-method permission wrapper (e.g. $this->check_permission_nonce($option))
+      # that internally calls current_user_can() before the nonce check. Confirmed FP
+      # source: a shared AJAX-action class where every action method's first statement
+      # calls this wrapper, verified by a full-class grep of all action methods.
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            $this->check_permission_nonce(...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            self::check_permission_nonce(...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            static::check_permission_nonce(...);
+            ...
+          }
+      # Class-qualified wrapper method sharing the native function's exact name
+      # (e.g. Helper::current_user_can()) — a common helper-class re-export pattern; the
+      # bare current_user_can() pattern-not above only matches the unqualified call form.
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            <... $CLASS::current_user_can(...) ...>;
+            ...
+          }

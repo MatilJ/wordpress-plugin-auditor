@@ -1,0 +1,85 @@
+rules:
+  - id: claude.php.wordpress.access-control.progress-completion-write-no-ownership-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      A handler reads a content/resource id directly from request input and
+      passes it straight to a "mark complete" / progress-tracking write for
+      the current user, with no membership/enrollment/ownership check
+      anywhere in the function deriving the resource's true owning parent
+      from that same id first (CWE-862 — Missing Authorization).
+
+      This is common in LMS/course/task/progress-tracking plugins: a
+      "lesson complete" / "step done" style endpoint trusts that if the
+      caller is logged in, they must be entitled to mark that specific
+      item complete — but the item id is fully attacker-controlled, so any
+      authenticated user can forge completion/progress state for content
+      belonging to a course, project, or workspace they were never granted
+      access to.
+
+      Pattern:
+        function mark_x_complete() {
+          $id = $_POST['x_id'];               // or $_GET/$_REQUEST, or an
+                                               // input-sanitizer wrapper
+          ...
+          XModel::mark_x_complete($id);        // or a bare mark_*_complete()/
+                                               // complete_*()/update_progress()
+                                               // call — no is_enrolled/is_member/
+                                               // has_access check on $id's real
+                                               // owning parent anywhere first
+        }
+
+      Fix: before the write, derive the resource's real owning parent from
+      the submitted id and verify the current user is a member/owner/
+      enrolled in it, denying otherwise — mirroring how a sibling
+      "mark parent complete" handler in the same codebase typically already
+      does it correctly.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://owasp.org/www-project-top-ten/2021/A01_2021-Broken_Access_Control
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $RESOURCE_ID = $SOURCE;
+                ...
+                $SINKCLASS::$SINKCALL($RESOURCE_ID);
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $RESOURCE_ID = $SOURCE;
+                ...
+                $SINKCALL($RESOURCE_ID);
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $SOURCE
+          regex: '.*(\$_GET\[|\$_POST\[|\$_REQUEST\[|Input::get\(|Input::post\().*'
+      - metavariable-regex:
+          metavariable: $SINKCALL
+          regex: '(?i)^(mark_\w*_complete|complete_\w*|update_progress|record_progress|mark_\w*_done|set_\w*_complete)$'
+      # The negative clause must be a concrete `if (!check) { deny }` statement
+      # rather than a bare deep-expression fragment on its own line — an
+      # unattached `<... $CALL(...) ...>` line inside a multi-statement
+      # ellipsis sequence was empirically confirmed to vacuously "match" even
+      # when $CALL never occurs anywhere in the function (semgrep 1.x), which
+      # would have silently suppressed every true positive.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (! <... $AUTHFUNC(...) ...>) { ... }
+            ...
+          }

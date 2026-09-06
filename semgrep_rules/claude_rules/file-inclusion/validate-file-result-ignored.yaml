@@ -1,0 +1,64 @@
+rules:
+  - id: claude.php.wordpress.file.validate-file-result-ignored
+    languages: [php]
+    severity: HIGH
+    message: |
+      validate_file() is called but its integer return value (0=valid,
+      1=traversal, 2=windows-drive, 3=not-in-allowlist) is not checked
+      before the file path is used in a subsequent file operation. The
+      function does NOT modify the path — it only returns a status code.
+      Calling it without checking the return is equivalent to no validation.
+      Check: if (0 !== validate_file($path)) { wp_die(); }
+    metadata:
+      category: security
+      cwe: "CWE-252: Unchecked Return Value"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/validate_file/
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — return value discarded:
+      #   validate_file($path);
+      #   readfile($path);
+      #   → validate_file() is a no-op here. Full path traversal.
+      #
+      # TRUE POSITIVE — return value stored but never branched on:
+      #   $valid = validate_file($path);
+      #   $data = file_get_contents($path);
+      #   → $valid exists but no if/switch guards the file operation.
+      #
+      # FALSE POSITIVE — return value checked correctly:
+      #   if (0 !== validate_file($path)) { wp_die(); }
+      #   readfile($path);
+      #   → This rule should NOT fire here.
+      #
+      # FALSE POSITIVE — validate_file used in a conditional expression:
+      #   if (validate_file($path)) { return; }
+      #   readfile($path);
+      #   → Non-zero = truthy = invalid → execution returns. Safe.
+    patterns:
+      - pattern: |
+          validate_file($PATH);
+          ...
+          $FUNC($PATH, ...);
+      - metavariable-regex:
+          metavariable: $FUNC
+          regex: (file_get_contents|readfile|file|fopen|include|include_once|require|require_once|unlink|wp_delete_file|rmdir|file_put_contents)
+      - pattern-not: |
+          validate_file($PATH);
+          ...
+          if (<... validate_file($PATH) ...>) { ... }
+          ...
+          $FUNC($PATH, ...);
+      - pattern-not: |
+          $RET = validate_file($PATH);
+          ...
+          if (<... $RET ...>) { ... }
+          ...
+          $FUNC($PATH, ...);

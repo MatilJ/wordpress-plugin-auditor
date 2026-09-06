@@ -1,0 +1,75 @@
+rules:
+  - id: claude.php.wordpress.xss.stored-meta-keyvalue-foreach-unescaped-echo
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A foreach loop iterates a stored key/value collection (event/object
+      metadata, a logged sensor or integration payload, a settings map) and
+      echoes BOTH the loop key and the loop value together into one HTML
+      string — the "label: value" inspector/debug-dump idiom used by "view
+      details" AJAX panels, log viewers, and admin meta-inspector tools —
+      with no escaping function applied to the value anywhere in the
+      expression.
+
+      TRIAGE: confirm the iterated array's values genuinely originate from
+      stored data that can carry attacker-influenced content (metadata
+      recorded from a sensor/integration, a user-submitted field) rather than
+      solely hardcoded admin configuration, and that the sink is reached via
+      a direct echo/print into an HTML body — not a JSON/REST response
+      returned through wp_send_json*().
+
+      Fix: wrap the value (and the key, if it can also vary) in esc_html() —
+      or esc_attr() for an attribute context — at the point of concatenation,
+      not only on part of the assembled string.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — Stored"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+        - "**/freemius/**"
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern: echo <... $KEY ...>;
+              - pattern: echo <... $VALUE ...>;
+          - patterns:
+              - pattern: print <... $KEY ...>;
+              - pattern: print <... $VALUE ...>;
+      - pattern-inside: |
+          foreach ($ARR as $KEY => $VALUE) { ... }
+      - pattern-not: echo <... esc_html($VALUE) ...>;
+      - pattern-not: echo <... \esc_html($VALUE) ...>;
+      - pattern-not: echo <... esc_attr($VALUE) ...>;
+      - pattern-not: echo <... \esc_attr($VALUE) ...>;
+      - pattern-not: echo <... wp_kses_post($VALUE) ...>;
+      - pattern-not: echo <... \wp_kses_post($VALUE) ...>;
+      - pattern-not: echo <... wp_kses($VALUE, ...) ...>;
+      - pattern-not: echo <... \wp_kses($VALUE, ...) ...>;
+      - pattern-not: echo <... htmlspecialchars($VALUE) ...>;
+      - pattern-not: echo <... \htmlspecialchars($VALUE) ...>;
+      - pattern-not: echo <... sanitize_text_field($VALUE) ...>;
+      - pattern-not: echo <... \sanitize_text_field($VALUE) ...>;
+      - pattern-not: print <... esc_html($VALUE) ...>;
+      - pattern-not: print <... \esc_html($VALUE) ...>;
+      - pattern-not: print <... esc_attr($VALUE) ...>;
+      - pattern-not: print <... \esc_attr($VALUE) ...>;
+      - pattern-not: print <... wp_kses_post($VALUE) ...>;
+      - pattern-not: print <... \wp_kses_post($VALUE) ...>;
+      - pattern-not: print <... wp_kses($VALUE, ...) ...>;
+      - pattern-not: print <... \wp_kses($VALUE, ...) ...>;
+      - pattern-not: print <... htmlspecialchars($VALUE) ...>;
+      - pattern-not: print <... \htmlspecialchars($VALUE) ...>;
+      - pattern-not: print <... sanitize_text_field($VALUE) ...>;
+      - pattern-not: print <... \sanitize_text_field($VALUE) ...>;

@@ -1,0 +1,82 @@
+rules:
+  - id: claude.php.wordpress.xss.entity-decode-return-unescaped
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A value produced by html_entity_decode() or htmlspecialchars_decode() —
+      optionally passed through further string transforms (trim(), preg_replace(),
+      str_replace()) — flows into a return/echo/print statement with no
+      HTML-escaping function (esc_html(), esc_attr(), wp_kses(), wp_kses_post(),
+      sanitize_text_field(), htmlspecialchars(), htmlentities(), strip_tags())
+      anywhere along the way.
+
+      Decoding HTML character references reconstructs any literal markup the
+      source text encoded (&lt;script&gt; becomes <script>) BEFORE the value
+      reaches an escaping function. If the imported/feed/API-sourced text being
+      decoded is attacker-influenced and the decoded value is later rendered
+      into HTML — directly or via a template placeholder assembled several call
+      frames away — this is Stored or Reflected XSS (CWE-79).
+
+      This is not the (non-exploitable) client-side entity-bypass myth: the
+      decode call runs server-side, before the HTTP response is generated, so
+      any markup it reconstructs is real HTML sent over the wire, not inert
+      text a browser tokenizer would display.
+
+      TRIAGE: confirm the decoded argument originates from data an attacker can
+      influence (a third-party API/feed/import is a strong signal), and trace
+      the returned/echoed value forward to its actual output sink if this
+      function is a helper called from elsewhere.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — Stored/Reflected"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/79.html
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://www.php.net/manual/en/function.html-entity-decode.php
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    pattern-sources:
+      - pattern-either:
+          - pattern: html_entity_decode($X)
+          - pattern: html_entity_decode($X, ...)
+          - pattern: htmlspecialchars_decode($X)
+          - pattern: htmlspecialchars_decode($X, ...)
+    pattern-sinks:
+      - pattern-either:
+          - pattern: return $Y;
+          - pattern: echo $Y;
+          - pattern: print $Y;
+          - pattern: print($Y);
+    # Numeric-cast sanitizers guarantee the value can never contain HTML
+    # metacharacters, making a preceding decode call a no-op for this sink.
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: esc_html(...)
+          - pattern: esc_html__(...)
+          - pattern: esc_html_e(...)
+          - pattern: esc_attr(...)
+          - pattern: esc_attr__(...)
+          - pattern: esc_attr_e(...)
+          - pattern: esc_textarea(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: wp_strip_all_tags(...)
+          - pattern: sanitize_text_field(...)
+          - pattern: sanitize_textarea_field(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          - pattern: strip_tags(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)

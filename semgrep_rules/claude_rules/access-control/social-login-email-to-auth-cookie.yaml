@@ -1,0 +1,139 @@
+rules:
+  - id: claude.php.wordpress.access-control.social-login-email-to-auth-cookie
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      A user is looked up by email via get_user_by('email', ...) and then
+      authenticated via wp_set_auth_cookie() without verifying the social login
+      token against the OAuth provider's endpoint. This pattern is the root cause
+      of numerous critical authentication bypass vulnerabilities in social login
+      plugins.
+
+      The attack: an attacker sends a crafted request containing a victim's email
+      address. If the plugin does not verify the accompanying OAuth/social token
+      by making a server-side call to the provider (e.g., Google, Facebook), it
+      will look up the WordPress user by email and set authentication cookies,
+      granting the attacker full access to that account — including administrators.
+
+      CVE-2024-7781: social login plugin trusted client-supplied email without
+      provider verification. CVE-2025-34077, CVE-2025-7444: same class.
+
+      TRIAGE: This rule uses a heuristic pattern-not for wp_remote_get/wp_remote_post
+      as a proxy for token verification. Manual review is required to confirm that
+      the flagged function genuinely lacks server-side token validation. Check whether
+      the token is verified via an HTTP call to the OAuth provider before the email
+      lookup or cookie setting.
+
+      A second branch also catches the class-based variant, where the lookup and
+      the cookie-setting happen in two different methods of the same object (e.g. a
+      lookup method assigns the email-matched user to a property, then a separate
+      login method calls wp_set_auth_cookie() against that property) — the identity
+      decision is still made from an unverified email claim, only split across methods.
+
+      Fix: always verify the OAuth token server-side by calling the provider's
+      token-info or userinfo endpoint (via wp_remote_get/wp_remote_post) before
+      trusting the email claim. Never authenticate based solely on a client-supplied
+      email address; prefer a stable per-provider user id persisted server-side
+      (e.g. in user meta at first sign-up) over re-deriving identity from email.
+    metadata:
+      category: security
+      cwe: "CWE-287: Improper Authentication"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/get_user_by/
+        - https://developer.wordpress.org/reference/functions/wp_set_auth_cookie/
+        - https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern: |
+                  function $FUNC(...) {
+                    ...
+                    $USER = get_user_by("email", ...);
+                    ...
+                    wp_set_auth_cookie(...);
+                    ...
+                  }
+              - pattern-not: |
+                  function $FUNC(...) {
+                    ...
+                    wp_remote_get(...);
+                    ...
+                    $USER = get_user_by("email", ...);
+                    ...
+                    wp_set_auth_cookie(...);
+                    ...
+                  }
+              - pattern-not: |
+                  function $FUNC(...) {
+                    ...
+                    wp_remote_post(...);
+                    ...
+                    $USER = get_user_by("email", ...);
+                    ...
+                    wp_set_auth_cookie(...);
+                    ...
+                  }
+              - pattern-not: |
+                  function $FUNC(...) {
+                    ...
+                    $USER = get_user_by("email", ...);
+                    ...
+                    wp_remote_get(...);
+                    ...
+                    wp_set_auth_cookie(...);
+                    ...
+                  }
+              - pattern-not: |
+                  function $FUNC(...) {
+                    ...
+                    $USER = get_user_by("email", ...);
+                    ...
+                    wp_remote_post(...);
+                    ...
+                    wp_set_auth_cookie(...);
+                    ...
+                  }
+          - patterns:
+              - pattern: |
+                  class $CLASS {
+                    ...
+                    function $LOOKUP(...) {
+                      ...
+                      $this->$PROP = get_user_by("email", ...);
+                      ...
+                    }
+                    ...
+                    function $LOGIN(...) {
+                      ...
+                      wp_set_auth_cookie($this->$PROP->ID, ...);
+                      ...
+                    }
+                    ...
+                  }
+              - pattern-not: |
+                  class $CLASS {
+                    ...
+                    function $ANY(...) {
+                      ...
+                      wp_remote_get(...);
+                      ...
+                    }
+                    ...
+                  }
+              - pattern-not: |
+                  class $CLASS {
+                    ...
+                    function $ANY(...) {
+                      ...
+                      wp_remote_post(...);
+                      ...
+                    }
+                    ...
+                  }

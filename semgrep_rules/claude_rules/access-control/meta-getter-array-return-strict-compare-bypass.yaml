@@ -1,0 +1,107 @@
+rules:
+  - id: claude.php.wordpress.access-control.meta-getter-array-return-strict-compare-bypass
+    languages: [php]
+    severity: HIGH
+    message: |
+      A value is read from get_user_meta() or get_post_meta() WITHOUT the third
+      $single argument, so the call returns an ARRAY of all rows stored under
+      that meta key (or an empty array if none exist). That array is later
+      compared with a strict operator (=== or !==) against a scalar value from
+      elsewhere in the function. An array is never === to a scalar and always
+      !== to one, so the comparison silently evaluates to a constant result no
+      matter what is actually stored — the check can never behave as intended
+      (CWE-697: Incorrect Comparison).
+
+      When this comparison is one branch of a multi-condition authorization or
+      credential gate (e.g. "valid nonce OR matching stored token"), the
+      constant result collapses the gate down to whichever other condition
+      remains, which is often weaker and not bound to the specific target the
+      code goes on to act on — letting a caller who satisfies only that
+      remaining condition act on an arbitrary target instead of proving they
+      hold the actual stored value (CWE-862: Missing Authorization).
+
+      Fix: pass true as the third argument to get a scalar, cast both sides to
+      string, and compare with hash_equals() instead of a strict operator.
+
+      TRIAGE GUIDANCE:
+        TRUE POSITIVE: the comparison result feeds a security decision (an
+          if/throw/deny branch, or a boolean returned from a permission or
+          verification function) rather than plain display or logging.
+        TRUE POSITIVE: the comparison is one operand of a larger boolean
+          expression alongside a nonce/capability check, so the constant
+          result silently drops that operand out of the effective gate.
+        FALSE POSITIVE: the third argument is `true` (or a variable known to
+          always be true) — the getter genuinely returns a scalar.
+        FALSE POSITIVE: both sides are intentionally arrays being compared for
+          equality (e.g. against an allow-listed array literal), not a scalar
+          secret/token/ID.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-697: Incorrect Comparison"
+        - "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/697.html
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/functions/get_user_meta/
+        - https://developer.wordpress.org/reference/functions/hash_equals/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $STORED = $STORAGE($ID, $KEY);
+                ...
+                if (<... $STORED === $VAL ...>) {
+                  ...
+                }
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $STORED = $STORAGE($ID, $KEY);
+                ...
+                if (<... $STORED !== $VAL ...>) {
+                  ...
+                }
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $STORED = $STORAGE($ID, $KEY);
+                ...
+                if (<... $VAL === $STORED ...>) {
+                  ...
+                }
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $STORED = $STORAGE($ID, $KEY);
+                ...
+                if (<... $VAL !== $STORED ...>) {
+                  ...
+                }
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $STORAGE
+          regex: "^(get_user_meta|get_post_meta)$"
+      # Fix shape: passing the third $single argument makes the getter return
+      # a scalar, so the strict comparison is no longer comparing an array.
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            $STORED = $STORAGE($ID, $KEY, true);
+            ...
+          }

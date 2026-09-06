@@ -1,0 +1,255 @@
+rules:
+  - id: claude.php.wordpress.access-control.raw-request-action-dispatch-no-auth
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A raw string/regex comparison against a request superglobal's "action"-style
+      parameter — checked directly, outside the wp_ajax_ hook system — gates a
+      direct method/function call or an add_action() registration (CWE-862). This
+      shape is common in third-party-plugin compatibility shims (re-using another
+      plugin's AJAX action name as a trigger) and often omits both an
+      isPluginActive()-style presence gate AND any nonce/capability check, so the
+      dispatched sink is reachable by anyone able to reach the surrounding code —
+      including unauthenticated visitors, when the containing code runs
+      unconditionally (e.g. a class constructor or an always-registered hook).
+
+      A related shape is a central dispatcher registered on an unconditional hook
+      (e.g. init/admin_init) whose body reads an action-style key from $_POST /
+      $_REQUEST — including one level of nested array access (e.g. a sub-array of
+      request options) — and routes on it with a switch/case table, invoking an
+      instance or static sink method in at least one branch, with no
+      current_user_can() / is_user_logged_in() anywhere in the dispatcher function.
+      Because the hook itself fires for every request regardless of authentication,
+      the switch's missing capability check is the entire vulnerability.
+
+      This pattern is not detectable from the conditional alone: the security gap
+      depends on whether a nonce or capability check exists anywhere in the
+      enclosing function, and on what the dispatched sink does.
+
+      TRIAGE REQUIRED:
+      1. Read the full enclosing function (not just the matched block) for any
+         wp_verify_nonce(), check_ajax_referer(), or current_user_can() call that
+         gates this branch.
+      2. Confirm what the dispatched method/function/hook callback does. A
+         state-changing or resource-purging operation (cache purge, option write,
+         external API call) reachable this way is exploitable at whatever auth
+         floor the surrounding code runs at.
+
+      Confirmed TP pattern: a plugin constructor unconditionally reads
+      $_POST["action"], matches it against a hardcoded third-party plugin's AJAX
+      action name with no isPluginActive() check, and dispatches to a cache-purge
+      method with no nonce or capability check anywhere in the call chain —
+      reachable by unauthenticated visitors on every page load.
+
+      Also confirmed TP: a callback already registered on an ambient hook (e.g.
+      all_admin_notices, which fires on every /wp-admin/ page for any user who
+      passes the ambient page-access check) reads $_REQUEST["action"] internally
+      and, on a match, calls a direct WP Core state-mutating function (an
+      option/meta/post/user write or delete) with no nonce check anywhere in that
+      function. The ambient hook registration is not itself gated per-request, so
+      the missing nonce on the internal branch is the entire vulnerability (CWE-352
+      as much as CWE-862 — this is a CSRF-shaped variant of the same missing-
+      verification root cause, not just an authorization gap).
+
+      Remediation: gate the dispatch with the expected isPluginActive() check AND
+      add current_user_can() / wp_verify_nonce() before invoking the sink.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/apis/security/nonces/
+        - https://developer.wordpress.org/apis/security/user-capabilities-and-roles/
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      if (<... $_POST[$KEY] ...>) {
+                        ...
+                        $OBJ->$METHOD(...);
+                        ...
+                      }
+                  - pattern: |
+                      if (<... $_REQUEST[$KEY] ...>) {
+                        ...
+                        $OBJ->$METHOD(...);
+                        ...
+                      }
+                  - pattern: |
+                      if (<... $_POST[$KEY] ...>) {
+                        ...
+                        add_action($HOOK, ...);
+                        ...
+                      }
+                  - pattern: |
+                      if (<... $_REQUEST[$KEY] ...>) {
+                        ...
+                        add_action($HOOK, ...);
+                        ...
+                      }
+              - metavariable-regex:
+                  metavariable: $KEY
+                  regex: '^[''"](action|task|do|cmd|op|event|trigger)[''"]$'
+          - patterns:
+              # Direct call to a known state-mutating WP Core function, gated only
+              # by a raw action-style request-parameter comparison (no isset/nonce
+              # bound in this pattern — the enclosing function must be checked
+              # manually per the TRIAGE note above).
+              - pattern-either:
+                  - pattern: |
+                      if (<... $_POST[$KEY] ...>) {
+                        ...
+                        $SINK(...);
+                        ...
+                      }
+                  - pattern: |
+                      if (<... $_REQUEST[$KEY] ...>) {
+                        ...
+                        $SINK(...);
+                        ...
+                      }
+              - metavariable-regex:
+                  metavariable: $KEY
+                  # Matches both quote styles: the original TP corpus used double
+                  # quotes, but direct-function-call sinks (e.g. UpdraftPlus's own
+                  # 'updraft_restore_abort' === $_REQUEST['action']) commonly use
+                  # single-quoted action strings.
+                  regex: '^[''"](action|task|do|cmd|op|event|trigger)[''"]$'
+              - metavariable-regex:
+                  metavariable: $SINK
+                  regex: '^(delete_site_option|update_site_option|delete_option|update_option|wp_delete_post|wp_trash_post|wp_update_post|wp_delete_user|remove_role|add_role|set_role|wp_delete_attachment|delete_user_meta|update_user_meta|delete_post_meta|update_post_meta|wp_schedule_event|wp_clear_scheduled_hook|wp_set_object_terms)$'
+          - patterns:
+              # Switch/case dispatch table variant: the enclosing function reads
+              # an action-style key from $_POST/$_REQUEST (flat, or one level of
+              # nested array access such as a sub-array of request options), and
+              # a switch statement routes on the resulting value to an instance
+              # or static method call in at least one case branch. Two case-
+              # position shapes are covered: the sink case is the switch's first
+              # arm, or it is preceded by exactly one other arm — PHP's switch
+              # grammar does not support an unbounded ellipsis before the first
+              # case label, so only these two positions are expressible.
+              - pattern-either:
+                  - pattern: |
+                      if (<... $_POST[$KEY] ...>) {
+                        ...
+                        switch (...) {
+                          case $CASE:
+                            $CALL;
+                            ...
+                        }
+                        ...
+                      }
+                  - pattern: |
+                      if (<... $_REQUEST[$KEY] ...>) {
+                        ...
+                        switch (...) {
+                          case $CASE:
+                            $CALL;
+                            ...
+                        }
+                        ...
+                      }
+                  - pattern: |
+                      if (<... $_POST[$ANY][$KEY] ...>) {
+                        ...
+                        switch (...) {
+                          case $CASE:
+                            $CALL;
+                            ...
+                        }
+                        ...
+                      }
+                  - pattern: |
+                      if (<... $_REQUEST[$ANY][$KEY] ...>) {
+                        ...
+                        switch (...) {
+                          case $CASE:
+                            $CALL;
+                            ...
+                        }
+                        ...
+                      }
+                  - pattern: |
+                      if (<... $_POST[$KEY] ...>) {
+                        ...
+                        switch (...) {
+                          case $OTHERCASE:
+                            ...
+                          case $CASE:
+                            $CALL;
+                            ...
+                        }
+                        ...
+                      }
+                  - pattern: |
+                      if (<... $_REQUEST[$KEY] ...>) {
+                        ...
+                        switch (...) {
+                          case $OTHERCASE:
+                            ...
+                          case $CASE:
+                            $CALL;
+                            ...
+                        }
+                        ...
+                      }
+                  - pattern: |
+                      if (<... $_POST[$ANY][$KEY] ...>) {
+                        ...
+                        switch (...) {
+                          case $OTHERCASE:
+                            ...
+                          case $CASE:
+                            $CALL;
+                            ...
+                        }
+                        ...
+                      }
+                  - pattern: |
+                      if (<... $_REQUEST[$ANY][$KEY] ...>) {
+                        ...
+                        switch (...) {
+                          case $OTHERCASE:
+                            ...
+                          case $CASE:
+                            $CALL;
+                            ...
+                        }
+                        ...
+                      }
+              - metavariable-regex:
+                  metavariable: $KEY
+                  regex: '^[''"](action|task|do|cmd|op|event|trigger)[''"]$'
+              # The dispatched case body's leading statement must be an instance
+              # or static method call — the switch-table counterpart of the
+              # $OBJ->$METHOD(...) sink used by the if-chain branches above.
+              - metavariable-pattern:
+                  metavariable: $CALL
+                  patterns:
+                    - pattern-either:
+                        - pattern: $OBJ->$METHOD(...)
+                        - pattern: $CLASS::$METHOD(...)
+              # FP guard grounded in the seeding fix: the patch added a capability
+              # check gating the dispatched sink. Its presence anywhere in the
+              # enclosing function (bare call or nested inside a case branch)
+              # closes the gap this branch flags.
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    <... current_user_can(...) ...>;
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    <... is_user_logged_in(...) ...>;
+                    ...
+                  }

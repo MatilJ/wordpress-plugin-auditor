@@ -1,0 +1,151 @@
+rules:
+  - id: claude.php.wordpress.file-write-delete.scandir-unlink-param-no-containment
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function receives a directory path as its own parameter, lists that
+      directory's contents with scandir(), then unlinks/rmdir()s entries
+      built by concatenating the SAME unmodified parameter — with no
+      realpath()-based containment check (a strpos()/str_starts_with()
+      prefix comparison against a known-safe base directory, or an explicit
+      rejection of '..' traversal sequences) anywhere in the function body.
+      scandir()/unlink() perform no boundary enforcement of their own: a
+      caller that builds this parameter from a URL path component, a
+      referer header, or any other attacker-influenced string can walk the
+      directory argument outside the intended cache/temp root and delete
+      every matching file it contains elsewhere on the filesystem
+      (CWE-22/CWE-73 — Path Traversal / Arbitrary File Deletion). Common in
+      "clear cache for this URL"-style helpers that derive an on-disk cache
+      directory from a page URL and then wipe it.
+
+      TRIAGE:
+        1. Confirm the flagged parameter is reachable with attacker-
+           influenced content from the function's real call sites — trace
+           callers back to a request superglobal, a URL/referer value, or
+           any other value the visitor controls (directly, or through
+           intermediate assignments/array keys in a sibling function/file;
+           same-file interprocedural taint tracking does not reliably
+           follow multi-hop, cross-class flows, so confirm this manually).
+           A parameter built solely from constants/config the request
+           cannot influence is a false positive.
+        2. Confirm no realpath()+prefix check (strpos()/str_starts_with()
+           comparing the realpath()'d result against a known-safe base
+           directory), no wp_normalize_path()+prefix compare, and no
+           explicit '..'-sequence rejection guards the parameter — either
+           inline in this function, or via a call to a distinct
+           resolver/validator method whose return value (not the raw
+           parameter) is what actually reaches scandir()/unlink(). A fix
+           that reassigns the value through such a validator before use is
+           the expected shape of the real-world patch for this bug class
+           and is NOT a finding.
+        3. bare realpath() with no subsequent prefix check does NOT
+           neutralize this — canonicalizing '../' segments is not the same
+           as confining the result to a directory.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+        - "CWE-73: External Control of File Name or Path"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Arbitrary File Deletion"
+      technology: [php, wordpress]
+      references:
+        - "https://cwe.mitre.org/data/definitions/22.html"
+        - "https://cwe.mitre.org/data/definitions/73.html"
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    # Structural, not taint mode: the real-world shape (this CVE included)
+    # nearly always splits the request-influenced source and the
+    # scandir()/unlink() sink across several methods/files (a URL/referer
+    # value assembled in one class, passed down through a directory-clear
+    # helper in another), which taint dataflow does not reliably follow —
+    # see the sibling request-filename-unlink-no-auth-check rule's own
+    # rationale. Anchoring on the sink function's own missing-containment
+    # shape, regardless of where its $PATHVAR argument originated, is the
+    # reliable signal; TRIAGE step 1 covers the request-influence check a
+    # taint engine would otherwise automate.
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $FUNC($PATHVAR) {
+                ...
+                $LIST = scandir($PATHVAR);
+                ...
+                <... unlink(<... $PATHVAR ...>) ...>;
+                ...
+              }
+          - pattern: |
+              function $FUNC($PATHVAR) {
+                ...
+                $LIST = @scandir($PATHVAR);
+                ...
+                <... unlink(<... $PATHVAR ...>) ...>;
+                ...
+              }
+          - pattern: |
+              function $FUNC($PATHVAR) {
+                ...
+                $LIST = scandir($PATHVAR);
+                ...
+                <... @unlink(<... $PATHVAR ...>) ...>;
+                ...
+              }
+          - pattern: |
+              function $FUNC($PATHVAR) {
+                ...
+                $LIST = @scandir($PATHVAR);
+                ...
+                <... @unlink(<... $PATHVAR ...>) ...>;
+                ...
+              }
+          - pattern: |
+              function $FUNC($PATHVAR) {
+                ...
+                $LIST = scandir($PATHVAR);
+                ...
+                <... rmdir(<... $PATHVAR ...>) ...>;
+                ...
+              }
+          - pattern: |
+              function $FUNC($PATHVAR) {
+                ...
+                $LIST = @scandir($PATHVAR);
+                ...
+                <... rmdir(<... $PATHVAR ...>) ...>;
+                ...
+              }
+      # Bare realpath() call on the same parameter, anywhere in the function —
+      # a belt-and-suspenders backstop; the dominant real-world fix (this CVE
+      # included) reassigns the value through a distinct resolver method
+      # instead, which the pattern above already misses because scandir()/
+      # unlink() then act on a differently-named variable, not $PATHVAR.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... realpath($PATHVAR) ...>;
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... strpos($PATHVAR, ...) ...>;
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... strpos(..., $PATHVAR) ...>;
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... str_starts_with($PATHVAR, ...) ...>;
+            ...
+          }

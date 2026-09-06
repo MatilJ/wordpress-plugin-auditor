@@ -1,0 +1,77 @@
+rules:
+  - id: claude.php.wordpress.sqli.sql-keyword-blocklist-sanitizer
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A regex pattern matching SQL DML keywords (SELECT/FROM, DELETE/FROM, UPDATE/SET,
+      INSERT/INTO, UNION/SELECT) is used as a substitute for proper SQL parameterization.
+      This blocklist approach does not protect against time-based injection (SLEEP(),
+      BENCHMARK(), CASE WHEN...THEN...), stacked queries, or any technique that avoids
+      the blocked keyword combinations.
+      Replace this blocklist with $wpdb->prepare() and %s/%d/%f placeholders for all
+      user-controlled values passed to SQL queries (CWE-89).
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+      # WHY THIS RULE EXISTS
+      # ─────────────────────────────────────────────────────────────────────
+      # Some plugins implement a "prepare_search()" style helper that checks user
+      # input for SQL keywords and nullifies the string if a match is found.
+      # This is an incomplete defense: it blocks ONLY the patterns it explicitly
+      # tests for and silently passes every payload that avoids those keywords.
+      #
+      # Real injection payloads that bypass a SELECT/UPDATE/DELETE blocklist:
+      #   ' AND SLEEP(5)-- -
+      #   ' AND (CASE WHEN (1=1) THEN SLEEP(5) ELSE 0 END)-- -
+      #   ' AND BENCHMARK(5000000,SHA1(1))-- -
+      #   1 OR 1=1
+      #   ' OR '1'='1
+      #
+      # CVE context: Ultimate Member <=2.9.1 — class-member-directory.php:1716-1731
+      # The prepare_search() function checked for SELECT/FROM, UPDATE/SET, DELETE/FROM
+      # but left the $search value injectable with SLEEP()-based payloads. The output
+      # of prepare_search() was used in change_meta_sql() to modify a SQL WHERE clause
+      # via preg_replace(), bypassing all wpdb->prepare() protection.
+      #
+      # TRIAGE GUIDANCE
+      # ─────────────────────────────────────────────────────────────────────
+      # 1. Locate the function/scope containing this preg_match call.
+      # 2. Find where the checked variable flows next — is it returned and used
+      #    in a SQL context (query string, preg_replace on $sql['where'], etc.)?
+      # 3. If YES and no $wpdb->prepare() wraps the value before it reaches SQL: HIGH risk.
+      # 4. If the checked variable then flows into $wpdb->prepare() as a placeholder
+      #    argument (not into the format string): LOW risk (prepare() is the real guard).
+      # 5. If the preg_match is for log parsing, SQL query formatting tools,
+      #    or extracting SQL from log files: likely FP, not a sanitizer.
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+        - "**/tests/**"
+        - "**/test/**"
+    patterns:
+      - pattern-either:
+          # Direct preg_match with SQL keyword blocklist
+          - pattern: preg_match($REGEX, ...)
+          # Via preg_match_all
+          - pattern: preg_match_all($REGEX, ...)
+      - metavariable-regex:
+          metavariable: $REGEX
+          # Matches regex strings that block SQL DML keyword pairs used as injection guards.
+          # Covers: SELECT...FROM, DELETE...FROM, UPDATE...SET, INSERT...INTO, UNION...SELECT.
+          # The .{0,30} allows for common additions like (.*?), \s+, optional whitespace flags.
+          #
+          # NOTE: Semgrep metavariable-regex uses fullmatch semantics in this version —
+          # the pattern must span the entire metavariable text (source code including
+          # surrounding quote characters). Leading/trailing .* account for string delimiters
+          # and regex modifier suffixes (e.g., /pattern/im).
+          regex: '(?i).*(select.{0,30}from|delete.{0,30}from|update.{0,30}set|insert.{0,30}into|union.{0,30}select).*'

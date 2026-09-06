@@ -1,0 +1,120 @@
+rules:
+  - id: claude.php.wordpress.access-control.type-restriction-array-only-check-bypass
+    languages: [php]
+    severity: HIGH
+    message: |
+      A resource-type allow-list restriction (e.g. a form/field's configured
+      "allowed object types") is enforced only inside an is_array() guard:
+      the containment check `! in_array($ACTUAL, $RESTRICT)` runs solely
+      when $RESTRICT itself is an array. When the site's own configuration
+      stores that restriction as a scalar (a single type name, or a
+      sentinel like "any") instead of an array, the entire
+      `is_array($RESTRICT) && ...` condition evaluates false and the
+      surrounding deny/reset branch never executes — silently granting
+      access to an attacker-controlled object id with NO type restriction
+      enforced at all (CWE-863: Incorrect Authorization).
+
+      This is a type-confusion authorization gap, not simply a missing
+      check: the code assumes the restriction value is always an array and
+      provides no companion branch (else, an (array) cast, or a standalone
+      scalar comparison) for the case where it is not. Combined with a
+      request-derived object id resolved earlier in the same function
+      (e.g. absint($_GET[...]) or a raw $_POST/$_REQUEST read used to fetch
+      and act on a WordPress object), an attacker can point the id at ANY
+      object of ANY type — including an internal/privileged type the
+      restriction was meant to exclude — simply by ensuring the configured
+      restriction resolves to a scalar rather than an array.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - $RESTRICT can be a scalar at runtime (its default/config value, or
+          another supported configuration shape, is a plain string rather
+          than always an array).
+        - The object id being gated was assigned earlier in the same
+          function from request input ($_GET/$_POST/$_REQUEST, an
+          absint()-cast query parameter, etc.), not a hardcoded/trusted
+          value.
+        - No companion check anywhere in the enclosing function handles the
+          non-array case of $RESTRICT (no else branch, no (array) cast
+          before the containment test, no standalone equality check against
+          $RESTRICT performed outside an is_array() guard).
+
+      FALSE POSITIVE indicators:
+        - $RESTRICT is normalized to an array unconditionally before this
+          check (e.g. `$RESTRICT = (array) $RESTRICT;`), so is_array() is
+          always true.
+        - A separate statement in the same function checks $RESTRICT
+          directly (equality) without first gating on is_array(), covering
+          the scalar case.
+        - The gated object id is never subsequently used to read/write a
+          privileged or internal-only resource (e.g. it only affects
+          display ordering, not object access).
+
+      Fix: normalize the restriction to an array before checking containment
+      (`$RESTRICT = (array) $RESTRICT;` then `in_array($ACTUAL, $RESTRICT)`),
+      or add an explicit scalar-comparison branch (`$ACTUAL !== $RESTRICT`)
+      alongside the array case, so a scalar restriction can never bypass the
+      check entirely.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-269: Improper Privilege Management"
+        - "CWE-863: Incorrect Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/863.html
+        - https://cwe.mitre.org/data/definitions/269.html
+        - https://owasp.org/www-community/vulnerabilities/Insecure_Direct_Object_Reference
+    patterns:
+      - pattern-either:
+          - pattern: is_array($RESTRICT) && ! in_array($ACTUAL, $RESTRICT)
+          - pattern: is_array($RESTRICT) && ! in_array('any', $RESTRICT) && ! in_array($ACTUAL, $RESTRICT)
+          - pattern: is_array($RESTRICT) && ! in_array("any", $RESTRICT) && ! in_array($ACTUAL, $RESTRICT)
+      - pattern-inside: |
+          function $FUNC(...) {
+            ...
+          }
+      # Fix variant 1: the restriction is unconditionally normalized to an
+      # array before the containment test, so is_array() is always true and
+      # a scalar restriction can no longer bypass the check.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $RESTRICT = (array) $RESTRICT;
+            ...
+          }
+      # Fix variant 2 (the real patch for the seeding CVE): a standalone
+      # equality comparison against $RESTRICT, performed WITHOUT an
+      # is_array() gate, catches the scalar case the containment check
+      # above misses.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if ($RESTRICT == $LIT) { ... }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if ($LIT == $RESTRICT) { ... }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if ($RESTRICT === $LIT) { ... }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if ($LIT === $RESTRICT) { ... }
+            ...
+          }

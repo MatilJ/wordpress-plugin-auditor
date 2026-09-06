@@ -1,0 +1,226 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.rest-return-true-sensitive-data-response
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A database or user query result flows into a JSON/REST response inside a
+      function that lacks a current_user_can() capability check. If this function
+      is registered as a REST API callback with permission_callback =>
+      '__return_true', any unauthenticated visitor can retrieve the data.
+      Real-world examples: CVE-2026-2262 (Easy Appointments, CVSS 7.5),
+      CVE-2026-2025 (Mail Mint, CVSS 7.5), CVE-2026-1060 (WP Adminify, CVSS 5.3).
+      Verify that the function is actually a REST callback with a permissive
+      permission_callback before confirming.
+    metadata:
+      category: security
+      cwe: "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Sensitive Data Exposure"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/200.html
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/#permissions-callback
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: get_users(...)
+              - pattern: get_userdata(...)
+              - pattern: get_user_by(...)
+              - pattern: get_user_meta(...)
+              - pattern: $wpdb->get_results(...)
+              - pattern: $wpdb->get_row(...)
+              - pattern: $wpdb->get_var(...)
+          # Exclude: lookup of the caller's own account by get_current_user_id().
+          # Any authenticated user is entitled to see their own profile data — this
+          # is not a capability-check gap, it's a self-scoped read. Confirmed FP:
+          # really-simple-ssl 9.6.1 class-rsssl-two-factor-profile-settings.php —
+          # get_user_by('id', get_current_user_id()) inside an AJAX callback that
+          # only returns data about the requester's own account.
+          - pattern-not: get_user_by($FIELD, get_current_user_id())
+          - pattern-not: get_userdata(get_current_user_id())
+          - pattern-not: get_user_meta(get_current_user_id(), ...)
+          # get_users() restricted to the same public-equivalent identity fields
+          # WP Core's own /wp/v2/users endpoint exposes for unauthenticated
+          # requests (id/name/slug) — not a capability gap, already public data.
+          - pattern-not: get_users(array("fields" => array("ID", "display_name", "user_nicename")))
+          - pattern-not: get_users(array("capability__in" => $CAPS, "fields" => array("ID", "display_name", "user_nicename")))
+          # get_users() piped directly through array_map() to build a dropdown/
+          # option-list — only the mapper's own return value reaches the sink,
+          # not the raw user objects/fields.
+          - pattern-not-inside: array_map($FN, get_users(...))
+    pattern-sanitizers:
+      - pattern-either:
+          # Account whose credentials were just verified in this same request
+          # via wp_signon()/wp_authenticate() — a self-scoped read, not a gap.
+          - pattern: wp_signon(...)
+          - pattern: wp_authenticate(...)
+          # WP_Error message text is developer-authored generic text, not the
+          # underlying sensitive record, even when derived from a tainted lookup.
+          - pattern: $ERR->get_error_message()
+          # wp_insert_comment()/wp_update_comment() return a plain integer ID (or
+          # false/WP_Error) — never a reflection of the tainted argument data —
+          # so taint should not propagate through their return value.
+          - pattern: wp_insert_comment(...)
+          - pattern: wp_update_comment(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: wp_send_json($X, ...)
+              - pattern: wp_send_json_success($X, ...)
+              - pattern: wp_send_json_error($X, ...)
+              - pattern: new WP_REST_Response($X, ...)
+              - pattern: rest_ensure_response($X)
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                <... current_user_can(...) ...>;
+                ...
+              }
+          # WP_REST_Controller convention: the capability check lives in a
+          # sibling permission_callback method, not the route callback itself.
+          # Restricted to WordPress's own documented naming convention (core
+          # uses get_items_permissions_check()/get_item_permissions_check();
+          # plugins commonly shorten to permissions_check()/check_permission())
+          # rather than an unconstrained method name, since a same-class
+          # method with an unrelated name could gate a different, still-open
+          # route. Confirmed FP: woo-cart-abandonment-recovery 2.1.3
+          # admin/api/detailed-report.php + admin/api/follow-up.php —
+          # get_permissions_check() current_user_can('manage_woocommerce')-gates
+          # the route registered with this callback.
+          - pattern-not-inside: |
+              class $CLASS {
+                ...
+                function get_permissions_check(...) {
+                  ...
+                  <... current_user_can(...) ...>;
+                  ...
+                }
+                ...
+              }
+          - pattern-not-inside: |
+              class $CLASS {
+                ...
+                function get_items_permissions_check(...) {
+                  ...
+                  <... current_user_can(...) ...>;
+                  ...
+                }
+                ...
+              }
+          - pattern-not-inside: |
+              class $CLASS {
+                ...
+                function get_item_permissions_check(...) {
+                  ...
+                  <... current_user_can(...) ...>;
+                  ...
+                }
+                ...
+              }
+          - pattern-not-inside: |
+              class $CLASS {
+                ...
+                function create_item_permissions_check(...) {
+                  ...
+                  <... current_user_can(...) ...>;
+                  ...
+                }
+                ...
+              }
+          - pattern-not-inside: |
+              class $CLASS {
+                ...
+                function update_item_permissions_check(...) {
+                  ...
+                  <... current_user_can(...) ...>;
+                  ...
+                }
+                ...
+              }
+          - pattern-not-inside: |
+              class $CLASS {
+                ...
+                function delete_item_permissions_check(...) {
+                  ...
+                  <... current_user_can(...) ...>;
+                  ...
+                }
+                ...
+              }
+          - pattern-not-inside: |
+              class $CLASS {
+                ...
+                function permissions_check(...) {
+                  ...
+                  <... current_user_can(...) ...>;
+                  ...
+                }
+                ...
+              }
+          - pattern-not-inside: |
+              class $CLASS {
+                ...
+                function check_permission(...) {
+                  ...
+                  <... current_user_can(...) ...>;
+                  ...
+                }
+                ...
+              }
+          - pattern-not-inside: |
+              class $CLASS {
+                ...
+                function check_permissions(...) {
+                  ...
+                  <... current_user_can(...) ...>;
+                  ...
+                }
+                ...
+              }
+          # Generalized capability-wrapper naming convention (same rationale as
+          # the sibling auth rule claude.php.wordpress.auth.nonce-without-capability-check):
+          # a static or instance method whose own name denotes a capability/
+          # permission/view-tier gate, called bare or guarded via an early-return
+          # if-condition, in place of an inline current_user_can().
+          - pattern-not-inside:
+              patterns:
+                - pattern: |
+                    function $F(...) {
+                      ...
+                      self::$WRAP(...);
+                      ...
+                    }
+                - metavariable-regex:
+                    metavariable: $WRAP
+                    regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access|view_capability|can_view).*
+          - pattern-not-inside:
+              patterns:
+                - pattern: |
+                    function $F(...) {
+                      ...
+                      if (<... self::$WRAP(...) ...>) {
+                        ...
+                      }
+                      ...
+                    }
+                - metavariable-regex:
+                    metavariable: $WRAP
+                    regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access|view_capability|can_view).*
+          - pattern-not-inside:
+              patterns:
+                - pattern: |
+                    function $F(...) {
+                      ...
+                      if (<... $OBJ->$WRAP(...) ...>) {
+                        ...
+                      }
+                      ...
+                    }
+                - metavariable-regex:
+                    metavariable: $WRAP
+                    regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access|view_capability|can_view).*

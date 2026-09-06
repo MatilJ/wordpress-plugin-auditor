@@ -1,0 +1,79 @@
+rules:
+  - id: claude.php.wordpress.access-control.ajax-request-id-to-wpdb-delete-no-auth
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      User-controlled input from an HTTP request parameter flows into the
+      $wpdb->delete() WHERE clause without an authorization check.
+      $wpdb->delete() permanently removes matching rows from the database
+      with NO internal authorization, NO WordPress hooks, and NO cascading
+      delete logic — the caller must verify current_user_can() before
+      invocation (CWE-862/CWE-639).
+
+      Common in quiz, form, booking, and custom table plugins that accept
+      record IDs via AJAX handlers. CVE-2025-10476 (WP Fastest Cache):
+      subscriber could delete post revisions, trashed posts, and comments
+      without capability check. CVE-2025-9294 (Quiz And Survey Master):
+      subscriber could delete quiz results via nonce-only AJAX handler.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - AJAX/REST handler with nonce-only (no current_user_can()) before
+          the $wpdb->delete() call.
+        - The WHERE array contains a value derived from $_POST/$_GET/$_REQUEST.
+        - No ownership verification (user_id comparison) before deletion.
+
+      FALSE POSITIVE indicators:
+        - Handler has current_user_can('manage_options') — admin-only (PR:H).
+        - WHERE values are hardcoded or server-computed (no user input).
+        - The ID was sourced from a DB query result (taint broken).
+        - Inside register_uninstall_hook/register_deactivation_hook (cleanup).
+        - Cron job handler with hardcoded WHERE conditions.
+
+      Fix: verify authorization before deleting:
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( 'Unauthorized', 403 );
+        }
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Arbitrary Content Deletion"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/classes/wpdb/delete/
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: json_decode(file_get_contents("php://input"), ...)
+          - pattern: file_get_contents("php://input")
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: $wpdb->get_results(...)
+          - pattern: $wpdb->get_row(...)
+          - pattern: $wpdb->get_var(...)
+          - pattern: $wpdb->get_col(...)
+          - pattern: get_option(...)
+    pattern-sinks:
+      - patterns:
+          - pattern: $wpdb->delete($TABLE, $WHERE, ...)
+          - focus-metavariable: $WHERE
+    paths:
+      exclude:
+        - "vendor/"
+        - "freemius/"

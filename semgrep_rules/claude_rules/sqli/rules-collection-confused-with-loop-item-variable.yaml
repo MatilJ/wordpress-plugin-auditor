@@ -1,0 +1,94 @@
+rules:
+  - id: claude.php.wordpress.sqli.rules-collection-confused-with-loop-item-variable
+    languages: [php]
+    severity: HIGH
+    message: |
+      A generic per-field validation helper iterates a caller-supplied
+      rules/schema collection (`foreach ($rules as $field => $rule)`) and
+      then gates a per-item sanitizer/allow-list dispatch with `isset()`,
+      `array_key_exists()`, or `!empty()` tested against the OUTER
+      collection variable (the exact foreach-subject, e.g. `$rules`) using a
+      literal per-item attribute key such as 'sanitize', 'allowed_values',
+      'callback', or 'required' — instead of the CURRENT loop-item variable
+      (`$rule`) the body clearly needs.
+
+      This is a one-letter plural/singular variable-name typo, not a
+      semantic choice: the outer collection's own top-level keys are
+      caller-supplied field names (e.g. 'orderby', 'type', 'user_id'), never
+      per-item attribute names like 'sanitize' or 'allowed_values', so the
+      guard is always false and the entire validation branch becomes
+      permanently dead code on every iteration, for every field, regardless
+      of what any caller configures.
+
+      When the disabled branch is the allow-list guard for a field later
+      used to build an ORDER BY / GROUP BY / column-name clause, this
+      silently removes the only defense against SQL Injection (CWE-89): the
+      value reaches the query completely unvalidated, protected at most by a
+      generic sanitizer (e.g. sanitize_text_field()) that does not
+      neutralize SQL keywords, functions, or parentheses in an unquoted SQL
+      position.
+
+      Fix: use the per-iteration loop-item variable, not the outer
+      collection, for every per-item attribute check, e.g. change
+      `isset($rules['allowed_values'])` to `isset($rule['allowed_values'])`.
+
+      TRIAGE GUIDANCE
+      ───────────────────────────────────────────────────────────────────
+      TRUE POSITIVE indicators:
+        - The literal key tested against the outer collection ('sanitize',
+          'allowed_values', 'callback', 'validate_callback', 'required',
+          'default', 'type', 'options') is never a valid top-level key of
+          that collection in its own construction — it is always an
+          attribute of the per-item rule/schema instead.
+        - The field this guards (directly, or a sibling field validated by
+          the same helper) later reaches a raw $wpdb query in an ORDER BY /
+          GROUP BY / column-name (unquoted) position without
+          sanitize_sql_orderby() or an equivalent allow-list.
+
+      FALSE POSITIVE indicators:
+        - The outer collection genuinely reserves a top-level key with that
+          exact literal name for shared/global configuration alongside its
+          per-field entries — confirm by reading the collection's own
+          construction. Rare, but possible.
+        - The same guard also checks the loop-item variable (defensive
+          `isset($rules[$key]) || isset($rule[$key])`) — this is a safe
+          variant, not the bug.
+        - The validated field never reaches a SQL sink, is cast to
+          int/float, or is re-validated against a strict allow-list
+          elsewhere before use.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: LOW
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/functions/sanitize_sql_orderby/
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+    patterns:
+      - pattern-inside: |
+          foreach ($RULES as $FIELD => $RULE) {
+            ...
+          }
+      - pattern-either:
+          - pattern: isset($RULES[$KEY])
+          - pattern: array_key_exists($KEY, $RULES)
+          - pattern: "!empty($RULES[$KEY])"
+      # Fix-derived FP guard: matching requires the OUTER collection
+      # identifier (the exact foreach-subject variable, e.g. $rules) at this
+      # call site. The confirmed patch renames that reference to the
+      # per-iteration loop-item variable (e.g. $rule), which no longer
+      # unifies with $RULES here — the rule is silent on patched code by
+      # construction, without needing a redundant pattern-not on $RULE.
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i)^['"](sanitize|sanitize_callback|validate_callback|allowed_values|allowed|callback|required|default|type|options|filter|cast)['"]$
+      # A defensive OR that also checks the loop-item variable is the safe
+      # variant, not the bug — do not flag it.
+      - pattern-not-inside: isset($RULES[$KEY]) || isset($RULE[$KEY])
+      - pattern-not-inside: isset($RULE[$KEY]) || isset($RULES[$KEY])

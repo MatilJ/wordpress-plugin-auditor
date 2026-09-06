@@ -1,0 +1,66 @@
+rules:
+  - id: claude.php.wordpress.access-control.get-status-publish-gate-bypass
+    languages: [php]
+    severity: HIGH
+    message: |
+      An access gate combines !current_user_can() with $obj->get_status() !== 'publish'
+      (or the native WP_Post property form, $obj->post_status !== 'publish') using logical
+      AND (&&). WordPress password-protected posts have post_status='publish' with a
+      non-empty post_password field. Both the get_status() method and the post_status
+      property return/hold 'publish' for these posts, making the second operand permanently
+      false and the entire gate permanently false — execution bypasses the check for all
+      password-protected content (CWE-863).
+
+      The correct guard is post_password_required($id), which reads the post_password
+      column directly and checks the visitor's password cookie. Neither a get_status()
+      method call nor a bare post_status property comparison can distinguish a published
+      post from a password-protected one.
+
+      Fix:
+        if ( !current_user_can('read_post', $id) || post_password_required($id) ) {
+            wp_die();
+        }
+
+      TRIAGE: Confirm the handler is publicly accessible (wp_ajax_nopriv_* or wc_ajax_*)
+      and that no other post_password_required() call exists earlier in the function.
+    metadata:
+      category: security
+      cwe: "CWE-863: Incorrect Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      # AND-logic gate: second operand is always false for password-protected posts
+      # (post_status='publish', post_password != ''). Gate never fires → bypass.
+      vulnerability_class: "Broken Access Control / Information Disclosure"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/post_password_required/
+        - https://cwe.mitre.org/data/definitions/863.html
+    paths:
+      exclude:
+        - "**/freemius/**"
+    pattern-either:
+      # Common form: !current_user_can first, get_status second
+      - pattern: |
+          if (!current_user_can(...) && $X->get_status() !== 'publish') { ... }
+      # With parentheses around the get_status comparison
+      - pattern: |
+          if (!current_user_can(...) && ($X->get_status() !== 'publish')) { ... }
+      # Reversed order: get_status first, !current_user_can second
+      - pattern: |
+          if ($X->get_status() !== 'publish' && !current_user_can(...)) { ... }
+      # Native WP_Post property form (post_status, not the get_status() method) —
+      # same AND-logic bypass; property-first operand order.
+      - pattern: |
+          if ('publish' !== $X->post_status && !current_user_can(...)) { ... }
+      # Native WP_Post property form — capability-check-first operand order.
+      - pattern: |
+          if (!current_user_can(...) && 'publish' !== $X->post_status) { ... }
+      # Native WP_Post property form — property-first, property on the left of !==.
+      - pattern: |
+          if ($X->post_status !== 'publish' && !current_user_can(...)) { ... }
+      # Native WP_Post property form — capability-check-first, property on the left of !==.
+      - pattern: |
+          if (!current_user_can(...) && $X->post_status !== 'publish') { ... }

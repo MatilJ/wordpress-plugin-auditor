@@ -1,0 +1,273 @@
+rules:
+  - id: claude.php.wordpress.lfi.global-template-selector-weak-sanitizer
+    languages: [php]
+    severity: HIGH
+    message: |
+      A $_GET/$_POST/$_REQUEST value is sanitized ONLY with
+      sanitize_text_field()/sanitize_textarea_field() — OR read via
+      filter_input(INPUT_GET/INPUT_POST/INPUT_COOKIE, ..., FILTER_SANITIZE_STRING)
+      — OR a public query var (get_query_var(), which WordPress never
+      path-filters at all) is read with NO sanitizer whatsoever — and
+      assigned to a variable — or an object property (e.g.
+      "$this->active_tab") — whose name matches the common template/view/
+      layout selector naming convention (layout, template, tpl, view, page,
+      section, module, widget, partial, style, tab, subtab), optionally
+      with a prefix/suffix qualifier (e.g. "active_tab", "current_view",
+      "profile_tab"). sanitize_text_field() strips tags and extra
+      whitespace but does NOT strip '/', '\\', or '..' sequences, so it is
+      not a file-path-safe sanitizer; FILTER_SANITIZE_STRING likewise only
+      strips tags (and is silently ignored — the raw value passes through
+      unfiltered — on PHP 8.1+, where it is deprecated); get_query_var()
+      applies no filtering at all beyond whatever the registered rewrite
+      tag/query var itself constrains (often none).
+
+      This naming convention overwhelmingly marks a value that is later
+      concatenated (or string-interpolated) into a template directory path
+      and included — often in a completely different function or file than
+      the one performing this assignment (e.g. a settings-page render
+      method sets a `global $template` from $_GET, and a separately
+      include_once'd template file consumes it via
+      "$dir . "{$template}.php""; or a class stores the value on a property
+      in one method and a sibling method — invoked later via a WP action/
+      filter callback — concatenates that property directly into an
+      include/include_once path guarded only by file_exists()), which
+      per-function/per-file static analysis cannot trace. The
+      mis-sanitization is nonetheless a reliably detectable smell on its
+      own: the fix is to swap the text sanitizer for a filename-safe one
+      (sanitize_file_name(), basename(), preg_replace() against a fixed
+      charset allow-list) or validate the value against a known-good
+      allow-list (in_array() against the set of legitimate selector keys)
+      before it is stored (CWE-98 / CWE-22).
+
+      TRIAGE:
+        1. Trace the assigned variable forward (including across files via
+           include/include_once/require/require_once of a sibling template
+           file, and across functions via `global`) to confirm it reaches
+           a path built for include/require, get_template_part(),
+           locate_template(), load_template(), file_get_contents(),
+           readfile(), or fopen().
+        2. Confirm no sanitize_file_name(), basename(), realpath(),
+           validate_file(), or sanitize_key() is applied to the value
+           anywhere between this assignment and the eventual sink.
+        3. If no such downstream sink exists (the value is only ever
+           echoed, compared, or used as an array key), this is a FALSE
+           POSITIVE — sanitize_text_field() is adequate for non-path uses.
+      KNOWN LIMITATION: this is a pattern-mode (non-taint) rule that
+      intentionally does not require the sink to be visible in the same
+      function — cross-file/cross-scope confirmation is a manual step.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program ('PHP Remote File Inclusion')"
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/98.html
+        - https://cwe.mitre.org/data/definitions/22.html
+    patterns:
+      - pattern-either:
+          # Weak-sanitizer branches: $SUPER must be a superglobal (checked
+          # in the nested metavariable-pattern below — scoped to only
+          # these branches, since $SUPER is not bound by the get_query_var()
+          # branches further down).
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      $TEMPLATE = <... sanitize_text_field(<... $SUPER[$KEY] ...>) ...>;
+                  - pattern: |
+                      $TEMPLATE = <... sanitize_textarea_field(<... $SUPER[$KEY] ...>) ...>;
+                  # Object-property variant of the same idiom: a class
+                  # method assigns straight to "$this->$prop" (a settings/
+                  # wizard-page class caching its request-derived selector
+                  # as instance state for a sibling render method to
+                  # consume) instead of a local/global variable. $TEMPLATE
+                  # here binds only the property name.
+                  - pattern: |
+                      $THIS->$TEMPLATE = <... sanitize_text_field(<... $SUPER[$KEY] ...>) ...>;
+                  - pattern: |
+                      $THIS->$TEMPLATE = <... sanitize_textarea_field(<... $SUPER[$KEY] ...>) ...>;
+              - metavariable-pattern:
+                  metavariable: $SUPER
+                  patterns:
+                    - pattern-either:
+                        - pattern: $_GET
+                        - pattern: $_POST
+                        - pattern: $_REQUEST
+          # filter_input() variant: the same weak-sanitizer idiom as
+          # sanitize_text_field() above but reading the superglobal through
+          # PHP's own filter_input() with FILTER_SANITIZE_STRING instead —
+          # a common WP-adjacent alternative to $_GET/$_POST array access
+          # that strips tags only, never traversal sequences, and is a
+          # silent no-op (raw value passed through) on PHP >= 8.1 where the
+          # filter is deprecated.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      $TEMPLATE = <... filter_input($INPUT_TYPE, $KEY, FILTER_SANITIZE_STRING) ...>;
+                  - pattern: |
+                      $THIS->$TEMPLATE = <... filter_input($INPUT_TYPE, $KEY, FILTER_SANITIZE_STRING) ...>;
+              - metavariable-regex:
+                  metavariable: $INPUT_TYPE
+                  regex: '^INPUT_(GET|POST|COOKIE)$'
+          # get_query_var() variant (CVE-2026-9290 shape): a public query
+          # var / rewrite tag is read straight into a tab/view selector
+          # with ZERO sanitizer — WP applies no path-safety filtering to
+          # query vars at all, so this is strictly worse than the weak-
+          # sanitizer branches above, not just an equal alternative source.
+          # No $SUPER involved here, so it is kept OUTSIDE the nested block
+          # above rather than sharing its metavariable-pattern constraint.
+          # Excludes the three literal query-var names ('page'/'paged'/'cpage')
+          # that WordPress core itself reserves for WP_Query/comment
+          # pagination — these are never available for a plugin to repurpose
+          # as a template/tab selector, so a get_query_var('page'|'paged'|
+          # 'cpage') read is reliably the native pagination page number, not
+          # a file-selector value, even though the assigned variable's own
+          # name may coincidentally match this rule's naming convention
+          # (e.g. "$page_number").
+          - patterns:
+              - pattern: |
+                  $TEMPLATE = <... get_query_var($KEY, ...) ...>;
+              - metavariable-pattern:
+                  metavariable: $KEY
+                  patterns:
+                    - pattern-not: "'page'"
+                    - pattern-not: "'paged'"
+                    - pattern-not: "'cpage'"
+          - patterns:
+              - pattern: |
+                  $THIS->$TEMPLATE = <... get_query_var($KEY, ...) ...>;
+              - metavariable-pattern:
+                  metavariable: $KEY
+                  patterns:
+                    - pattern-not: "'page'"
+                    - pattern-not: "'paged'"
+                    - pattern-not: "'cpage'"
+      # Anchored to allow an "active_"/"current_"/"profile_" state-qualifier
+      # prefix around the core selector token, so compound names such as
+      # "active_tab", "current_view", or "profile_tab" (the common idiom
+      # once the selector is promoted to an object property, or is a
+      # profile/account-page tab selector — CVE-2026-9290's
+      # "$profile_tab" — which needs a descriptive name) still match. The
+      # prefix set is intentionally curated to qualifiers that specifically
+      # denote "the tab/view currently in effect" rather than any "\w+_" or
+      # a broader list (e.g. "selected_", "default_") — those also match
+      # unrelated WP idioms whose value is never used as a file selector
+      # (e.g. a list-table's "selected_view" status filter), which is not
+      # this rule's target shape.
+      - metavariable-regex:
+          metavariable: $TEMPLATE
+          regex: '^\$?((?:active|current|profile)_)?(layout|template|tpl|view|page|section|module|widget|partial|style|tab|subtab)(_\w+)?$'
+      # Fix-derived FP guard: "page_id"/"post_id" is WordPress's own
+      # overwhelmingly standard naming convention for a numeric post/page
+      # identifier (option-key suffix, array key, URL path segment for an
+      # outbound request) — never a template/layout selector — even though it
+      # matches this rule's "page" keyword + "_id" suffix shape.
+      - metavariable-regex:
+          metavariable: $TEMPLATE
+          regex: '^(?!\$?(?:active_|current_|profile_)?(?:page_id|post_id)$).+$'
+      # Fix-derived FP guard: if the enclosing function ALSO applies a
+      # filename-safe sanitizer or path-containment check to the value
+      # before it is used, the weak sanitizer above is not the operative
+      # guard — matches the sibling file-inclusion rules' convention.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            sanitize_file_name(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            basename(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            realpath(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            validate_file(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            sanitize_key(...);
+            ...
+          }
+      # Allow-list-before-store guard: the fix validates the sanitized
+      # value against a known-good set (in_array() against the plugin's
+      # own list of legitimate tab/step/view keys, typically via
+      # array_keys() over an associative array) as an early guard clause
+      # that resets it to a safe default, before it is written to its
+      # final resting place — the operative neutralizer for the
+      # property-assignment shape above, where the sanitizer call and the
+      # allow-list check are two separate statements in the same function.
+      # Matched as the full if-statement (not a bare in_array(...);
+      # statement) because the call sits inside the if-condition rather
+      # than as a standalone statement.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (!in_array($VAL, ...)) {
+              ...
+            }
+            ...
+          }
+      # Same allow-list guard as above, but as one arm of a compound
+      # condition (e.g. "empty($tab) || !in_array($tab, $allowed, true)")
+      # rather than the sole condition of the if — the deep-expression
+      # operator lets in_array() appear anywhere inside the boolean
+      # expression so an "empty(...) ||"-prefixed guard still suppresses.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... !in_array($VAL, ...) ...>) {
+              ...
+            }
+            ...
+          }
+      # Allow-list-via-isset()/array_key_exists() guard (CVE-2026-9290's
+      # actual fix shape: "if ( ! isset( $registered[ $profile_tab ] ) )
+      # { $profile_tab = $first_tab; }" — validates the value is a key of
+      # the plugin's own registered-tabs array before it is trusted). Bound
+      # to the SAME $TEMPLATE metavariable as the vulnerable assignment so
+      # only a guard that actually re-checks the tainted variable itself
+      # (not an unrelated isset() elsewhere in the function) suppresses the
+      # finding. Matched both as a bare condition and as one arm of an
+      # "empty($TEMPLATE) || ! isset(...)" compound (the account-page-tab
+      # sibling shape in the same CVE's patch).
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (! isset($ARR[$TEMPLATE])) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (empty($TEMPLATE) || ! isset($ARR[$TEMPLATE])) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (! array_key_exists($TEMPLATE, $ARR)) {
+              ...
+            }
+            ...
+          }

@@ -1,0 +1,112 @@
+rules:
+  - id: claude.php.wordpress.xss.keyed-field-value-unescaped-array-write
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      Inside a foreach loop over a list of field/key names, a per-field value is
+      obtained via a getter call — either through an intermediate variable or
+      directly — and then written into an output array under the loop's own
+      key, with no escaping function applied anywhere in the assignment.
+
+      This "schema-driven field renderer" idiom is common to member-directory,
+      profile-card, form-entry, and custom-field-display features: the list of
+      field keys iterated by the loop is typically admin-configurable, but the
+      per-key VALUE the getter returns is frequently end-user-submitted content
+      (a profile field, a form-entry answer, post/user metadata) that a
+      low-privileged account holder — or an unauthenticated submitter, for a
+      public registration/entry form — fully controls. When the array this loop
+      builds is later serialized into an AJAX/REST response or rendered by a
+      client-side template that inserts field values as raw HTML (an
+      Underscore.js/wp.template triple-mustache `{{{ }}}` binding, jQuery
+      `.html()`, string concatenation into the DOM) rather than a text-only
+      binding, the missing server-side escaping is Stored XSS (CWE-79) against
+      any later viewer of the rendered list/card.
+
+      TRIAGE (most such loops are already safe — confirm before reporting):
+      (1) the per-key getter genuinely returns free-text, attacker-influenced
+      content, not a boolean/numeric/enum value where HTML injection is moot;
+      (2) the destination array is eventually rendered as HTML — client-side or
+      server-side — rather than consumed as inert data (a CSV export, a
+      `.text()`/`textContent` binding, a value only compared programmatically).
+
+      Fix: wrap the getter's return value in esc_html() / wp_kses() (with an
+      explicit allowed-tags list if the field intentionally carries limited
+      markup) at the point it is written into the array — every per-key branch
+      of the loop needs the same treatment, not only the first field a reviewer
+      happens to notice.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — Stored"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+        - "**/freemius/**"
+    patterns:
+      - pattern-either:
+          # Two-step form: an intermediate variable holds the per-key getter's
+          # return value before being written bare into the response array —
+          # single-variable foreach. The primary match is the exact bare
+          # assignment `$ARR[$KEY] = $VALUE;`; because $VALUE must be the same
+          # AST node bound by the getter assignment inside the loop, any
+          # wrapping of $VALUE in a sanitizer at the point of the array write
+          # (e.g. `$ARR[$KEY] = wp_kses($VALUE, ...);`) no longer matches the
+          # bare-assignment shape and is correctly excluded.
+          - patterns:
+              - pattern: $ARR[$KEY] = $VALUE;
+              - pattern-inside: |
+                  foreach ($KEYS as $KEY) {
+                    ...
+                    $VALUE = $GETTER(...);
+                    ...
+                  }
+              - metavariable-regex:
+                  metavariable: $GETTER
+                  regex: "(?i)^(?!esc_html$|esc_attr$|esc_html__$|esc_attr__$|esc_url$|esc_url_raw$|esc_js$|esc_textarea$|wp_kses$|wp_kses_post$|htmlspecialchars$|htmlentities$|sanitize_text_field$|sanitize_textarea_field$|wp_strip_all_tags$|absint$|intval$|sanitize_key$|array_unique$|array_merge$|array_values$|array_flip$|array_reverse$|array_slice$|array_diff$|array_intersect$|array_combine$|array_keys$|array_filter$).*$"
+          # Same two-step form, key => value foreach.
+          - patterns:
+              - pattern: $ARR[$KEY] = $VALUE;
+              - pattern-inside: |
+                  foreach ($KEYS as $IDX => $KEY) {
+                    ...
+                    $VALUE = $GETTER(...);
+                    ...
+                  }
+              - metavariable-regex:
+                  metavariable: $GETTER
+                  regex: "(?i)^(?!esc_html$|esc_attr$|esc_html__$|esc_attr__$|esc_url$|esc_url_raw$|esc_js$|esc_textarea$|wp_kses$|wp_kses_post$|htmlspecialchars$|htmlentities$|sanitize_text_field$|sanitize_textarea_field$|wp_strip_all_tags$|absint$|intval$|sanitize_key$|array_unique$|array_merge$|array_values$|array_flip$|array_reverse$|array_slice$|array_diff$|array_intersect$|array_combine$|array_keys$|array_filter$).*$"
+          # One-step form: the getter's return value is written directly with
+          # no intermediate variable — single-variable foreach. $GETTER is
+          # constrained to exclude escaping functions so that
+          # `$ARR[$KEY] = esc_html(get_user_meta(...));` (GETTER bound to the
+          # outer esc_html call) is correctly excluded, not mistaken for an
+          # unescaped getter.
+          - patterns:
+              - pattern: $ARR[$KEY] = $GETTER(...);
+              - pattern-inside: |
+                  foreach ($KEYS as $KEY) {
+                    ...
+                  }
+              - metavariable-regex:
+                  metavariable: $GETTER
+                  regex: "(?i)^(?!esc_html$|esc_attr$|esc_html__$|esc_attr__$|esc_url$|esc_url_raw$|esc_js$|esc_textarea$|wp_kses$|wp_kses_post$|htmlspecialchars$|htmlentities$|sanitize_text_field$|sanitize_textarea_field$|wp_strip_all_tags$|absint$|intval$|sanitize_key$|array_unique$|array_merge$|array_values$|array_flip$|array_reverse$|array_slice$|array_diff$|array_intersect$|array_combine$|array_keys$|array_filter$).*$"
+          # Same one-step form, key => value foreach.
+          - patterns:
+              - pattern: $ARR[$KEY] = $GETTER(...);
+              - pattern-inside: |
+                  foreach ($KEYS as $IDX => $KEY) {
+                    ...
+                  }
+              - metavariable-regex:
+                  metavariable: $GETTER
+                  regex: "(?i)^(?!esc_html$|esc_attr$|esc_html__$|esc_attr__$|esc_url$|esc_url_raw$|esc_js$|esc_textarea$|wp_kses$|wp_kses_post$|htmlspecialchars$|htmlentities$|sanitize_text_field$|sanitize_textarea_field$|wp_strip_all_tags$|absint$|intval$|sanitize_key$|array_unique$|array_merge$|array_values$|array_flip$|array_reverse$|array_slice$|array_diff$|array_intersect$|array_combine$|array_keys$|array_filter$).*$"

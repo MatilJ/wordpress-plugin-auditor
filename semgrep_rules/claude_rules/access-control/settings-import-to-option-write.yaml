@@ -1,0 +1,105 @@
+rules:
+  - id: claude.php.wordpress.access-control.settings-import-to-option-write
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      Data from a settings import operation (json_decode of file contents,
+      request body, or uploaded file) flows into update_option() or add_option()
+      without capability verification. Settings import functions that process
+      JSON/XML from file uploads or request bodies and write each decoded
+      key-value pair to wp_options are a common source of Arbitrary Options
+      Update vulnerabilities (CWE-862).
+
+      An attacker who can reach the import endpoint without authentication
+      can overwrite critical WordPress options (users_can_register,
+      default_role, siteurl, home) to achieve full site takeover.
+
+      TRIAGE:
+      1. Trace the import endpoint's entry point — is it gated by
+         current_user_can('manage_options')? Check both the route
+         registration (permission_callback, hook type) and the handler body.
+      2. Does the import function validate option names against an allowlist
+         before writing? Unrestricted key iteration = critical.
+      3. Check if the decoded data is iterated with foreach and written
+         per-key (user controls which options are set).
+      4. Even admin-gated imports may be CSRF-exploitable if no nonce is
+         verified — check for wp_verify_nonce() or check_admin_referer().
+
+      Fix: gate the import endpoint with current_user_can('manage_options')
+      + wp_verify_nonce(). Validate imported keys against a strict allowlist.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-915: Improperly Controlled Modification of Dynamically-Determined Object Attributes"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Arbitrary Options Update"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/update_option/
+        - https://owasp.org/www-community/vulnerabilities/Mass_Assignment
+    pattern-sources:
+      - pattern-either:
+          - pattern: json_decode(file_get_contents(...), ...)
+          - pattern: json_decode($REQUEST->get_body(), ...)
+          - pattern: json_decode($REQUEST->get_body_params(), ...)
+          # A hardcoded string literal (or a concatenation of literals with
+          # hardcoded constants/function calls on them, containing no `$`
+          # variable reference anywhere) is developer-authored, not attacker/
+          # import data — a genuine import flow always carries the data through
+          # at least one variable.
+          - patterns:
+              - pattern: json_decode($BODY, ...)
+              - pattern-not: json_decode("...", ...)
+              # JSON decoded from the plugin's own outbound HTTP client response body is
+              # server-fetched data (the plugin phoning its own vendor endpoint), not
+              # attacker-supplied import/request data.
+              - pattern-not: json_decode(wp_remote_retrieve_body(...), ...)
+              # Same exclusion, two-statement form: the response body is captured into
+              # an intermediate variable (the idiomatic "$body = wp_remote_retrieve_body($r);
+              # $data = json_decode($body);" style) before decoding, which the single-
+              # expression pattern-not above cannot see since it only matches an inline call.
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    $BODY = wp_remote_retrieve_body(...);
+                    ...
+                  }
+              - metavariable-regex:
+                  metavariable: $BODY
+                  regex: ".*\\$[A-Za-z_].*"
+          - pattern: maybe_unserialize($BODY)
+          - pattern: simplexml_load_string($BODY)
+    pattern-sinks:
+      - pattern-either:
+          - pattern: update_option($KEY, $VALUE, ...)
+          - pattern: add_option($KEY, $VALUE, ...)
+          - pattern: update_site_option($KEY, $VALUE, ...)
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: (bool) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          - pattern: sanitize_key(...)
+          - pattern: sanitize_email(...)
+          - pattern: sanitize_text_field(...)
+          - pattern: sanitize_textarea_field(...)
+          - pattern: sanitize_file_name(...)
+          - pattern: sanitize_title(...)
+          - pattern: esc_html(...)
+          - pattern: esc_attr(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: get_option(...)
+          - pattern: get_post_meta(...)
+          - pattern: get_user_meta(...)
+          - pattern: get_transient(...)

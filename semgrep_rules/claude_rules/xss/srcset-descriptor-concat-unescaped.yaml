@@ -1,0 +1,114 @@
+rules:
+  # Detects a responsive-image "srcset" (or "src_set"/"src-set") entry array being
+  # built by concatenating a URL segment and a width/pixel-density descriptor
+  # segment directly, with either side missing its escaping function. Native
+  # HTML srcset values are comma-separated "url descriptor" pairs (e.g.
+  # "image.jpg 2x"), so plugins that hand-roll this attribute from array/loop
+  # data (image optimization, lazy-load, and responsive-image plugins commonly
+  # do) must esc_url() the URL side and esc_attr() the descriptor side before
+  # the entries are imploded into the final srcset="..." string.
+  - id: claude.php.wordpress.xss.srcset-descriptor-concat-unescaped
+    languages: [php]
+    severity: HIGH
+    message: |
+      A responsive-image "srcset" entry is built by concatenating a URL
+      segment and a width/pixel-density descriptor segment, with at least
+      one side not wrapped in an escaping function. Native srcset values are
+      inserted into a double-quoted HTML attribute later (after implode()),
+      so an unescaped descriptor or URL that originates from stored or
+      request-supplied data lets an attacker place a double-quote character
+      in the value, break out of the srcset="..." attribute, and inject
+      arbitrary HTML attributes / event handlers (CWE-79).
+
+      Note: a generic input sanitizer (e.g. sanitize_text_field()) applied
+      earlier in the data's lifecycle does NOT substitute for output
+      escaping here — it strips tags but does not encode quote characters,
+      so a value that already passed through it can still break out of a
+      double-quoted attribute.
+
+      Fix: wrap the URL segment in esc_url() and the descriptor segment in
+      esc_attr() at the point the entry is built:
+        $entries[] = esc_url($url) . ' ' . esc_attr($descriptor);
+
+      TRIAGE: confirm the descriptor/URL values are not provably
+      developer-hardcoded constants, and that the joined entries are later
+      inserted into HTML output (not solely used server-side or returned as
+      a JSON/REST response).
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Scripting (XSS) — Stored"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+        - "**/freemius/**"
+    pattern-either:
+      # Branch A: the URL segment is not escaped (regardless of descriptor side).
+      # The sink is pinned to the exact 3-term "$url . $sep . $descriptor" shape
+      # (not a generic 2-term $URL . $DESC) because concatenation is left-
+      # associative: a looser 2-term pattern lets $URL combinatorially absorb
+      # "esc_url($x) . $sep" as one compound leaf, which evades the exact-call
+      # sanitizer check below on lines that are already correctly escaped.
+      - patterns:
+          - pattern: $ARR[] = $URL . $SEP . $DESC;
+          - metavariable-regex:
+              metavariable: $ARR
+              regex: "(?i).*(srcset|src_set|src-set).*"
+          - metavariable-pattern:
+              metavariable: $URL
+              patterns:
+                - pattern-not: esc_url(...)
+                - pattern-not: esc_url_raw(...)
+          # Covers the common "sanitize into an intermediate variable a few
+          # lines earlier, then concatenate the bare variable" idiom, which a
+          # lexical check at the concatenation site alone cannot see.
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $URL = esc_url(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $URL = esc_url_raw(...);
+                ...
+              }
+      # Branch B: the descriptor segment is not escaped (regardless of URL side).
+      - patterns:
+          - pattern: $ARR[] = $URL . $SEP . $DESC;
+          - metavariable-regex:
+              metavariable: $ARR
+              regex: "(?i).*(srcset|src_set|src-set).*"
+          - metavariable-pattern:
+              metavariable: $DESC
+              patterns:
+                - pattern-not: esc_attr(...)
+                - pattern-not: esc_html(...)
+                - pattern-not: intval(...)
+                - pattern-not: absint(...)
+                - pattern-not: (int) $X
+                - pattern-not: floatval(...)
+                - pattern-not: (float) $X
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $DESC = esc_attr(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $DESC = esc_html(...);
+                ...
+              }

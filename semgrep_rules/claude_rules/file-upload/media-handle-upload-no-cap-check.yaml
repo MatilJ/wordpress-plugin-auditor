@@ -1,0 +1,44 @@
+rules:
+  - id: claude.php.wordpress.upload.media-handle-upload-no-cap-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      media_handle_upload() is called without a current_user_can() check in the
+      same function. This function writes directly to the WordPress Media Library
+      and requires at minimum the 'upload_files' capability (CWE-862 / CWE-434).
+      On wp_ajax_nopriv_ endpoints this enables unauthenticated arbitrary file
+      upload to the Media Library. A nonce check alone is insufficient when the
+      nonce is embedded in public page output (any visitor can obtain it).
+      Add current_user_can('upload_files') before calling media_handle_upload().
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/media_handle_upload/
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/
+    patterns:
+      - pattern: |
+          function $FN(...) {
+            ...
+            media_handle_upload(...);
+            ...
+          }
+      # current_user_can is almost always used inside an if condition (not a bare statement),
+      # so match it via deep expression syntax to handle both negated and direct forms.
+      - pattern-not: function $FN(...) { ... if (<... current_user_can(...) ...>) { ... } ... }
+      # Also exclude standalone expression usage (e.g. current_user_can(...) || die())
+      - pattern-not: function $FN(...) { ... current_user_can(...); ... }
+      # Exclude Freemius bundled SDK — always out of scope for Wordfence bounty
+    paths:
+      exclude:
+        - "**/freemius/**"

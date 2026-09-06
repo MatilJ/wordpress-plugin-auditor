@@ -1,0 +1,81 @@
+rules:
+  - id: claude.php.wordpress.xss.add-query-arg-unescaped
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      Output of add_query_arg() flows into echo/print without esc_url() escaping.
+      When called without a base-URL argument, add_query_arg() uses
+      $_SERVER['REQUEST_URI'] as the base — which is fully attacker-controlled.
+      Even when the added key/value are static, existing query parameters
+      (including XSS payloads) are preserved in the output URL (CWE-79).
+      Always wrap with esc_url() before output:
+        echo esc_url( add_query_arg( 'key', 'value' ) );
+        echo esc_url( home_url( add_query_arg( 'key', 'value' ) ) );
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/add_query_arg/
+        - https://developer.wordpress.org/apis/security/escaping/
+    # add_query_arg() is treated as a tainted source because:
+    # (a) With 2 args it implicitly uses $_SERVER['REQUEST_URI'] as the base URL,
+    #     carrying any attacker-supplied query parameters verbatim into the output.
+    # (b) Even with a static base URL, the result must still be esc_url()'d before
+    #     HTML output to avoid attribute injection.
+    pattern-sources:
+      - patterns:
+          - pattern: add_query_arg(...)
+          # An explicit base-URL argument built from a WP core URL generator
+          # rules out the $_SERVER['REQUEST_URI'] fallback this rule targets —
+          # these functions return the site's own configured URL, never a
+          # request-derived string. Confirmed FP: woo-cart-abandonment-recovery
+          # 2.1.3 class-cartflows-ca-tabs.php (add_query_arg(array, admin_url(...))
+          # nav-tab URL builder).
+          - pattern-not: add_query_arg($A, $B, admin_url(...))
+          - pattern-not: add_query_arg($A, $B, home_url(...))
+          - pattern-not: add_query_arg($A, $B, site_url(...))
+          - pattern-not: add_query_arg($A, $B, network_admin_url(...))
+          - pattern-not: add_query_arg($A, admin_url(...))
+          - pattern-not: add_query_arg($A, home_url(...))
+          - pattern-not: add_query_arg($A, site_url(...))
+          - pattern-not: add_query_arg($A, network_admin_url(...))
+    pattern-sinks:
+      - pattern-either:
+          - pattern: echo $X;
+          - pattern: print $X;
+          - pattern: print($X);
+          - pattern: printf($F, ...)
+    pattern-sanitizers:
+      - pattern-either:
+          # URL context — correct escaper for href/src attributes
+          - pattern: esc_url(...)
+          - pattern: esc_url_raw(...)
+          # HTML-body context (encodes <, >, &, quotes)
+          - pattern: esc_html(...)
+          - pattern: esc_attr(...)
+          # JavaScript context
+          - pattern: esc_js(...)
+          - pattern: wp_json_encode(...)
+          - pattern: json_encode(...)
+          # Full HTML sanitization
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          # paginate_links() internally applies esc_url() to every generated link.
+          # Passing add_query_arg() result as the 'base' key is safe; the output
+          # HTML is already escaped.
+          # Confirmed FP: responsive-lightbox 2.7.6 trait-gallery-image-methods.php:610
+          - pattern: paginate_links(...)
+          # wp_nonce_url() wraps its URL argument with esc_html() (via htmlspecialchars())
+          # before returning. Any add_query_arg() result passed through wp_nonce_url()
+          # has < > " & encoded; cannot produce attribute or tag injection.
+          - pattern: wp_nonce_url(...)

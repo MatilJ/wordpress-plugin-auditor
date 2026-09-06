@@ -1,0 +1,148 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+
+  # A capability-check call (current_user_can(), user_can(), or a plugin's own
+  # is_capable()/has_cap()-style wrapper around it) is only meaningful when the
+  # capability NAME it is asked to verify is a value the developer hardcoded.
+  # If that name is instead read from request input, the caller decides for
+  # themselves which capability gets checked — a "self-attested" check that
+  # can always be satisfied (pick a capability granted to your own role, or a
+  # documented always-true sentinel some wrappers special-case, e.g. "none").
+  # When the class containing that self-attested check also registers a
+  # wp_ajax_nopriv_/admin_post_nopriv_ hook, the bypass is reachable by
+  # completely unauthenticated visitors, who can then act with whatever
+  # elevated capability/ownership the check was meant to gate — the shape
+  # behind CVE-2026-39587 (WP BASE Booking of Appointments, Services and
+  # Events <= 5.9.0): an unauthenticated wp_ajax_nopriv_ booking-edit endpoint
+  # authorized the request solely via a client-supplied "cap" POST field
+  # passed into a capability-check wrapper.
+
+  - id: claude.php.wordpress.access-control.nopriv-self-attested-capability-check
+    mode: join
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      A class registers a wp_ajax_nopriv_ (or admin_post_nopriv_) hook — reachable
+      by completely unauthenticated visitors — and elsewhere in that same class,
+      authorization is decided by passing a capability NAME taken directly from
+      request input ($_GET/$_POST/$_REQUEST, optionally through a single
+      sanitizer/cleaning call) into current_user_can(), user_can(), or a
+      plugin-defined is_capable()/has_cap()-style wrapper around them.
+
+      Because the attacker supplies the capability string being checked, they can
+      pick one that is trivially satisfied — a capability implicitly granted to
+      every user, or a documented always-true sentinel some wrappers special-case
+      (e.g. a literal "none" meaning "no capability required") — and thereby
+      self-attest to authorization they do not actually have. Any ownership or
+      role gate that ORs in the result of this check (a common
+      "$is_owner || $can_edit" shape) is bypassed entirely, letting an
+      unauthenticated attacker perform the privileged/owner-only action on
+      behalf of any user (CWE-269 — Improper Privilege Management; CWE-863 —
+      Incorrect Authorization).
+
+      Fix: never derive the capability NAME from request input. Check a fixed,
+      hardcoded capability string (e.g. current_user_can('edit_others_posts')).
+      If a caller-supplied override is genuinely required, validate it against a
+      hardcoded allow-list of grantable capabilities AND require the request to
+      be authenticated (is_user_logged_in()) — do not expose the self-attested
+      path via a wp_ajax_nopriv_/admin_post_nopriv_ hook at all.
+    join:
+      rules:
+        - id: nopriv-hook-in-class
+          languages: [php]
+          patterns:
+            - pattern-inside: |
+                class $CLASS {
+                  ...
+                }
+            - pattern-either:
+                - pattern: add_action('$ACTION', array($this, '$CALLBACK'), ...);
+                - pattern: add_action('$ACTION', array($this, '$CALLBACK'));
+            - metavariable-regex:
+                metavariable: $ACTION
+                regex: (wp_ajax_nopriv_.*|admin_post_nopriv_.*)
+
+        - id: self-attested-capability-check-in-class
+          languages: [php]
+          patterns:
+            - pattern-inside: |
+                class $CLASS {
+                  ...
+                }
+            # NOTE: each pattern-either branch below carries its OWN
+            # metavariable-regex, rather than one shared at the outer level —
+            # a metavariable-regex on $METHOD at the outer level would apply
+            # to every branch, including the current_user_can()/user_can()
+            # branches that never bind $METHOD, silently discarding them
+            # (unbound-metavariable-in-metavariable-regex gotcha).
+            - pattern-either:
+                - patterns:
+                    - pattern: current_user_can($SRC)
+                    - metavariable-regex:
+                        metavariable: $SRC
+                        regex: ^\$_(GET|POST|REQUEST)\[
+                - patterns:
+                    - pattern: current_user_can($SANITIZER($SRC))
+                    - metavariable-regex:
+                        metavariable: $SRC
+                        regex: ^\$_(GET|POST|REQUEST)\[
+                - patterns:
+                    - pattern: user_can($USER, $SRC)
+                    - metavariable-regex:
+                        metavariable: $SRC
+                        regex: ^\$_(GET|POST|REQUEST)\[
+                - patterns:
+                    - pattern: user_can($USER, $SANITIZER($SRC))
+                    - metavariable-regex:
+                        metavariable: $SRC
+                        regex: ^\$_(GET|POST|REQUEST)\[
+                - patterns:
+                    - pattern: $OBJ->$METHOD($SRC)
+                    - metavariable-regex:
+                        metavariable: $SRC
+                        regex: ^\$_(GET|POST|REQUEST)\[
+                    - metavariable-regex:
+                        metavariable: $METHOD
+                        regex: (?i)^(is_capable|has_cap|can_user|user_is_capable|is_current_user_capable)$
+                - patterns:
+                    - pattern: $OBJ->$METHOD($SANITIZER($SRC))
+                    - metavariable-regex:
+                        metavariable: $SRC
+                        regex: ^\$_(GET|POST|REQUEST)\[
+                    - metavariable-regex:
+                        metavariable: $METHOD
+                        regex: (?i)^(is_capable|has_cap|can_user|user_is_capable|is_current_user_capable)$
+            # Fix / non-finding: the submitted value is checked against a
+            # hardcoded allow-list of grantable capabilities before use.
+            - pattern-not-inside: |
+                if (<... in_array($SRC, ...) ...>) { ... }
+
+      on:
+        - 'nopriv-hook-in-class.$CLASS == self-attested-capability-check-in-class.$CLASS'
+        - 'nopriv-hook-in-class.path == self-attested-capability-check-in-class.path'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe:
+        - "CWE-269: Improper Privilege Management"
+        - "CWE-863: Incorrect Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/269.html
+        - https://cwe.mitre.org/data/definitions/863.html
+        - https://developer.wordpress.org/reference/hooks/wp_ajax_nopriv_action/
+        - https://developer.wordpress.org/reference/functions/current_user_can/

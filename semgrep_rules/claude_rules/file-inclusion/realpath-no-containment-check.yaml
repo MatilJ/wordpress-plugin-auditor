@@ -1,0 +1,459 @@
+rules:
+  - id: claude.php.wordpress.file.realpath-no-containment-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function concatenates a base/allowed directory with a request-influenced
+      remainder into a filesystem path, then canonicalizes the result with
+      realpath() -- but no strpos()/str_starts_with() prefix comparison against
+      that same base directory appears anywhere else in the function. realpath()
+      only resolves "../" segments and symlinks to an absolute path; on its own
+      it enforces NO directory boundary. A function that then checks only that
+      realpath() returned a non-false, existing/readable path (is_readable(),
+      is_file(), file_exists()) still accepts a value realpath() resolved
+      OUTSIDE the intended base directory -- e.g. "{$base}/../../../../etc/passwd"
+      canonicalizes cleanly and passes is_readable(). When the checked path then
+      reaches a file-read/serve/output sink, this is an arbitrary file read
+      (CWE-22). Compare the realpath()'d result's prefix against the
+      canonicalized, trailing-slash-normalized base directory before treating
+      the path as safe to read or serve.
+      The same misconception also appears in a second, more direct shape: a
+      path is built by concatenating a directory (a bare variable OR an
+      inline call such as dirname(__FILE__)/plugin_dir_path(__FILE__)) with a
+      selector/attribute value into a local variable, and realpath() is
+      applied INLINE, directly as the argument to include/require(_once) --
+      "include realpath($path);" -- with no intermediate resolved-path
+      variable and no allow-list or prefix check anywhere in the function.
+      Because realpath() only canonicalizes, an attacker-influenced selector
+      such as "../../../../wp-config" still resolves outside the intended
+      directory and is included directly, producing Local File Inclusion
+      (CWE-98). Validate the selector against a fixed allow-list (in_array(),
+      a lookup table, or a hardcoded path/prefix comparison such as
+      str_contains()/strpos()/str_starts_with()) before the include/require,
+      not only by wrapping it in realpath().
+      The base directory in either shape is just as often a bareword PHP
+      constant (a plugin's own "PLUGIN_DIR . 'views/' . $name"-style
+      define()'d root, or WordPress's own ABSPATH) as a $variable -- the
+      constant case is equally vulnerable and is treated identically.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+        - "CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program ('PHP Remote File Inclusion')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE -- realpath() called, only existence/readability re-checked:
+      #   $full_path = $allowed_directory . '/' . $file_path;
+      #   if (file_exists($full_path)) {
+      #       $full_path = realpath($full_path);
+      #       if (!$full_path || !is_readable($full_path)) { wp_die(...); }
+      #       readfile($full_path);
+      #   }
+      #   -> realpath() collapses "../" but nothing ever compares $full_path
+      #      against $allowed_directory afterward; a decrypted/decoded request
+      #      value like "../../../../wp-config.php" resolves cleanly and is
+      #      served. An unrelated strpos() elsewhere in the same function (e.g.
+      #      an HTTP Referer check) does not satisfy this rule -- the base
+      #      directory used in the containment check must be the SAME variable
+      #      concatenated into the path.
+      #
+      # TRUE POSITIVE -- realpath() applied directly at the include/require
+      # call site, no separate resolved-path variable, no guard at all:
+      #   $tpl = $base_dir . '/layout/' . $atts['layout'] . '.php';
+      #   include realpath($tpl);
+      #   -> realpath() is the ONLY thing between the attacker-influenced
+      #      selector and inclusion; it canonicalizes "../" segments but does
+      #      not confine the result to $base_dir, so a selector like
+      #      "../../../../wp-config" still resolves and is included.
+      #
+      # TRUE POSITIVE -- bareword constant base, existence-only re-check
+      # (same shape as the $variable case, just no intermediate $BASE var):
+      #   $path = realpath( MY_PLUGIN_VIEWS_DIR . "admin/{$name}.php" );
+      #   if ( ! $path || ! file_exists( $path ) ) { return; }
+      #   include $path;
+      #   -> A plugin's own define()'d root constant is just as attacker-
+      #      traversable as a $variable base once concatenated with an
+      #      unsanitized remainder; realpath()+file_exists() here is an
+      #      existence check, not a containment check.
+      #
+      # FALSE POSITIVE -- allow-list/prefix check guards the realpath()-
+      # wrapped include:
+      #   if ( str_contains( $tpl, $base_dir . '/layout/layout-1.php' )
+      #     || str_contains( $tpl, $base_dir . '/layout/layout-2.php' ) ) {
+      #       include realpath($tpl);
+      #   }
+      #   -> This rule stays silent (see pattern-not-inside below).
+      #
+      # FALSE POSITIVE -- prefix check added after realpath(), against the
+      # same base directory:
+      #   $resolved = realpath($full_path);
+      #   if (!$resolved || strpos($resolved, $allowed_directory) !== 0) {
+      #       wp_die(...);
+      #   }
+      #   -> This rule stays silent (see pattern-not-inside below).
+      #
+      # CONTEXT CHECK:
+      #   1. Is the remainder concatenated onto the base directory built from
+      #      request data (directly at the call site, or via a parameter/
+      #      decoded value passed in from a caller)?
+      #   2. Does the realpath()'d variable actually reach a read/serve sink
+      #      (readfile, file_get_contents, $wp_filesystem->get_contents(), a
+      #      custom read wrapper, echo of file contents) -- not just an
+      #      existence check with no further use?
+      #   3. Manually confirm no containment check exists under a variable/
+      #      helper shape this rule doesn't recognize (e.g. a sibling method).
+    patterns:
+      - pattern-either:
+          # SHAPE 1 -- realpath()'d result assigned to a variable (no sink
+          # requirement here; presence of this shape without a containment
+          # check is itself the finding -- see CONTEXT CHECK above for
+          # manual sink-reachability triage).
+          - patterns:
+              - pattern-either:
+                  # 2-operand concatenation (dir + remainder)
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $BASE . $REST;
+                        ...
+                        $RESOLVED = realpath($PATHVAR);
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $BASE . $REST;
+                        ...
+                        $PATHVAR = realpath($PATHVAR);
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $RESOLVED = realpath($BASE . $REST);
+                        ...
+                      }
+                  # 3-operand concatenation (dir + separator literal + remainder) --
+                  # the common "$base . '/' . $rest" path-join idiom. PHP's
+                  # left-associative '.' operator nests this as ($base . '/') . $rest,
+                  # so a 2-operand-only pattern above binds $BASE to the whole
+                  # "$base . '/'" fragment instead of the bare base-directory
+                  # variable; these alternatives capture $BASE at the correct depth.
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $BASE . $SEP . $REST;
+                        ...
+                        $RESOLVED = realpath($PATHVAR);
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $BASE . $SEP . $REST;
+                        ...
+                        $PATHVAR = realpath($PATHVAR);
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $RESOLVED = realpath($BASE . $SEP . $REST);
+                        ...
+                      }
+              # $BASE must bind to a plain variable/array-access/property-access
+              # reference, OR a bareword PHP constant (the define()'d
+              # "PLUGIN_DIR"/ABSPATH-style root a plugin concatenates a
+              # request-influenced remainder onto directly, with no
+              # intermediate $variable at all) -- not a compound
+              # concatenation fragment -- so the containment-check exclusions
+              # below compare against the true base-directory reference
+              # instead of an incidental sub-expression that would never
+              # recur verbatim in a real containment check.
+              - metavariable-regex:
+                  metavariable: $BASE
+                  regex: "^(\\$[A-Za-z_][A-Za-z0-9_]*(?:\\[[^\\]]*\\]|->[A-Za-z_][A-Za-z0-9_]*)*|[A-Z_][A-Z0-9_]*)$"
+              # A containment check may exist either as a bare statement/assignment
+              # RHS, or embedded inside an if-condition -- the deep-expression
+              # operator (<... ... ...>) is required for the latter, since a plain
+              # statement template only matches a bare call or assignment RHS, not
+              # an expression nested inside a conditional (confirmed empirically:
+              # "if (strpos(...) !== 0) {...}" does not match a bare-statement
+              # "strpos(...) !== 0;" template). The comparison operator itself
+              # (!==0 / ===0 / etc.) is intentionally NOT required in the exclusion
+              # -- any use of strpos()/str_starts_with() with $BASE as the prefix
+              # argument on the SAME variable concatenated into the path is treated
+              # as an attempted containment check.
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    strpos($ANY, $BASE);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    if (<... strpos($ANY, $BASE) ...>) {
+                      ...
+                    }
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    str_starts_with($ANY, $BASE);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    if (<... str_starts_with($ANY, $BASE) ...>) {
+                      ...
+                    }
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    validate_file(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    if (<... validate_file(...) ...>) {
+                      ...
+                    }
+                    ...
+                  }
+              # Fix-derived FP guard: $BASE itself (not the concatenated
+              # $PATHVAR) is first canonicalized via realpath() and that
+              # canonicalized form is strpos()-checked for containment within
+              # an allowed root BEFORE the flagged concatenation -- the common
+              # "validate the caller-supplied directory once up front, then
+              # build per-file paths from it in a scandir() loop" idiom. Since
+              # $BASE was already confirmed to resolve inside the allowed root,
+              # and $REST in the loop is a scandir()-enumerated existing
+              # filename rather than request-controlled data, the later
+              # per-file realpath() cannot escape containment even though the
+              # containment check itself never re-examines $PATHVAR/$RESOLVED
+              # directly.
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    $REALBASE = realpath($BASE);
+                    ...
+                    if (<... strpos($REALBASE, $ALLOWED) ...>) {
+                      ...
+                    }
+                    ...
+                  }
+              # Vendor fix-derived guard: a preg_replace() call anywhere in
+              # the function is treated as sanitization intent, matching the
+              # shape of a real-world patch that strips traversal sequences
+              # ("../", "..\\") from the path in-place after realpath()
+              # rather than adding a named prefix/containment check. Bare
+              # (not bound to $BASE/$RESOLVED) for the same reason the sibling
+              # file-inclusion rules in this category treat it loosely --
+              # matches file-exists-not-sanitizer.yaml's identical clause.
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    preg_replace(...);
+                    ...
+                  }
+          # SHAPE 2 -- realpath() applied INLINE, directly as the argument to
+          # include/require(_once), with no intermediate "$resolved =
+          # realpath(...)" assignment for SHAPE 1's exclusions to anchor on,
+          # and no allow-list/prefix guard of any kind. $DIR is intentionally
+          # unconstrained (unlike $BASE above) -- the directory component is
+          # just as often an inline call (dirname(__FILE__),
+          # plugin_dir_path(__FILE__)) as a bare variable, and there is no
+          # base-directory variable to anchor a containment check against
+          # regardless.
+          - patterns:
+              - pattern-either:
+                  # 2-operand concatenation (dir + remainder)
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $DIR . $REST;
+                        ...
+                        include realpath($PATHVAR);
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $DIR . $REST;
+                        ...
+                        include(realpath($PATHVAR));
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $DIR . $REST;
+                        ...
+                        include_once realpath($PATHVAR);
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $DIR . $REST;
+                        ...
+                        include_once(realpath($PATHVAR));
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $DIR . $REST;
+                        ...
+                        require realpath($PATHVAR);
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $DIR . $REST;
+                        ...
+                        require(realpath($PATHVAR));
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $DIR . $REST;
+                        ...
+                        require_once realpath($PATHVAR);
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $DIR . $REST;
+                        ...
+                        require_once(realpath($PATHVAR));
+                        ...
+                      }
+                  # 3-operand concatenation (dir + separator literal + remainder)
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $DIR . $SEP . $REST;
+                        ...
+                        include realpath($PATHVAR);
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $DIR . $SEP . $REST;
+                        ...
+                        include(realpath($PATHVAR));
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $DIR . $SEP . $REST;
+                        ...
+                        include_once realpath($PATHVAR);
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $DIR . $SEP . $REST;
+                        ...
+                        include_once(realpath($PATHVAR));
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $DIR . $SEP . $REST;
+                        ...
+                        require realpath($PATHVAR);
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $DIR . $SEP . $REST;
+                        ...
+                        require(realpath($PATHVAR));
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $DIR . $SEP . $REST;
+                        ...
+                        require_once realpath($PATHVAR);
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $PATHVAR = $DIR . $SEP . $REST;
+                        ...
+                        require_once(realpath($PATHVAR));
+                        ...
+                      }
+              # Guards derived from real-world fixes for this exact shape: a
+              # hardcoded allow-list of full resolved paths (str_contains()
+              # against a known-good absolute path) or a value-membership
+              # check (in_array() against a fixed list) before the
+              # realpath()-wrapped include/require is reached.
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    str_contains(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    if (<... str_contains(...) ...>) {
+                      ...
+                    }
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    in_array(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    if (<... in_array(...) ...>) {
+                      ...
+                    }
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    validate_file(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    if (<... validate_file(...) ...>) {
+                      ...
+                    }
+                    ...
+                  }

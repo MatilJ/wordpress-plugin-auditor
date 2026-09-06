@@ -1,0 +1,181 @@
+rules:
+  - id: claude.php.wordpress.access.nonce-result-ignored
+    languages: [php]
+    severity: HIGH
+    message: |
+      wp_verify_nonce() / check_admin_referer() / check_ajax_referer() is
+      called as an expression statement whose return value is discarded.
+      These functions return false on failure but do NOT halt execution —
+      the caller must act on the return value (typically wp_die() or
+      early return). As written, a forged or missing nonce is accepted
+      as valid (CWE-352).
+      Wrap the call in an if check or use check_admin_referer(...) with
+      $die=true (the default).
+    metadata:
+      category: security
+      cwe: "CWE-352: Cross-Site Request Forgery (CSRF)"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Request Forgery (CSRF)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_verify_nonce/
+    patterns:
+      - pattern-either:
+          - pattern: wp_verify_nonce(...);
+      - pattern-not-inside: if (<... wp_verify_nonce(...) ...>) { ... }
+      - pattern-not-inside: if (<... wp_verify_nonce(...) ...>) { ... } else { ... }
+      - pattern-not-inside: $X = <... wp_verify_nonce(...) ...>;
+      - pattern-not-inside: return <... wp_verify_nonce(...) ...>;
+
+  # check_ajax_referer() with $stop=false does NOT halt execution on failure.
+  # It returns false but the caller must act on the return value.
+  # With $stop=true (default), check_ajax_referer() calls wp_die() on failure
+  # and IS a valid nonce check — only the $stop=false variant is dangerous.
+  # Source: pluggable.php:1441 — if ( $stop && false === $result ) { wp_die(-1, 403); }
+  - id: claude.php.wordpress.access.check-ajax-referer-stop-false-ignored
+    languages: [php]
+    severity: HIGH
+    message: |
+      check_ajax_referer() is called with $stop=false (third argument) and the
+      return value is discarded. With $stop=false, check_ajax_referer() returns
+      false on invalid nonces but does NOT halt execution — the request continues
+      as if the nonce were valid (CWE-352).
+      Either remove the false argument (default $stop=true halts on failure),
+      or check the return value: if (!check_ajax_referer(..., ..., false)) wp_die();
+    metadata:
+      category: security
+      cwe: "CWE-352: Cross-Site Request Forgery (CSRF)"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Request Forgery (CSRF)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/check_ajax_referer/
+    patterns:
+      - pattern: check_ajax_referer($ACTION, $ARG, false);
+      - pattern-not-inside: if (<... check_ajax_referer(..., ..., false) ...>) { ... }
+      - pattern-not-inside: if (<... check_ajax_referer(..., ..., false) ...>) { ... } else { ... }
+      - pattern-not-inside: $X = <... check_ajax_referer(..., ..., false) ...>;
+      - pattern-not-inside: return <... check_ajax_referer(..., ..., false) ...>;
+
+  # Custom nonce-wrapper indirection variant of nonce-result-ignored above.
+  # Plugins that build a shared base-controller class frequently wrap
+  # wp_verify_nonce() in a helper method that computes and RETURNS a
+  # pass/fail boolean instead of calling wp_die() itself, relying on every
+  # caller to check that return value. This is the same CWE-352 gap as the
+  # bare wp_verify_nonce() case above, just hidden behind one more level of
+  # indirection: a reviewer skimming the caller sees "$this->checkNonce(...);"
+  # and assumes protection is in effect.
+  - id: claude.php.wordpress.access.custom-nonce-wrapper-result-ignored
+    languages: [php]
+    severity: HIGH
+    message: |
+      A method/function whose name matches a common custom nonce-verification
+      wrapper naming convention (checkNonce, checkPost, verifyNonce,
+      checkRequest, validateNonce, etc.) is called as a bare statement
+      expression, discarding its return value (CWE-352). Plugins that build a
+      shared base-controller class frequently wrap wp_verify_nonce() in a
+      helper that computes and returns a pass/fail boolean rather than
+      calling wp_die() itself, then rely on every caller to check that return
+      value. A caller that invokes the wrapper without consulting its result
+      silently accepts a forged or missing nonce and falls through into the
+      state-changing logic below — the exact same gap as calling
+      wp_verify_nonce() directly and discarding IT (see the sibling
+      nonce-result-ignored rule), just hidden behind indirection that makes
+      it look, at a glance, like the request is protected.
+
+      Confirmed real-world shape (audit-derived): a shared base ViewController
+      class defines checkPost($processPostData) which verifies
+      wp_verify_nonce($_POST['sp-nonce'], $this->form_action) and returns
+      false on mismatch (with a narrow wp_die() carve-out gated on unrelated
+      POST fields a forged request simply omits); every action_*() handler in
+      a subclass calls $this->checkPost(false); without checking the return
+      value before proceeding into $wpdb writes / option resets / queue
+      deletes — several handlers GET-reachable, CVSS 5.4 CSRF.
+
+      Manually confirm before reporting: (1) the named method's own body
+      genuinely computes its result from wp_verify_nonce()/
+      check_admin_referer() and returns a boolean rather than wp_die()-ing
+      unconditionally on failure — read its definition directly; Semgrep
+      cannot resolve it across files/classes in this pattern-mode rule;
+      (2) the caller is not already stopped by an earlier, unrelated
+      current_user_can()/nonce gate in the same function.
+
+      Fix: check the wrapper's return value at every call site
+      (if (! $this->checkNonce(...)) { wp_die(...); }), or make the wrapper
+      itself unconditionally wp_die()/throw on failure so no caller can omit
+      the check.
+    metadata:
+      category: security
+      cwe: "CWE-352: Cross-Site Request Forgery (CSRF)"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Request Forgery (CSRF)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_verify_nonce/
+        - https://cwe.mitre.org/data/definitions/352.html
+    patterns:
+      - pattern: $OBJ->$METHOD(...);
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: "(?i)^(check|verify|validate|is_?valid)_?(nonce|post|request|referer|security)([a-z_]*)?$"
+      - pattern-not-inside: if (<... $OBJ->$METHOD(...) ...>) { ... }
+      - pattern-not-inside: if (<... $OBJ->$METHOD(...) ...>) { ... } else { ... }
+      - pattern-not-inside: $X = <... $OBJ->$METHOD(...) ...>;
+      - pattern-not-inside: return <... $OBJ->$METHOD(...) ...>;
+      # The wrapper's own definition contains a bare-statement call to
+      # itself only in the degenerate recursive case — excluded so the
+      # definition site is never mistaken for a caller site.
+      - pattern-not-inside: |
+          function $METHOD(...) {
+            ...
+          }
+      # Self-halting wrapper, definition visible in the same class/file as
+      # its callers: the wrapper's own body unconditionally exit()s/wp_die()s
+      # inside the nonce-failure branch, so it never returns control to a
+      # caller on failure — no return-value check is needed, the caller
+      # being "bare" is safe by construction. Only suppresses when the
+      # definition is co-located (same class) with the call site; a wrapper
+      # defined in a different class/file (Finding 1's actual shape — a
+      # shared base-controller method inherited by a subclass in another
+      # file) is not visible to this exclusion and remains flagged,
+      # correctly defaulting to "needs manual triage."
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $METHOD(...) {
+              ...
+              if (<... wp_verify_nonce(...) ...>) {
+                ...
+                exit(...);
+                ...
+              }
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $METHOD(...) {
+              ...
+              if (<... wp_verify_nonce(...) ...>) {
+                ...
+                wp_die(...);
+                ...
+              }
+              ...
+            }
+            ...
+          }

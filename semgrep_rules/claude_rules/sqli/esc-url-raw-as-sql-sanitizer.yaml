@@ -1,0 +1,31 @@
+rules:
+  - id: claude.php.wordpress.sqli.esc-url-raw-as-sql-sanitizer
+    languages: [php]
+    severity: HIGH
+    message: |
+      esc_url_raw() is used to sanitize a value inside a $wpdb query method.
+      esc_url_raw() validates URL structure and strips dangerous protocols,
+      but single quotes SURVIVE in path and query components (e.g.,
+      /path/O'Brien or ?q=test'value). This does NOT prevent SQL injection
+      in quoted string contexts (CWE-89).
+      Use $wpdb->prepare() with %s placeholder instead.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: LOW
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/esc_url_raw/
+    patterns:
+      - pattern-either:
+          - pattern: $wpdb->query(<... esc_url_raw($X) ...>)
+          - pattern: $wpdb->get_results(<... esc_url_raw($X) ...>)
+          - pattern: $wpdb->get_row(<... esc_url_raw($X) ...>)
+          - pattern: $wpdb->get_var(<... esc_url_raw($X) ...>)
+          - pattern: $wpdb->get_col(<... esc_url_raw($X) ...>)
+      - pattern-not-inside: $wpdb->prepare(...)

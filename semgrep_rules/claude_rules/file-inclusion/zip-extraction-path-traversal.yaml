@@ -1,0 +1,85 @@
+rules:
+  - id: claude.php.wordpress.file.zip-extraction-path-traversal
+    languages: [php]
+    severity: HIGH
+    message: |
+      ZipArchive::extractTo() is called without validating individual entry
+      names for path traversal sequences. A malicious ZIP archive can contain
+      entries with ../ prefixes that write files outside the intended
+      extraction directory, including .php files to web-accessible locations
+      (CWE-22 "Zip Slip").
+      Iterate entries with getNameIndex(), reject any containing '..' or
+      starting with '/', and use realpath() on the resolved destination to
+      verify it stays within the target directory.
+    metadata:
+      category: security
+      cwe: "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - https://snyk.io/research/zip-slip-vulnerability
+        - https://www.php.net/manual/en/ziparchive.extractto.php
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — extractTo() with no entry name validation:
+      #   $zip = new ZipArchive();
+      #   $zip->open($file);
+      #   $zip->extractTo($dest);
+      #   → All entries extracted blindly. If the ZIP is user-supplied
+      #   (upload, import, backup restore), this is exploitable.
+      #
+      # FALSE POSITIVE — WordPress core unzip_file():
+      #   WP_Filesystem uses unzip_file() which internally validates paths.
+      #   If the code calls unzip_file() instead of ZipArchive directly, safe.
+      #
+      # FALSE POSITIVE — entry name validation loop:
+      #   for ($i = 0; $i < $zip->numFiles; $i++) {
+      #       $name = $zip->getNameIndex($i);
+      #       if (strpos($name, '..') !== false) continue;
+      #       $zip->extractFromIndex($i, $dest);
+      #   }
+      #   → Entries are validated individually. Confirm the check is robust.
+      #
+      # CONTEXT CHECK — is the ZIP user-supplied?
+      #   If the ZIP file comes from a hardcoded plugin resource (not user
+      #   upload), the risk is greatly reduced. Verify the source.
+    patterns:
+      - pattern: $ZIP->extractTo(...);
+      - pattern-not-inside: |
+          function $F(...) {
+            ...
+            realpath(...);
+            ...
+            $ZIP->extractTo(...);
+            ...
+          }
+
+  - id: claude.php.wordpress.file.zip-extraction-path-traversal-pclzip
+    languages: [php]
+    severity: HIGH
+    message: |
+      PclZip extract() is called without validating archive entry paths for
+      traversal sequences. A malicious ZIP with ../ prefixed entries can
+      write files outside the intended directory (CWE-22 "Zip Slip").
+      Use PCLZIP_CB_PRE_EXTRACT callback to validate each entry name, or
+      switch to WordPress core unzip_file() which handles path validation.
+    metadata:
+      category: security
+      cwe: "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - https://snyk.io/research/zip-slip-vulnerability
+    pattern-either:
+      - pattern: $PCLZIP->extract(PCLZIP_OPT_PATH, $DEST)
+      - pattern: $PCLZIP->extract(PCLZIP_OPT_PATH, $DEST, ...)

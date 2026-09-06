@@ -1,0 +1,225 @@
+rules:
+  - id: claude.php.wordpress.access-control.role-field-value-no-allowlist-user-creation
+    languages: [php]
+    severity: HIGH
+    message: |
+      A stored per-field submission value, read from a key whose name denotes
+      a role selector, is assigned to the 'role' element of the data array
+      used to create or update a WordPress user — with no allow-list
+      membership check (e.g. in_array()) anywhere in the class restricting
+      the value to the roles the site owner actually configured for that
+      field (CWE-266 — Incorrect Privilege Assignment).
+
+      Also flags the plugin-internal-group variant of the same class: a
+      registration/profile handler merges arbitrary custom-field submission
+      data into the array it will persist, then hands that array to a
+      user/profile persistence method — with no in_array()-style allow-list
+      check anywhere in that function gating a role/group/usergroup-named
+      element before it is written. Native WP 'role' and plugin-private
+      "usergroup"/"groupid" identifiers are the same privilege-assignment
+      sink conceptually; only the storage API differs.
+
+      A self-registration or profile form that lets a visitor pick from a
+      constrained set of roles must validate the submitted selection against
+      the field's own configured allow-list before it reaches user creation.
+      Generic string sanitizers (sanitize_text_field(), sanitize_key(),
+      trim(), esc_attr()) only clean the string's characters — they do not
+      restrict WHICH role can be chosen. Without that allow-list check, a
+      visitor can submit an arbitrary role string (e.g. "administrator") and
+      self-register with elevated privileges.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - The registration/profile handler is reachable without
+          authentication or by a low-privileged role (no capability check
+          gates the flow).
+        - The role value traces back to raw request input (a form field,
+          block attribute, or REST parameter) rather than a hardcoded
+          string or a value read exclusively from site-configured options
+          not influenced by the current request.
+        - No in_array($value, $allowed_roles, true) (or equivalent
+          membership check) exists anywhere in the class for the role
+          field's submitted value.
+
+        - A function merges a custom/dynamic-field data array into the
+          array that a later call in the same function persists via a
+          profile/user/member-named setter method, with no allow-list
+          check on a role/group/usergroup-named element anywhere in that
+          function (the wpForo-class shape: self-registration merges
+          request-controlled custom fields into $user, then
+          $this->update_profile_fields($userid, $user, false) persists a
+          'groupid'/'usergroup' element unchecked).
+
+      FALSE POSITIVE indicators:
+        - The class contains a conditional keyed on a role-like field type
+          that validates the submitted value with in_array() (or an
+          equivalent allow-list check) before it is stored.
+        - The role value is a hardcoded literal, not derived from request
+          input.
+        - The handler requires current_user_can('promote_users') or
+          manage_options before the role is applied.
+        - The same function that merges custom-field data and calls the
+          persistence setter also contains a top-level conditional gated on
+          a role/group/usergroup-named expression (the allow-list/strip
+          guard added by the fix) before the setter call.
+    metadata:
+      category: security
+      cwe: "CWE-266: Incorrect Privilege Assignment"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/266.html
+        - https://developer.wordpress.org/reference/functions/wp_insert_user/
+        - https://owasp.org/www-community/vulnerabilities/Insecure_Direct_Object_Reference
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      function $FN(...) {
+                        ...
+                        $ROLE = $OBJ->$STORE[$ROLEKEY]['value'];
+                        ...
+                        $DATA['role'] = $ROLEEXPR;
+                        ...
+                      }
+                  - pattern: |
+                      function $FN(...) {
+                        ...
+                        $ROLE = $OBJ->$STORE[$ROLEKEY]['value'];
+                        ...
+                        $DATA["role"] = $ROLEEXPR;
+                        ...
+                      }
+                  - pattern: |
+                      function $FN(...) {
+                        ...
+                        $ROLE = $OBJ->$STORE[$ROLEKEY]['value'];
+                        ...
+                        wp_insert_user(array(..., 'role' => $ROLEEXPR, ...));
+                        ...
+                      }
+                  - pattern: |
+                      function $FN(...) {
+                        ...
+                        $ROLE = $OBJ->$STORE[$ROLEKEY]['value'];
+                        ...
+                        wp_update_user(array(..., 'role' => $ROLEEXPR, ...));
+                        ...
+                      }
+              - metavariable-regex:
+                  metavariable: $ROLEKEY
+                  regex: (?i).*role.*
+              - metavariable-pattern:
+                  metavariable: $ROLEEXPR
+                  patterns:
+                    - pattern-either:
+                        - pattern: $ROLE
+                        - pattern: sanitize_text_field($ROLE)
+                        - pattern: sanitize_key($ROLE)
+                        - pattern: esc_attr($ROLE)
+                        - pattern: trim($ROLE)
+          # Plugin-private group/usergroup variant: a data array assembled
+          # by merging arbitrary custom-field submission data is handed
+          # straight to a profile/user persistence setter in the same
+          # function, with no allow-list gate in between (CVE-2023-47868
+          # class — wpForo's update() merges $_POST-derived custom fields
+          # into $user, then update_profile_fields($userid, $user, false)
+          # persists an unchecked 'groupid' element). Metavariable filters
+          # are nested inside this alternative (not shared with the branches
+          # above) because a top-level metavariable-regex on a metavariable
+          # only bound by one pattern-either alternative discards matches
+          # from every OTHER alternative that never binds it.
+          - patterns:
+              - pattern: |
+                  function $FN(...) {
+                    ...
+                    $DATA2 = array_merge($CUSTOM2, $DATA2);
+                    ...
+                    $OBJ2->$SETTER2($USERID2, $DATA2, ...);
+                    ...
+                  }
+              - metavariable-regex:
+                  metavariable: $SETTER2
+                  regex: (?i).*(profile|field|user|member|account).*
+              - metavariable-regex:
+                  metavariable: $CUSTOM2
+                  regex: (?i).*(custom|extra|dynamic|meta|field).*
+      # The patch for the seeding CVE added exactly this shape: a conditional
+      # keyed on a role-like field type that gates an in_array() allow-list
+      # check before the submitted value is stored/used.
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                class $CLASS {
+                  ...
+                  function $FN2(...) {
+                    ...
+                    if (<... $ROLETYPE ...>) {
+                      ...
+                      if (<... in_array($V, $ALLOWED, ...) ...>) {
+                        ...
+                      }
+                      ...
+                    }
+                    ...
+                  }
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $ROLETYPE
+                regex: (?i).*role.*
+      # FP guard for the merge-then-persist branch: the fix for the seeding
+      # CVE inserted a top-level conditional gated on the group/role-named
+      # field's value, in the SAME function as the merge + setter call,
+      # before the setter runs (wpForo added `if ($gid = ... 'groupid')
+      # {...}` between validate and sanitize inside update()). Uses literal
+      # keyword alternation rather than metavariable-regex on a deep-match
+      # ellipsis metavariable: on a large real-world file, an unconstrained
+      # <... $MV ...> combined with a nested metavariable-regex inside
+      # pattern-not-inside was empirically observed to over-suppress
+      # (excluded the true-positive match even where no such guard exists
+      # anywhere in the file) — confirmed via the two-version CVE oracle.
+      - pattern-not-inside:
+          patterns:
+            - pattern-either:
+                - pattern: |
+                    function $FN(...) {
+                      ...
+                      if (<... 'groupid' ...>) {
+                        ...
+                      }
+                      ...
+                      $OBJ2->$SETTER2($USERID2, $DATA2, ...);
+                      ...
+                    }
+                - pattern: |
+                    function $FN(...) {
+                      ...
+                      if (<... 'usergroup' ...>) {
+                        ...
+                      }
+                      ...
+                      $OBJ2->$SETTER2($USERID2, $DATA2, ...);
+                      ...
+                    }
+                - pattern: |
+                    function $FN(...) {
+                      ...
+                      if (<... 'role' ...>) {
+                        ...
+                      }
+                      ...
+                      $OBJ2->$SETTER2($USERID2, $DATA2, ...);
+                      ...
+                    }
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"

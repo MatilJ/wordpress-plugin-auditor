@@ -1,0 +1,136 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.upload-dir-mkdir-no-index-protection
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      mkdir() or wp_mkdir_p() (WordPress's own recursive-mkdir wrapper)
+      creates a new subdirectory beneath wp_upload_dir() (a
+      web-accessible content path) to hold user-submitted or
+      plugin-generated file content, but no index.html or .htaccess guard
+      is ever written into that directory anywhere in the same routine.
+      WordPress upload directories are served directly by the web server,
+      so a directory with no index.html can be listed on hosts where
+      directory listing is enabled, and with no deny-all .htaccess any
+      file whose name an attacker learns or guesses can be fetched
+      directly over HTTP — bypassing any capability/nonce check the
+      plugin performs on its own download handler (CWE-200 / CWE-552).
+
+      Fix: immediately after creating the directory, write BOTH an empty
+      index.html/index.php AND an .htaccess containing
+      `Deny from all` / `Require all denied` before any file is saved
+      inside it.
+
+      TRIAGE:
+        1. Confirm $DIR resolves to a path under wp_upload_dir() rather
+           than outside-webroot storage.
+        2. Confirm the directory goes on to hold user-submitted or
+           otherwise sensitive content (an upload, signature, export,
+           attachment) rather than already-public assets.
+        3. Search the enclosing function for a companion fopen(...)/
+           file_put_contents(...) call targeting '.htaccess' or
+           'index.html' — if present anywhere in the same function (even a
+           few lines away or in a sibling branch), this is very likely
+           already remediated; downgrade to FP.
+    metadata:
+      category: security
+      cwe: "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Information Disclosure"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/200.html
+        - https://cwe.mitre.org/data/definitions/552.html
+    patterns:
+      - pattern-either:
+          - pattern: mkdir($DIR, ...)
+          - pattern: wp_mkdir_p($DIR)
+          # WP_Filesystem API abstraction — the WP-recommended way to create
+          # directories from admin-context code, functionally equivalent to
+          # the bare mkdir()/wp_mkdir_p() calls above.
+          - pattern: $FS->mkdir($DIR)
+      - pattern-inside: |
+          function $FUNC(...) {
+            ...
+            $UPLOADVAR = wp_upload_dir();
+            ...
+          }
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                mkdir($DIR, ...);
+                ...
+                $FH = fopen($GUARD, ...);
+                ...
+            - metavariable-regex:
+                metavariable: $GUARD
+                regex: (?i).*(\.htaccess|index\.html).*
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                mkdir($DIR, ...);
+                ...
+                $FH = @fopen($GUARD, ...);
+                ...
+            - metavariable-regex:
+                metavariable: $GUARD
+                regex: (?i).*(\.htaccess|index\.html).*
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                wp_mkdir_p($DIR);
+                ...
+                $FH = fopen($GUARD, ...);
+                ...
+            - metavariable-regex:
+                metavariable: $GUARD
+                regex: (?i).*(\.htaccess|index\.html).*
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                wp_mkdir_p($DIR);
+                ...
+                $FH = @fopen($GUARD, ...);
+                ...
+            - metavariable-regex:
+                metavariable: $GUARD
+                regex: (?i).*(\.htaccess|index\.html).*
+      # File_Logger-shape idiom: the guard files are written via
+      # file_put_contents() rather than fopen()/fwrite() — covers both
+      # mkdir() and wp_mkdir_p() creation calls.
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                mkdir($DIR, ...);
+                ...
+                file_put_contents($GUARD, ...);
+                ...
+            - metavariable-regex:
+                metavariable: $GUARD
+                regex: (?i).*(\.htaccess|index\.html|index\.php).*
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                wp_mkdir_p($DIR);
+                ...
+                file_put_contents($GUARD, ...);
+                ...
+            - metavariable-regex:
+                metavariable: $GUARD
+                regex: (?i).*(\.htaccess|index\.html|index\.php).*
+      # WP_Filesystem guard-write idiom: the same $FS object's put_contents()
+      # method writes the index.html/.htaccess guard instead of fopen()/
+      # file_put_contents().
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                $FS->mkdir($DIR);
+                ...
+                $FS->put_contents($GUARD, ...);
+                ...
+            - metavariable-regex:
+                metavariable: $GUARD
+                regex: (?i).*(\.htaccess|index\.html|index\.php).*

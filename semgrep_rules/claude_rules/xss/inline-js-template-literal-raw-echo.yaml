@@ -1,0 +1,74 @@
+rules:
+  - id: claude.php.wordpress.xss.inline-js-template-literal-raw-echo
+    languages: [php]
+    severity: HIGH
+    message: |
+      A PHP variable is echoed directly inside a JavaScript template literal
+      (backtick-delimited string) embedded in a PHP view/template, with no
+      esc_js(), wp_json_encode(), or json_encode() wrapping (CWE-79).
+
+      A backtick is never valid PHP or plain-HTML-attribute syntax, so its
+      presence around an echoed variable is a strong signal that the value is
+      being interpolated into inline JavaScript (an onXXX="" handler or a
+      <script> block) rather than plain markup. sanitize_text_field()- or
+      wp_kses_post()-style sanitization applied when the value was stored
+      strips HTML tags but does not neutralize backticks or quote characters,
+      so a stored value containing a backtick terminates the template literal
+      early and allows injection of arbitrary JavaScript. This is common in
+      legacy inline onclick=/inline <script> code that predates
+      wp_localize_script()-based localization (which JSON-encodes safely).
+
+      Wrong-escaper variant: the echoed expression is not a bare variable but
+      a call to an HTML sanitizer/stripper (wp_kses(), wp_kses_post(),
+      wp_kses_data(), sanitize_text_field(), sanitize_textarea_field(),
+      wp_strip_all_tags(), strip_tags()) applied directly at the echo site.
+      These functions sanitize HTML tag/attribute syntax but have no concept
+      of JavaScript template-literal substitution syntax — none of them touch
+      `$`, `{`, or `}`. Because the whole sanitizer output is spliced directly
+      inside the already-open outer template literal, any `${JS-expression}`
+      sequence surviving inside it is evaluated as live JavaScript the instant
+      the script block runs — no HTML tag, quote-attribute breakout, or event
+      handler is needed. Confirmed real-world instance: a WP plugin's popup
+      subscription-form renderer echoed `wp_kses(html_entity_decode($form),
+      $allowedtags)` directly inside a JS template literal; a submitted field
+      value containing `${alert(document.domain)}` executed unescaped.
+
+      TRIAGE: confirm the echoed value originates from a stored/admin-settable
+      or directly request-controlled source reachable by a non-admin role,
+      and that no esc_js()/wp_json_encode()/json_encode() call wraps the
+      sanitizer's result before it reaches the backtick string. A hit is a
+      false positive only if the value is a hardcoded literal, a numeric
+      cast, or the sanitizer call itself is wrapped by one of those
+      JS-context-safe functions.
+
+      Fix: wrap the echoed value (or the sanitizer's output) in esc_js(), or
+      replace the inline interpolation with wp_localize_script()/
+      wp_add_inline_script() using wp_json_encode() for safe JS-context
+      serialization.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/esc_js/
+        - https://developer.wordpress.org/reference/functions/wp_localize_script/
+        - https://developer.wordpress.org/reference/functions/wp_kses/
+        - https://owasp.org/www-community/attacks/xss/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          # Shape 1: a bare variable echoed directly, no escaper at all.
+          - pattern-regex: '`[^`]{0,200}<\?php[\s\S]{0,150}?\becho\s+(?!esc_js\(|wp_json_encode\(|json_encode\(|esc_html\(|esc_attr\(|esc_url\()\$[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]\n]{0,60}\]|->[A-Za-z_][A-Za-z0-9_]*)*\s*;[\s\S]{0,20}?\?>[^`]{0,200}`'
+          # Shape 2: an HTML sanitizer/stripper call echoed directly — the
+          # wrong-escaper-for-context variant (see message above).
+          - pattern-regex: '`[^`]{0,200}<\?php[\s\S]{0,150}?\becho\s+(?!esc_js\(|wp_json_encode\(|json_encode\()(?:wp_kses(?:_post|_data)?|sanitize_text_field|sanitize_textarea_field|wp_strip_all_tags|strip_tags)\s*\([\s\S]{0,300}?\)\s*;[\s\S]{0,20}?\?>[^`]{0,200}`'

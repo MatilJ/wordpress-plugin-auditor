@@ -1,0 +1,135 @@
+rules:
+  - id: claude.php.wordpress.access.save-post-hook-post-read-no-auth
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A function that checks DOING_AUTOSAVE — the standard guard used in
+      'save_post' hook callbacks — reads from $_POST without calling
+      current_user_can() or verifying a nonce. The 'save_post' hook fires
+      for every authenticated user who can save a post (including Contributors),
+      so any user can craft a POST request that triggers this code path with
+      attacker-supplied values (CWE-862).
+
+      Confirmed pattern (post-expirator 4.10.1 ManualPostTrigger.php:149):
+        public function processQuickEditUpdate($postId) {
+          if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) { return; }
+          // phpcs:disable WordPress.Security.NonceVerification.Missing
+          $view = $_POST['future_workflow_view'] ?? '';
+          // ... triggers workflow on post without capability check
+        }
+      Contributor with post-edit access could trigger "Publish" workflows,
+      bypassing the editorial review process (CVSS 5.4, CWE-862).
+
+      TRIAGE: Confirm the function is registered via add_action('save_post', ...).
+      Verify no capability check exists in the call chain or at registration time.
+      Check whether the write operation is exploitable by a Contributor or lower.
+
+      Fix: add current_user_can('appropriate_capability') before reading $_POST.
+      Also add and verify a nonce specific to this form/operation.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/hooks/save_post/
+        - https://developer.wordpress.org/apis/security/user-capabilities-and-roles/
+        - https://developer.wordpress.org/apis/security/nonces/
+    patterns:
+      # Primary heuristic: function contains the DOING_AUTOSAVE guard.
+      # This is the canonical save_post callback opener in WordPress plugins.
+      - pattern-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... DOING_AUTOSAVE ...>) { ... }
+            ...
+          }
+      # The function reads attacker-controlled POST data.
+      - pattern: $_POST[$KEY]
+      # Exclude: wp_verify_nonce() present — either as standalone statement or
+      # inside an if-condition (the most common usage pattern).
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            wp_verify_nonce(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... wp_verify_nonce(...) ...>) { ... }
+            ...
+          }
+      # Exclude: check_ajax_referer() — wrapper around wp_verify_nonce.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            check_ajax_referer(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... check_ajax_referer(...) ...>) { ... }
+            ...
+          }
+      # Exclude: check_admin_referer() — nonce verification for admin form submissions.
+      # Calls wp_verify_nonce() and wp_die() on failure; provides the same guarantee
+      # as wp_verify_nonce() for non-AJAX admin page submissions.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            check_admin_referer(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... check_admin_referer(...) ...>) { ... }
+            ...
+          }
+      # Exclude: current_user_can() present as standalone or inside if-condition.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can(...) ...>) { ... }
+            ...
+          }
+      # Exclude: OOP userCan* method calls — both standalone and in if-condition.
+      # These are authorization wrappers that delegate to current_user_can().
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  $OBJ->$CAN_METHOD(...);
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $CAN_METHOD
+                regex: "(?i)^userCan"
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  if (<... $OBJ->$CAN_METHOD(...) ...>) { ... }
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $CAN_METHOD
+                regex: "(?i)^userCan"
+      # Exclude: reading the nonce value itself (e.g. $nonce = $_POST['_wpnonce']).
+      - pattern-not: $_POST['_wpnonce']
+      - pattern-not: $_POST["_wpnonce"]

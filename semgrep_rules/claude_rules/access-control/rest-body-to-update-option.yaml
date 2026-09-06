@@ -1,0 +1,95 @@
+rules:
+  - id: claude.php.wordpress.auth.rest-body-to-update-option
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      Data from a WP REST API request body flows directly into update_option() or
+      add_option() (CWE-862 + CWE-79). If the REST endpoint has no permission_callback
+      (or uses a bypassable external check), unauthenticated attackers can overwrite
+      plugin options. If the stored value is later echoed inside a <script> block without
+      esc_js() or wp_json_encode(), this constitutes Stored XSS that fires for all visitors.
+      Verify: (1) the route has a real permission_callback, and (2) the option is escaped
+      with esc_js() / wp_json_encode() wherever it is output in a JavaScript context.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp:
+        - "A01:2021 - Broken Access Control"
+        - "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      # TRIAGE GUIDANCE — Common FP patterns:
+      #
+      # 1. __return_true + internal manage_options check — VERY COMMON FP.
+      #    Pattern: route registered with 'permission_callback' => '__return_true', but
+      #    the callback function contains its own nonce + current_user_can('manage_options')
+      #    check with an early return on failure:
+      #      public function action_edit_xxx($request) {
+      #          if (!wp_verify_nonce($request->get_header('X-WP-Nonce'), 'wp_rest')) {
+      #              return ['status' => 'fail', ...];
+      #          }
+      #          if (!current_user_can('manage_options')) {
+      #              return ['status' => 'fail', ...];
+      #          }
+      #          $data = $request->get_json_params();
+      #          update_option('plugin_key', $data);
+      #      }
+      #    These are PR:H (admin-only) — out of scope for Wordfence bounty.
+      #    Confirm: read the callback function and verify the early return on auth failure.
+      #    The __return_true + internal-check pattern is poor practice but not exploitable
+      #    when the early return is structurally present and not commented out.
+      #
+      # 2. Route with proper permission_callback (no __return_true) — NOT a FP.
+      #    If the route has permission_callback => function() { return current_user_can(...); }
+      #    and the taint path leads to update_option(), this IS a potential FP (the auth is
+      #    enforced at the permission_callback level). Verify the permission_callback is adequate.
+      #
+      # 3. Sanitized value stored in option — FP by design.
+      #    If the tainted value passes through a sanitizer listed in pattern-sanitizers
+      #    (intval, absint, sanitize_key, sanitize_email, wp_kses, etc.), the rule should
+      #    not fire. If it does, the sanitizer wrapper pattern may not match — file a bug.
+      references:
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/
+        - https://developer.wordpress.org/apis/security/escaping/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: $REQUEST->get_body()
+    pattern-sinks:
+      - pattern-either:
+          - pattern: update_option($KEY, $VALUE, ...)
+          - pattern: add_option($KEY, $VALUE, ...)
+          - pattern: update_site_option($KEY, $VALUE, ...)
+    pattern-sanitizers:
+      - pattern-either:
+          # Numeric casts — no XSS characters possible
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: (bool) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          # Keys / identifiers — restricted charsets that exclude JS injection chars
+          - pattern: sanitize_key(...)
+          # Emails — RFC 5321 charset cannot contain '  ; ( ) /
+          - pattern: sanitize_email(...)
+          - pattern: filter_var($X, FILTER_VALIDATE_EMAIL)
+          # Full HTML escaping — safe for any text context
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: esc_html(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          # JSON — structured output, not raw HTML
+          - pattern: wp_json_encode(...)
+          - pattern: json_encode(...)

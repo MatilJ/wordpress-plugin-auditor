@@ -1,0 +1,141 @@
+rules:
+  - id: claude.php.wordpress.xss.list-table-column-unescaped-return
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A `column_*` render method (including `column_default`), or a
+      `get_value()`/`get_column_value()`/`render_column()` accessor on a
+      class whose name identifies it as an admin list-table column, returns
+      or echoes a per-row value taken straight from the row array/object with
+      no esc_html()/esc_attr() wrapping. The WP_List_Table rendering
+      machinery (and the many plugin-authored base classes that copy its
+      shape) calls these methods and writes whatever they return to the page
+      verbatim. If the row field was ever populated from request data, an
+      HTTP header, or any other attacker-influenced source before being
+      persisted, this is Stored XSS rendered every time an administrator
+      opens that list screen, regardless of how the value was filtered at
+      write time.
+
+      TRIAGE: confirm the returned/echoed expression is genuinely a per-row
+      value read from the row argument passed into the method, not a
+      hardcoded string or a value already escaped earlier in the same method.
+      A write-time filter (e.g. sanitize_text_field()) is not equivalent to
+      output escaping and does not clear this finding by itself.
+
+      Fix: wrap the value in esc_html() (or esc_attr() for an attribute
+      context) at the point of return/echo.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — Stored"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/79.html
+        - https://owasp.org/Top10/A03_2021-Injection/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+        - "**/freemius/**"
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: $ITEM[$KEY]
+              - pattern: $ITEM[$KEY][$KEY2]
+          - pattern-inside: |
+              function $FUNC($ITEM, $...ARGS) {
+                ...
+              }
+          - metavariable-regex:
+              metavariable: $FUNC
+              regex: "(?i)^column_"
+          # $ITEM['id']/$ITEM['ID'] is the near-universal WP_List_Table row-identifier
+          # key (an auto-increment integer primary key) — never attacker-supplied HTML
+          # content, even though it originates from the same row array as every other
+          # column value.
+          - metavariable-regex:
+              metavariable: $KEY
+              regex: (?i)^(?!['\"]id['\"]$).*$
+      - patterns:
+          - pattern-either:
+              - pattern: $ITEM[$KEY]
+              - pattern: $ITEM[$KEY][$KEY2]
+          - pattern-inside: |
+              class $CLASSNAME extends $BASE {
+                ...
+                function $FUNC($ITEM, $...ARGS) {
+                  ...
+                }
+                ...
+              }
+          - metavariable-regex:
+              metavariable: $CLASSNAME
+              regex: "(?i).*column"
+          - metavariable-regex:
+              metavariable: $FUNC
+              regex: "(?i)^(get_value|get_column_value|render_column)$"
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: return $X;
+              - pattern: echo $X;
+          - pattern-inside: |
+              function $SINKFUNC(...) {
+                ...
+              }
+          - metavariable-regex:
+              metavariable: $SINKFUNC
+              regex: "(?i)^column_"
+      - patterns:
+          - pattern-either:
+              - pattern: return $X;
+              - pattern: echo $X;
+          - pattern-inside: |
+              class $CLASSNAME extends $BASE {
+                ...
+                function $SINKFUNC(...) {
+                  ...
+                }
+                ...
+              }
+          - metavariable-regex:
+              metavariable: $CLASSNAME
+              regex: "(?i).*column"
+          - metavariable-regex:
+              metavariable: $SINKFUNC
+              regex: "(?i)^(get_value|get_column_value|render_column)$"
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: esc_html(...)
+          - pattern: \esc_html(...)
+          - pattern: esc_attr(...)
+          - pattern: \esc_attr(...)
+          - pattern: esc_html__(...)
+          - pattern: esc_attr__(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          - pattern: wp_strip_all_tags(...)
+          - pattern: absint(...)
+          - pattern: intval(...)
+          - pattern: (int) $Y
+          # sprintf()/vsprintf() whose format string contains no %s (or %N$s)
+          # conversion specifier can never emit attacker-controlled string content —
+          # every remaining specifier (%d, %u, %f, %x, %o, %b, ...) casts its
+          # argument to a numeric representation before formatting. Common WP_List_Table
+          # boilerplate shape: column_cb() building a checkbox value via
+          # sprintf('<input ... value="%d" />', $item['id']).
+          - patterns:
+              - pattern-either:
+                  - pattern: sprintf($FMT, ...)
+                  - pattern: vsprintf($FMT, ...)
+              - metavariable-regex:
+                  metavariable: $FMT
+                  regex: (?s)^(?!.*%(?:\d+\$)?s).*$

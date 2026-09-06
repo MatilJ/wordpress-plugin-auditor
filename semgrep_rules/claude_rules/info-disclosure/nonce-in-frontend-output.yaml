@@ -1,0 +1,39 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.nonce-in-frontend-output
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A plugin-specific nonce is embedded in frontend JavaScript via
+      wp_localize_script() or wp_add_inline_script(). If the nonce action gates
+      an AJAX handler that relies solely on nonce verification (no
+      current_user_can() check), any unauthenticated visitor can extract the
+      nonce from page source and invoke the handler.
+      Real-world examples: CVE-2025-12426 (Quiz Maker), CVE-2024-25600 (Bricks).
+      Verify the corresponding handler has capability checks beyond nonce
+      verification before dismissing.
+    metadata:
+      category: security
+      cwe: "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Sensitive Data Exposure"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/200.html
+    pattern-either:
+      - patterns:
+          - pattern: wp_localize_script($HANDLE, $NAME, <... wp_create_nonce($ACTION) ...>)
+          - metavariable-regex:
+              metavariable: $ACTION
+              regex: "^(?!.*wp_rest).*$"
+      - patterns:
+          - pattern: |
+              $NONCE = wp_create_nonce($ACTION);
+              ...
+              wp_localize_script($HANDLE, $NAME, <... $NONCE ...>);
+          - metavariable-regex:
+              metavariable: $ACTION
+              regex: "^(?!.*wp_rest).*$"

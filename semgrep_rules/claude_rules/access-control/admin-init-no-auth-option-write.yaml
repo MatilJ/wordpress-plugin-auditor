@@ -1,0 +1,348 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+
+  # admin_init fires for every authenticated user (Subscriber+) visiting /wp-admin/,
+  # and also fires on admin-ajax.php and admin-post.php requests.
+  # A handler that has NO nonce check AND no current_user_can() before an option
+  # write allows any Subscriber+ to modify site settings.
+  # Distinct from admin-init-nonce-only-no-capability-write.yaml which covers
+  # handlers that DO verify a nonce but lack capability checks.
+
+  - id: claude.php.wordpress.access.admin-init-no-auth-option-write
+    mode: join
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      Callback on admin_init performs an option write (update_option, delete_option,
+      add_option, update_site_option, delete_site_option) without current_user_can()
+      AND without any nonce verification. admin_init fires for every authenticated
+      user (Subscriber+) visiting any /wp-admin/ URL, including admin-ajax.php
+      and admin-post.php. Any Subscriber can trigger the write (CWE-862).
+
+      This is more severe than nonce-only handlers (covered by
+      admin-init-nonce-only-no-capability-write) because there is no CSRF
+      protection at all — the endpoint is exploitable via both direct request
+      AND cross-site request forgery.
+
+      TRIAGE:
+      1. Read the callback body — confirm the option write depends on
+         user-supplied input and is not a hardcoded default-setting operation.
+      2. Check for early-return guards (isset($_POST['submit'])) — these
+         narrow reachability but are NOT authorization.
+      3. If the option name is attacker-controlled, impact is critical
+         (users_can_register, default_role, siteurl, home).
+      4. Verify the handler is not inside a register_setting() sanitize_callback
+         (Settings API enforces manage_options before firing sanitize callbacks).
+
+      Fix: add current_user_can('manage_options') and wp_verify_nonce() before
+      the option write.
+    join:
+      rules:
+        - id: admin-init-registration
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_action('admin_init', [..., '$CALLBACK'], ...);
+                - pattern: add_action('admin_init', '$CALLBACK', ...);
+                - pattern: add_action('admin_init', array($OBJ, '$CALLBACK'), ...);
+
+        - id: no-auth-option-write
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      update_option(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      delete_option(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      add_option(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      update_site_option(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      delete_site_option(...);
+                      ...
+                    }
+            # The callback must actually consume request-supplied data somewhere in
+            # its body — a write built only from hardcoded/internal values (e.g. a
+            # fixed option key with no external input, such as a version-tracking
+            # self-heal) cannot be a missing-authorization vulnerability, since
+            # there is nothing for an unauthenticated caller to influence.
+            - pattern-either:
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      <... $_GET ...>;
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      <... $_POST ...>;
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      <... $_REQUEST ...>;
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      <... $_COOKIE ...>;
+                      ...
+                    }
+                # A plugin-local wrapper (any function/method NOT itself a known
+                # safe DB/user-state read) assigns a variable that is then tested
+                # in an if-condition guarding the write. Many plugins funnel
+                # $_GET/$_POST/$_REQUEST through a custom "get request var"
+                # helper instead of touching the superglobal directly — the
+                # helper name varies per plugin, so this branch is structural
+                # (assign-then-test-then-write) rather than name-based.
+                - patterns:
+                    - pattern-either:
+                        - pattern: |
+                            function $CALLBACK(...) {
+                              ...
+                              $VAR = $GETTER(...);
+                              ...
+                              if (<... $VAR ...>) {
+                                ...
+                                update_option(...);
+                                ...
+                              }
+                              ...
+                            }
+                        - pattern: |
+                            function $CALLBACK(...) {
+                              ...
+                              $VAR = $GETTER(...);
+                              ...
+                              if (<... $VAR ...>) {
+                                ...
+                                add_option(...);
+                                ...
+                              }
+                              ...
+                            }
+                        - pattern: |
+                            function $CALLBACK(...) {
+                              ...
+                              $VAR = $GETTER(...);
+                              ...
+                              if (<... $VAR ...>) {
+                                ...
+                                delete_option(...);
+                                ...
+                              }
+                              ...
+                            }
+                        - pattern: |
+                            function $CALLBACK(...) {
+                              ...
+                              $VAR = $GETTER(...);
+                              ...
+                              if (<... $VAR ...>) {
+                                ...
+                                update_site_option(...);
+                                ...
+                              }
+                              ...
+                            }
+                        - pattern: |
+                            function $CALLBACK(...) {
+                              ...
+                              $VAR = $GETTER(...);
+                              ...
+                              if (<... $VAR ...>) {
+                                ...
+                                delete_site_option(...);
+                                ...
+                              }
+                              ...
+                            }
+                    # Exclude assignments sourced from known-safe local/DB reads —
+                    # these are not attacker-controlled, so they must not count as
+                    # the "consumes request data" signal.
+                    - metavariable-regex:
+                        metavariable: $GETTER
+                        regex: "^(?!.*(get_option|get_site_option|get_post_meta|get_user_meta|get_comment_meta|get_transient|get_site_transient|get_metadata|wp_get_current_user|current_user_can|wp_verify_nonce)).*$"
+                    # A second, distinct boolean assigned from its own function/method
+                    # call and tested before the write is a capability-wrapper gate
+                    # defined elsewhere (its own body is out of reach of this
+                    # single-function pattern) — this is the neutralizer the real
+                    # fix for this class of gap adds, so a write additionally gated
+                    # this way is not the missing-authorization shape this branch
+                    # targets.
+                    - pattern-not-inside: |
+                        function $CALLBACK(...) {
+                          ...
+                          $GATE = $CHECKER(...);
+                          ...
+                          if ($GATE) {
+                            ...
+                            update_option(...);
+                            ...
+                          }
+                          ...
+                        }
+                    - pattern-not-inside: |
+                        function $CALLBACK(...) {
+                          ...
+                          $GATE = $CHECKER(...);
+                          ...
+                          if ($GATE) {
+                            ...
+                            add_option(...);
+                            ...
+                          }
+                          ...
+                        }
+                    - pattern-not-inside: |
+                        function $CALLBACK(...) {
+                          ...
+                          $GATE = $CHECKER(...);
+                          ...
+                          if ($GATE) {
+                            ...
+                            delete_option(...);
+                            ...
+                          }
+                          ...
+                        }
+                    - pattern-not-inside: |
+                        function $CALLBACK(...) {
+                          ...
+                          $GATE = $CHECKER(...);
+                          ...
+                          if ($GATE) {
+                            ...
+                            update_site_option(...);
+                            ...
+                          }
+                          ...
+                        }
+                    - pattern-not-inside: |
+                        function $CALLBACK(...) {
+                          ...
+                          $GATE = $CHECKER(...);
+                          ...
+                          if ($GATE) {
+                            ...
+                            delete_site_option(...);
+                            ...
+                          }
+                          ...
+                        }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  wp_verify_nonce(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  check_admin_referer(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  check_ajax_referer(...);
+                  ...
+                }
+            # Self-referential guard (top-level, redundant with the GETTER exclusion
+            # above): the write is gated by comparing the SAME option's own current
+            # value to a fixed constant — the common "force-sync a hardcoded default
+            # once" shape, not a missing-authorization vulnerability.
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (empty(get_option($KEY, ...))) {
+                    ...
+                    update_option($KEY, ...);
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (! get_option($KEY, ...)) {
+                    ...
+                    update_option($KEY, ...);
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  $CUR = get_option($KEY, ...);
+                  ...
+                  if (<... $CUR ...>) {
+                    ...
+                    update_option($KEY, ...);
+                    ...
+                  }
+                  ...
+                }
+
+      on:
+        - 'admin-init-registration.path == no-auth-option-write.path'
+        - 'admin-init-registration.$CALLBACK == no-auth-option-write.$CALLBACK'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/hooks/admin_init/

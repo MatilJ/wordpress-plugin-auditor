@@ -1,0 +1,504 @@
+rules:
+  - id: claude.php.wordpress.access.user-input-to-set-role
+    mode: taint
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      User-controlled input flows into the role argument of set_role() or
+      add_role(). An attacker can escalate to any WordPress role including
+      administrator (CWE-269 — Improper Privilege Management).
+
+      WP Core: set_role() writes directly to update_user_meta($this->ID,
+      $this->cap_key, $this->caps) at class-wp-user.php:635 with zero
+      validation on the role string. add_role() at L553 is cumulative.
+
+      Fix: hardcode the role string, or validate against a strict allowlist
+      AND require current_user_can('promote_users') before any role change.
+
+      Also covers the mapped-field-property variant: a form-builder/field
+      abstraction stores the submitted value of a role-mapped field on the
+      object itself (e.g. $this->value) with no current_user_can()
+      capability check anywhere in the enclosing function gating the
+      subsequent set_role()/add_role() call — only a single hardcoded
+      string comparison excluding 'administrator' — letting a low-privileged
+      submitter self-promote to any OTHER role, including one with
+      admin-equivalent capabilities (CWE-266).
+
+      Also covers the round-trip variant: a self-registration / front-end
+      account-creation flow renders a role value into a hidden field (or
+      stores it under a role-named meta/array key) and, on the follow-up
+      request, writes that same client-controlled value straight into the
+      'role' argument of wp_insert_user()/wp_update_user() — including a
+      direct inline call with no prior variable assignment, the shape of an
+      unauthenticated self-registration handler hooked on user_register that
+      copies $_POST['role'] straight into wp_update_user() — or into an
+      array/meta key whose name denotes the account role (e.g. user-role,
+      wp_capabilities),
+      without an allowlist check AND without a hash_equals()-verified
+      signature tying the resubmitted value back to what the server
+      originally issued (CWE-266 — Incorrect Privilege Assignment). A bare
+      sanitize_text_field()/sanitize_key() does not neutralize this — it
+      cleans characters, not the set of permitted role values.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - Role value comes from POST/GET/REQUEST with no allowlist validation
+        - Handler lacks current_user_can('promote_users') check
+        - Endpoint is wp_ajax_nopriv_ or REST with __return_true permission
+        - Round-trip variant: the enclosing function has no hash_equals()
+          call anywhere verifying the resubmitted role against a
+          server-computed signature (wp_hash()/hash_hmac()-based)
+        - Array-builder variant: the role is validated only by membership
+          in a static allow-list (e.g. in_array()), with no verification
+          step that binds the choice to a separate resubmitted
+          signature/token argument, before the array variable holding it
+          reaches wp_insert_user()/wp_update_user()
+        - Mapped-field-property variant: a $OBJ->value property (the
+          submitted value of a field/property abstraction) reaches
+          set_role()/add_role() and the enclosing function contains no
+          current_user_can() check anywhere (bare call, if-condition, or
+          ternary-assignment form) — only a lone 'administrator' string
+          exclusion gates the call
+        - Array-literal variant: the role key is set inline as part of an
+          array literal assigned to a variable (rather than appended
+          afterward via bracket-assignment), and that array variable is
+          later passed by name to wp_insert_user()/wp_update_user() — the
+          same round-trip risk applies regardless of whether the key
+          appears in the initial literal or is added afterward
+        - An existence-only check on the role value (e.g. array_key_exists()
+          against wp_roles()->get_names(), or in_array() against the full
+          registered role list) is NOT an allowlist — it confirms the string
+          names a real role but does not exclude 'administrator' or other
+          privileged roles
+
+      FALSE POSITIVE indicators:
+        - Handler has current_user_can('promote_users') or manage_options
+        - Role is validated against a hardcoded allowlist before set_role()
+        - Role value is hardcoded (e.g., set_role('subscriber'))
+        - The enclosing function verifies the value via hash_equals()
+          against a server-computed signature before use
+        - The role is re-derived via a verification helper that is itself
+          called with both the role AND a separate companion
+          signature/token argument (not the role alone)
+        - Direct single-call variant only: the entire wp_insert_user()/
+          wp_update_user() call is gated inside an if() whose condition
+          includes an in_array() membership test on the role value AND
+          explicitly excludes 'administrator' — no companion signature is
+          required here (unlike the round-trip array-builder variant above,
+          there is no earlier request/response round trip to re-bind)
+    metadata:
+      category: security
+      cwe:
+        - "CWE-269: Improper Privilege Management"
+        - "CWE-266: Incorrect Privilege Assignment"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/classes/wp_user/set_role/
+        - https://developer.wordpress.org/reference/functions/wp_insert_user/
+        - https://patchstack.com/academy/wordpress/vulnerabilities/privilege-escalation/
+        - https://cwe.mitre.org/data/definitions/266.html
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: $REQUEST->get_body()
+      # Mapped-field-property variant (CVE-2026-54196 class): a form-builder
+      # field/property abstraction holds the submitted value of a
+      # role-mapped field on the object itself, not a raw superglobal read
+      # in the same file — the architecture-agnostic marker is the property
+      # literally named "value".
+      - pattern: $OBJ->value
+    pattern-sinks:
+      - patterns:
+          - pattern: $USER->set_role($ROLE)
+          - focus-metavariable: $ROLE
+          # CVE-2026-54196-class fix: a current_user_can('promote_users')-style
+          # capability check anywhere in the enclosing function (bare call,
+          # if-condition, or ternary-assignment form) gates the role change.
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                current_user_can(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... current_user_can(...) ...>) { ... }
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                $CAPVAR = current_user_can(...) ? $A : $B;
+                ...
+              }
+      - patterns:
+          - pattern: $USER->add_role($ROLE)
+          - focus-metavariable: $ROLE
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                current_user_can(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... current_user_can(...) ...>) { ... }
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                $CAPVAR = current_user_can(...) ? $A : $B;
+                ...
+              }
+      - patterns:
+          - pattern-either:
+              - pattern: wp_insert_user(array(..., "role" => $ROLE, ...))
+              - pattern: wp_update_user(array(..., "role" => $ROLE, ...))
+          - focus-metavariable: $ROLE
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                hash_equals(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... hash_equals(...) ...>) { ... }
+                ...
+              }
+          # CVE-2024-32511-class fix: the direct inline call is gated behind
+          # an in_array() allow-list check on the role value (plus an
+          # explicit 'administrator' exclusion) — sufficient here since there
+          # is no separate resubmitted signature to bind to, unlike the
+          # round-trip array-builder sink below.
+          - pattern-not-inside: |
+              if (<... in_array(...) ...>) { ... }
+      - patterns:
+          - pattern: $META[$KEY] = $ROLE
+          - focus-metavariable: $ROLE
+          - metavariable-regex:
+              metavariable: $KEY
+              regex: (?i)^['"].*(user[_-]?role|wp_capabilities)['"]$
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                hash_equals(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... hash_equals(...) ...>) { ... }
+                ...
+              }
+      - patterns:
+          - pattern-either:
+              - pattern: |
+                  $DATA[$KEY] = $ROLE;
+                  ...
+                  wp_insert_user($DATA);
+              - pattern: |
+                  $DATA[$KEY] = $ROLE;
+                  ...
+                  wp_update_user($DATA);
+              - pattern: |
+                  if ($X) $DATA[$KEY] = $ROLE;
+                  ...
+                  wp_insert_user($DATA);
+              - pattern: |
+                  if ($X) $DATA[$KEY] = $ROLE;
+                  ...
+                  wp_update_user($DATA);
+              # CVE-2026-7284-class variant: the role key is set inline as
+              # part of the array LITERAL itself (not appended afterward via
+              # bracket-assignment), and the whole array variable is passed
+              # by name to wp_insert_user()/wp_update_user() on a later line.
+              - pattern: |
+                  $DATA = array(..., $KEY => $ROLE, ...);
+                  ...
+                  wp_insert_user($DATA);
+              - pattern: |
+                  $DATA = array(..., $KEY => $ROLE, ...);
+                  ...
+                  wp_update_user($DATA);
+          - focus-metavariable: $ROLE
+          - metavariable-regex:
+              metavariable: $KEY
+              regex: (?i)^['"]role['"]$
+          # Covers the array-builder round-trip idiom: a role-named array
+          # key is assigned from request input, then the whole array
+          # variable (not an inline literal) is later passed to
+          # wp_insert_user()/wp_update_user(). A nonce/signature
+          # verification helper that is re-derived from AND takes both the
+          # resubmitted role and a separate companion signature/token
+          # argument neutralizes this (a bare allow-list membership check
+          # on the role alone does not).
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                hash_equals(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... hash_equals(...) ...>) { ... }
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                $ROLE = $OBJ->$VERIFY(..., $ROLE, ..., $SIG, ...) ? $A : $B;
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                $ROLE = $OBJ->$VERIFY(..., $SIG, ..., $ROLE, ...) ? $A : $B;
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if ($OBJ->$VERIFY(..., $ROLE, ..., $SIG, ...)) { ... }
+                ...
+              }
+          # CVE-2023-3076-class fix: the request-derived array's role-denoting
+          # key is forcibly overwritten with a hardcoded string literal
+          # earlier in the same function (e.g. $params["role"] = 'subscriber';),
+          # clobbering any attacker influence before the array is re-read into
+          # the $DATA[$KEY] assignment that feeds wp_insert_user()/
+          # wp_update_user() — even though the same request-array key is read
+          # again afterward inside the $ROLE expression itself.
+          - pattern-not-inside:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) {
+                      ...
+                      $SRC[$RKEY] = "...";
+                      ...
+                    }
+                - metavariable-regex:
+                    metavariable: $RKEY
+                    regex: (?i)^['"]role['"]$
+
+  - id: claude.php.wordpress.access.role-key-passthrough-no-trusted-override
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      A response/output array's role-denoting key is populated directly from
+      the identically-named key of the function's own input data (a
+      request/JSON-decoded payload array), cleaned only by a generic string
+      sanitizer (sanitize_text_field()/sanitize_key(), or none at all) — never
+      checked against an allow-list of grantable roles. If this same input
+      key is not first overwritten, unconditionally, from a trusted
+      server-side lookup (a repository/service/post-meta read keyed by a
+      validated ID) anywhere else in the function, an attacker who controls
+      the input payload can supply role: "administrator" and have it carried
+      through to wherever this output array is later consumed by
+      set_role()/add_role()/wp_insert_user()/wp_update_user() (CWE-269 —
+      Improper Privilege Management).
+
+      This is the same vulnerability class as this file's taint sinks above,
+      but the flow from request superglobal to set_role() spans multiple
+      functions/files via a plain array parameter (no direct superglobal read
+      at the sink), which is out of reach for single-file taint tracking.
+      This rule instead recognizes the vulnerable *self-referential
+      passthrough* shape directly at its source, and treats the presence of a
+      same-key reassignment from a distinct lookup/repository expression
+      anywhere in the enclosing function as the fix signature.
+
+      Fix: before assigning the output key, unconditionally re-derive the
+      role from a trusted, server-controlled lookup (e.g. the membership /
+      plan / product post the user is actually registering for), discarding
+      the client-supplied value entirely — do not merely fall back to it
+      when the lookup is absent.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-269: Improper Privilege Management"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/classes/wp_user/set_role/
+        - https://developer.wordpress.org/reference/functions/wp_insert_user/
+        - https://cwe.mitre.org/data/definitions/269.html
+    patterns:
+      # Anchor $DATA to the enclosing function's OWN formal parameter — this
+      # is what distinguishes "self-referential passthrough of the caller-
+      # supplied payload" from a local variable populated by a trusted
+      # repository/service lookup a few lines earlier (which would use a
+      # different local-variable name, never the parameter itself).
+      - pattern-inside: |
+          function $FUNC($DATA, ...) {
+            ...
+          }
+      - pattern-either:
+          - pattern: |
+              $RESP[$RKEY] = isset($DATA[$RKEY]) ? $SANITIZER($DATA[$RKEY]) : $DEFAULT;
+          - pattern: |
+              $RESP[$RKEY] = isset($DATA[$RKEY]) ? $DATA[$RKEY] : $DEFAULT;
+          - pattern: |
+              $RESP[$RKEY] = $DATA[$RKEY] ?? $DEFAULT;
+          - pattern: |
+              $RESP[$RKEY] = $SANITIZER($DATA[$RKEY] ?? $DEFAULT);
+          # CVE-2025-11457-class variant: the same self-referential
+          # passthrough shape, but the destination is an object property
+          # (e.g. $this->role) instead of an array key — the shape behind a
+          # User/Customer/Manager model's create()/save() method that sets
+          # its own $role property straight from the caller-supplied
+          # $args['role'] with no allowlist or capability check, which later
+          # reaches wp_insert_user()/add_role() inside save(). Scoped with
+          # its own capability-check guard so a properly-gated variant of
+          # this same shape in another plugin is not flagged.
+          - patterns:
+              - pattern: |
+                  $OBJ->$PROP = isset($DATA[$RKEY]) ? $DATA[$RKEY] : $DEFAULT;
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    current_user_can(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    if (<... current_user_can(...) ...>) { ... }
+                    ...
+                  }
+      - metavariable-regex:
+          metavariable: $RKEY
+          regex: (?i)^['"]role['"]$
+      # Fix signature: the SAME parameter's role-denoting key is itself
+      # reassigned (from a trusted lookup) anywhere in the enclosing
+      # function — regardless of textual order relative to the passthrough
+      # above, since the reassignment must execute before the value is read
+      # downstream by whatever ultimately calls set_role()/wp_insert_user().
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $DATA[$RKEY] = $OVERRIDE;
+            ...
+          }
+
+  - id: claude.php.wordpress.access.role-mutation-wrapper-missing-allowlist
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function whose own formal parameter denotes a role/role-id passes
+      that parameter directly to $USER->add_role()/$USER->set_role(), with
+      no allow-list membership check (in_array() against the site's/plugin's
+      own list of legitimate roles) and no current_user_can() capability
+      check anywhere in the function body (CWE-269 — Improper Privilege
+      Management).
+
+      This is the cross-call-boundary blind spot the direct request-to-sink
+      taint rules cannot see: the attacker-controlled request data (a
+      decoded/unserialized request parameter, a REST body field, an AJAX
+      POST value) is read and extracted in a DIFFERENT function — sometimes
+      a different file/class entirely — several call-frames away from this
+      wrapper, so no $_GET/$_POST/$_REQUEST expression is textually present
+      anywhere near the add_role()/set_role() call this rule flags. Any
+      publicly reachable caller of this wrapper (an unauthenticated
+      confirmation/callback endpoint, a REST route, an AJAX action) that can
+      supply an arbitrary role value lets a visitor grant themselves — or
+      any other account — any role the wrapper is willing to apply,
+      including one with administrator-equivalent capabilities.
+
+      Confirmed TP class: wholesalex <= 1.3.2 (CVE-2024-30542) — an
+      unauthenticated template_redirect callback base64-decoded and
+      unserialized a request parameter into an array containing a
+      'registration_role' element, then called a shared
+      change_role($user_id, $new_role_id) helper that applied
+      $user->add_role($new_role_id) with no check that $new_role_id was one
+      of the plugin's own defined roles. The vendor's fix added
+      in_array($new_role_id, wholesalex()->get_roles('ids')) as the first
+      statement inside the wrapper.
+
+      Fix: before the wrapper calls add_role()/set_role(), validate the role
+      parameter against an explicit allow-list of assignable roles (e.g.
+      get_editable_roles(), wp_roles()->roles, or the plugin's own
+      registered-roles accessor) and return/reject if it is not a member.
+    metadata:
+      category: security
+      cwe: "CWE-269: Improper Privilege Management"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/269.html
+        - https://developer.wordpress.org/reference/classes/wp_user/add_role/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $FUNC($UID, $ROLE, ...) {
+                ...
+                $USER->add_role($ROLE);
+                ...
+              }
+          - pattern: |
+              function $FUNC($UID, $ROLE, ...) {
+                ...
+                $USER->set_role($ROLE);
+                ...
+              }
+          - pattern: |
+              function $FUNC($ROLE, ...) {
+                ...
+                $USER->add_role($ROLE);
+                ...
+              }
+          - pattern: |
+              function $FUNC($ROLE, ...) {
+                ...
+                $USER->set_role($ROLE);
+                ...
+              }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... in_array(...) ...>) { ... }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can(...) ...>) { ... }
+            ...
+          }

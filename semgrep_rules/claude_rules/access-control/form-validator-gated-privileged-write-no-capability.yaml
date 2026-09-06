@@ -1,0 +1,109 @@
+rules:
+  # A custom "form is valid" helper (validateForm/isValid/processForm/…) is a
+  # data-shape validator: it confirms the submitted fields match a cached form
+  # definition (and, incidentally, that a request happened at all). It carries
+  # no cryptographic guarantee like wp_verify_nonce() and no authorization
+  # guarantee like current_user_can() — yet plugin authors routinely use it as
+  # the ONLY gate in front of a privileged settings/permission write, because
+  # its name reads like a security check. Any authenticated (or, when the
+  # handler is reachable via a generically-registered dispatcher, even
+  # unauthenticated) caller who can supply well-formed POST data reaches the
+  # write regardless of role (CWE-862), and when the persisted data is later
+  # consumed to compute role capabilities, this becomes a full privilege-
+  # escalation primitive (CWE-269).
+  - id: claude.php.wordpress.access-control.form-validator-gated-privileged-write-no-capability
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function's only gate before a settings/options/permissions write is a
+      call to a "form validator"-style helper ($OBJ->validateForm(),
+      ->isValid(), ->processForm(), ->validateRequest(), etc.) — not
+      current_user_can(), wp_verify_nonce(), check_ajax_referer(), or
+      check_admin_referer(). This class of helper (commonly seen wrapping a
+      form-builder library) verifies that submitted fields match a cached form
+      definition; it establishes neither request authenticity nor caller
+      privilege. Any caller able to reach this function with well-formed POST
+      data can trigger the write (CWE-862: Missing Authorization).
+
+      Escalation risk (CWE-269): if the persisted data is later read back and
+      used to compute or grant capabilities/roles (e.g. a per-role "menu
+      accessibility" array whose entries feed into add_cap()/set_role()), this
+      is a privilege-escalation primitive, not just an unauthorized write —
+      confirm this at the second-order sink before triaging severity.
+
+      TRIAGE REQUIRED:
+      1. Confirm current_user_can() is genuinely absent anywhere in this
+         function AND in the entry point(s) that dispatch to it (a generic
+         MVC/AJAX dispatcher registered on a wp_ajax_ hook is a common way
+         these handlers are reached — check every hook/route the enclosing
+         controller/action pair can be invoked through, including any
+         wp_ajax_nopriv_ registration of a shared dispatcher).
+      2. Confirm the write is reachable with attacker-controlled request
+         data (the form-validator call does not, by itself, imply any
+         sanitization of field VALUES).
+      3. If a genuine current_user_can() check exists in a common base class
+         constructor or a wrapping method not visible in this function, this
+         is a false positive — trace the full call chain before reporting.
+
+      Fix: add current_user_can('manage_options') (or the narrowest
+      capability the write requires) before dispatching to this handler, or
+      inside the handler itself so every caller inherits the gate.
+    patterns:
+      - pattern: $SVC->$SINK(...)
+      - metavariable-regex:
+          metavariable: $SINK
+          # Verb-prefix anchored (not a bare substring search): "reset_option"
+          # must NOT match just because it contains "set" — the sink name has
+          # to actually START with one of these save/write verbs.
+          regex: (?i)^(save|update|set|persist|write)(_)?(option|setting|config|permission|role)s?$
+      - pattern-inside: |
+          function $FUNC(...) {
+            ...
+          }
+      - pattern-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... $OBJ->$CHECK(...) ...>) {
+              ...
+            }
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $CHECK
+          regex: (?i)^(validate_?form|validate_?request|is_?valid(_?form|_?request)?|process_?form|form_?is_?valid|check_?form)$
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can(...) ...>) {
+              ...
+            }
+            ...
+          }
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-269: Improper Privilege Management"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://cwe.mitre.org/data/definitions/269.html
+        - https://developer.wordpress.org/apis/security/nonces/
+        - https://developer.wordpress.org/apis/security/user-capabilities-and-roles/

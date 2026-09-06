@@ -1,0 +1,61 @@
+rules:
+  - id: claude.php.wordpress.xss.url-filter-obj-get-current-unescaped-echo
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      Return value of a URL-filter state object's get_current() method flows into
+      echo/print without a context-appropriate escaping function. URL-filter state
+      objects parse raw $_GET parameters and store them on the object; get_current()
+      returns that raw data without sanitization applied. Echoing these values in
+      HTML or JavaScript contexts without escaping allows reflected XSS (CWE-79).
+      Apply esc_js() / wp_json_encode() for JavaScript contexts, esc_html() /
+      esc_attr() for HTML contexts, or esc_url() for URL contexts.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    # get_current() on URL-filter state objects returns data parsed from $_GET;
+    # the return value propagates raw request input to any output sink reached by the caller.
+    pattern-sources:
+      - pattern: $berocket_parse_page_obj->get_current()
+    pattern-sinks:
+      - pattern-either:
+          - pattern: echo $X;
+          - pattern: print $X;
+          - pattern: print($X);
+          - pattern: printf($F, ...)
+    pattern-sanitizers:
+      - pattern-either:
+          # JavaScript context
+          - pattern: esc_js(...)
+          - pattern: wp_json_encode(...)
+          - pattern: json_encode(...)
+          # HTML body / attribute context
+          - pattern: esc_html(...)
+          - pattern: esc_attr(...)
+          - pattern: esc_html__(...)
+          - pattern: esc_attr__(...)
+          # URL context
+          - pattern: esc_url(...)
+          - pattern: esc_url_raw(...)
+          # Full HTML sanitization
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          # Numeric — no XSS chars possible
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)

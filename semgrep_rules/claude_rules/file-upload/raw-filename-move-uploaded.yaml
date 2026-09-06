@@ -1,0 +1,122 @@
+rules:
+  - id: claude.php.wordpress.upload.raw-filename-move-uploaded
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      The destination path passed to move_uploaded_file()/copy()/rename(),
+      $wp_filesystem->move()/copy(), a write-mode fopen() finalize call, or a
+      plugin-defined two-argument (src, dest) upload/move helper method that
+      reimplements move_uploaded_file() internally, is built from a
+      client-supplied filename field ($_FILES[...]['name'], or a
+      'name'/'filename'/'file_name' key read out of a request-derived array
+      — e.g. a decoded chunked/resumable-upload payload) with no real
+      file-type validation before the write. sanitize_file_name() and
+      basename() only strip illegal characters / directory components —
+      neither restricts or re-checks the file extension, so a dangerous
+      extension (.php, .phtml, .phar) survives untouched and is written/
+      moved into place as-is (CWE-434), or a traversal sequence escapes the
+      intended directory (CWE-22).
+      Validate the real extension AND MIME type against an allow-list
+      (wp_check_filetype_and_ext() / wp_handle_upload()) before the write —
+      do not treat sanitize_file_name()/basename() alone as a type check.
+
+      TRIAGE (custom-wrapper/delegate-call sink shapes only): the wrapper's
+      own name is a naming heuristic, not proof it is unvalidated. Check the
+      calling function for an extension allow-list gate expressed as a plain
+      in_array($ext, $allowed) inside an if/early-return before the call —
+      this guard is real but, unlike the other sanitizers here, is only
+      recognized when it directly wraps the tainted value, so a
+      branch-conditioned check (validate into $error, call only if $error is
+      empty) can still surface as a finding here and needs manual read-through
+      to close out.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-434: Unrestricted Upload of File with Dangerous Type"
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_FILES[$K]["name"]
+          - pattern: $_FILES[$K]['name']
+          - patterns:
+              - pattern-either:
+                  - pattern: $ARR['name']
+                  - pattern: $ARR["name"]
+                  - pattern: $ARR['filename']
+                  - pattern: $ARR["filename"]
+                  - pattern: $ARR['file_name']
+                  - pattern: $ARR["file_name"]
+              # pathinfo()'s return array reuses these same key names
+              # (dirname/basename/extension/filename), but its values derive
+              # from pathinfo()'s own input path, not an upload source.
+              - pattern-not-inside: |
+                  function $FN(...) {
+                    ...
+                    $ARR = pathinfo(...);
+                    ...
+                  }
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: move_uploaded_file($SRC, $DST)
+              - pattern: copy($SRC, $DST)
+              - pattern: rename($SRC, $DST)
+              - pattern: $wp_filesystem->move($SRC, $DST)
+              - pattern: $wp_filesystem->move($SRC, $DST, $OVERWRITE)
+              - pattern: $wp_filesystem->copy($SRC, $DST)
+              - pattern: $wp_filesystem->copy($SRC, $DST, $OVERWRITE)
+              - patterns:
+                  - pattern: fopen($DST, $MODE)
+                  - metavariable-regex:
+                      metavariable: $MODE
+                      regex: "^['\"](w|a|x)"
+              # Plugin-defined upload/move helper: a two-argument (src, dest)
+              # method mirroring move_uploaded_file()'s own signature,
+              # reimplemented inside the plugin's own file-abstraction class
+              # instead of calling the builtin directly.
+              - patterns:
+                  - pattern-either:
+                      - pattern: $OBJ::$METHOD($SRC, $DST)
+                      - pattern: $OBJ->$METHOD($SRC, $DST)
+                  - metavariable-regex:
+                      metavariable: $METHOD
+                      regex: (?i)^(upload|move_file|move_uploaded_file|save_file|store_file|write_file)$
+              # Delegate call-site variant: the raw filename value itself
+              # (not yet folded into a concatenated path) is handed straight
+              # to a save/write/store/upload-named helper method as an
+              # argument — the write happens one call hop away, inside that
+              # helper, so the call site itself is the earliest point in the
+              # tainted flow's own function where the missing validation is
+              # visible.
+              - patterns:
+                  - pattern-either:
+                      - pattern: $OBJ::$METHOD($DST, ...)
+                      - pattern: $OBJ->$METHOD($DST, ...)
+                  - metavariable-regex:
+                      metavariable: $METHOD
+                      regex: (?i)^(upload|move_file|move_uploaded_file|save_file|store_file|write_file|save_image|save_attachment|handle_upload)$
+          - focus-metavariable: $DST
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: wp_unique_filename(...)
+          - pattern: basename(...)
+          - pattern: md5(...)
+          - pattern: sha1(...)
+          - pattern: uniqid(...)
+          - pattern: pathinfo($X, PATHINFO_EXTENSION)
+          - pattern: wp_check_filetype_and_ext(...)
+          - pattern: wp_check_filetype(...)
+          - pattern: wp_handle_upload(...)
+          # An explicit extension allow-list check gates the write — the
+          # locally-scoped equivalent of wp_check_filetype() for plugins that
+          # roll their own instead of calling the WP function.
+          - pattern: in_array($EXT, $ALLOWED)
+          - pattern: in_array($EXT, $ALLOWED, $STRICT)

@@ -1,0 +1,64 @@
+rules:
+  - id: claude.php.wordpress.xss.textarea-content-unescaped-echo
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A value is echoed directly as the text content of an HTML <textarea>
+      element with no output-escaping function applied (CWE-79). Developers
+      commonly assume a <textarea> is plain-text-only and skip escaping
+      entirely, or reuse an esc_attr()/esc_html() call meant for a sibling
+      HTML attribute on the SAME tag while leaving the element's inner text
+      content untouched — but a stored value containing a literal
+      "</textarea>" sequence closes the element early and lets any
+      following markup (including <script>) execute as real HTML the next
+      time an administrator or other viewer opens the page. This is the
+      textarea-specific counterpart of missing esc_html(): the correct fix
+      is WordPress's esc_textarea(), which HTML-encodes the value so an
+      embedded closing tag can no longer break out of the element.
+
+      Commonly seen in admin-facing "view submission / view entry" detail
+      templates for form-builder, helpdesk, and CRM-style plugins that
+      render a single stored record's field inside an editable <textarea>
+      (e.g. an internal notes/memo box) without wrapping the echoed value.
+
+      TRIAGE: confirm the echoed value can be set by a lower-privileged or
+      unauthenticated actor (a form submission field, a comment, an import
+      row) rather than solely admin-authored configuration, and that this
+      is genuinely the textarea's rendered text content (between the open
+      and close tags) rather than a JS template string or a REST/JSON
+      response body.
+
+      Fix: wrap the echoed value in esc_textarea() at the point of output:
+      <textarea><?php echo esc_textarea( $value ); ?></textarea>.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — Stored"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/esc_textarea/
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/vendor_prefixed/**"
+        - "**/node_modules/**"
+        - "**/freemius/**"
+    # pattern-regex (not patterns/pattern-sinks) is deliberate: the sink is an
+    # HTML element boundary (<textarea>...</textarea>) that PHP's own AST does
+    # not model — the markup is opaque inline-HTML text to the PHP parser, so
+    # a normal semgrep `pattern:`/`pattern-inside:` cannot anchor on it. The
+    # negative lookahead right after the echo (rather than a separate
+    # pattern-not/exclude check against the whole line) is also deliberate:
+    # the SAME line frequently contains an unrelated esc_attr()/esc_html()
+    # call escaping a sibling attribute (e.g. the <textarea>'s own name="..."
+    # value) earlier in the tag, which would cause a whole-line exclude check
+    # to false-negative on the real, unescaped textarea body a few characters
+    # later on that identical line.
+    pattern-regex: "<textarea\\b[\\s\\S]{0,300}?>\\s*(?:<\\?php\\s+echo|<\\?=)\\s+(?!(?:esc_textarea|esc_html__|esc_html|esc_attr|htmlspecialchars|htmlentities|wp_kses_post|wp_kses|sanitize_text_field|wp_strip_all_tags)\\s*\\()"

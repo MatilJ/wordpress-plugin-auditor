@@ -1,0 +1,111 @@
+rules:
+  - id: claude.php.wordpress.sqli.wpdb-prepare-user-input-format-string
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      User-controlled input reaches the FIRST argument (the query/format string)
+      of $wpdb->prepare(). prepare() only escapes values substituted through its
+      %s/%d/%f/%i placeholders — any text in the format string itself is emitted
+      verbatim. If user input is concatenated or interpolated into that format
+      string (or passed as the whole string), it is SQL-injectable (CWE-89),
+      even though prepare() is used.
+      Keep the format string a constant literal and pass every dynamic value as a
+      separate placeholder argument: $wpdb->prepare("... WHERE id = %d", $id).
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+        - https://www.wordfence.com/threat-intel/vulnerabilities/wordpress-core/wordpress-core-483-sql-injection-due-to-double-prepare-approach
+      # WHY THIS RULE EXISTS — the wpdb-query-user-input-taint rule lists
+      # $wpdb->prepare(...) as a SANITIZER, so any user input that flows THROUGH
+      # prepare() is treated as clean. That is correct for the values arguments,
+      # but it creates a blind spot when the user input lands in the *format
+      # string* itself, e.g.:
+      #     $wpdb->query( $wpdb->prepare( $_GET['q'] ) );                  // whole string
+      #     $wpdb->prepare( "SELECT * FROM $table WHERE id = %d", $id );   // $table = $_GET[...]
+      # Verified against WP 7.0 class-wpdb.php::prepare(): non-placeholder bytes
+      # in the format string pass through unescaped (a missing placeholder only
+      # triggers a _doing_it_wrong notice, the query still runs). This rule
+      # focuses the sink on the first argument only, so the safe form
+      # (constant format + user value as a %-arg) does NOT match.
+      #
+      # TRIAGE: a FALSE POSITIVE occurs only if the value reaching the format
+      # string is constrained by an allowlist (in_array / switch) that Semgrep
+      # cannot see across the branch — verify the dynamic portion is bounded.
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: $_FILES
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: $REQUEST->get_query_params()
+          # REST request ArrayAccess ($request['param']) — constrained to
+          # request-named variables. A bare "$VAR['key']" source matches every
+          # config/args array and function-parameter array (e.g. $template['col'],
+          # $filters['id']), which floods this rule with false positives.
+          - patterns:
+              - pattern: $REQ[$KEY]
+              - metavariable-regex:
+                  metavariable: $REQ
+                  regex: ^\$(request|req|rest_request|wp_request|the_request)$
+          # WP_Query query vars — the $wp_query global, or a WP_Query-named local.
+          # Constrained so arbitrary $obj->get() calls are not taint sources.
+          - pattern: $wp_query->get(...)
+          - patterns:
+              - pattern: $QV->get(...)
+              - metavariable-regex:
+                  metavariable: $QV
+                  regex: ^\$(wp_query|query|the_query|wpq|custom_query|main_query|posts_query)$
+          - pattern: get_query_var(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $wpdb->prepare($Q, ...)
+              - pattern: $this->wpdb->prepare($Q, ...)
+              - pattern: $this->db->prepare($Q, ...)
+              - pattern: $this->database->prepare($Q, ...)
+              - pattern: $OBJ->wpdb->prepare($Q, ...)
+              - pattern: $OBJ->db->prepare($Q, ...)
+              - pattern: $OBJ->database->prepare($Q, ...)
+              - pattern: $GLOBALS['wpdb']->prepare($Q, ...)
+          - focus-metavariable: $Q
+    pattern-sanitizers:
+      # If the dynamic portion reaching the format string is reduced to a token
+      # that cannot carry SQL syntax, it is safe to interpolate. esc_sql() is
+      # intentionally NOT listed: it only escapes quotes, which does not make an
+      # attacker-controlled *format string* safe (unquoted/keyword injection).
+      - pattern: (int) $X
+      - pattern: (float) $X
+      - pattern: intval(...)
+      - pattern: absint(...)
+      - pattern: floatval(...)
+      - pattern: sanitize_key(...)
+      - pattern: sanitize_sql_orderby(...)
+      - pattern: sanitize_title(...)
+      - pattern: array_map('absint', ...)
+      - pattern: array_map('intval', ...)
+      - pattern: array_map('floatval', ...)
+      - pattern: array_map('sanitize_key', ...)
+      - pattern: wp_parse_id_list(...)
+      # array_fill() builds a "%d,%d,..." / "%s,%s,..." placeholder string for a
+      # dynamic IN() clause — the standard SAFE pattern. Its output is only
+      # placeholders (never user data; only the element count varies), so taint
+      # flowing through count()->array_fill() into the format string is a FP.
+      - pattern: array_fill(...)

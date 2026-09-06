@@ -1,0 +1,208 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+  # The 'init', 'wp_loaded', and 'parse_request' hooks fire on every request —
+  # including unauthenticated visitors. A callback performing option writes
+  # without any auth check (no current_user_can, no nonce verification) allows
+  # any visitor to modify site settings by crafting the right request parameters.
+  # This is the CVE-2025-11007 class of vulnerability — unauthenticated option
+  # updates leading to site takeover via siteurl/home overwrite.
+
+  - id: claude.php.wordpress.access-control.init-hook-no-auth-option-write
+    mode: join
+    languages: [php]
+    severity: HIGH
+    message: |
+      A callback on the 'init', 'wp_loaded', or 'parse_request' hook performs an
+      option write (update_option, delete_option, update_site_option, delete_site_option,
+      add_option) without calling current_user_can() or any nonce verification function.
+      These hooks fire for every request including unauthenticated visitors (CWE-862).
+
+      An attacker can modify arbitrary site options by visiting a crafted URL or
+      submitting a POST request. Critical options like 'siteurl', 'home',
+      'users_can_register', and 'default_role' can be overwritten to achieve
+      full site takeover.
+
+      TRIAGE:
+      1. Read the callback body to confirm option writes depend on user-supplied
+         input ($_GET, $_POST, $_REQUEST).
+      2. Check for early-return guards (e.g., if (!isset($_POST['action']))) —
+         these determine reachability but are NOT authorization.
+      3. Confirm no auth check exists anywhere in the call chain before the write.
+      4. If the write target (option name) is hardcoded and the value is not
+         attacker-controlled, impact may be limited — assess CIA.
+
+      Fix: add current_user_can() with the appropriate capability immediately
+      before the option write, returning early on failure.
+    join:
+      rules:
+        - id: init-hook-registration
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_action('$HOOK', [..., '$CALLBACK'], ...);
+                - pattern: add_action('$HOOK', '$CALLBACK', ...);
+                - pattern: add_action('$HOOK', array($OBJ, '$CALLBACK'), ...);
+            - metavariable-regex:
+                metavariable: $HOOK
+                regex: (init|wp_loaded|parse_request)
+
+        - id: no-auth-option-write
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      update_option(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      delete_option(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      update_site_option(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      delete_site_option(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      add_option(...);
+                      ...
+                    }
+            # The callback must actually consume request-supplied data somewhere in
+            # its body — a write built only from hardcoded/internal values (e.g. a
+            # "sync this option to a fixed constant once" self-heal keyed off the
+            # option's own prior value) cannot be a missing-authorization
+            # vulnerability, since there is nothing for an unauthenticated caller
+            # to influence.
+            - pattern-either:
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      <... $_GET ...>;
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      <... $_POST ...>;
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      <... $_REQUEST ...>;
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      <... $_COOKIE ...>;
+                      ...
+                    }
+            # Self-referential guard: the write is gated by comparing the SAME
+            # option's own current value (read via get_option()/get_site_option()
+            # on the identical key being written), not by anything request-derived
+            # — the common "force-sync a hardcoded default once" shape.
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (empty(get_option($KEY, ...))) {
+                    ...
+                    update_option($KEY, ...);
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (! get_option($KEY, ...)) {
+                    ...
+                    update_option($KEY, ...);
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  $CUR = get_option($KEY, ...);
+                  ...
+                  if (<... $CUR ...>) {
+                    ...
+                    update_option($KEY, ...);
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  wp_verify_nonce(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  check_ajax_referer(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  check_admin_referer(...);
+                  ...
+                }
+
+      on:
+        - 'init-hook-registration.path == no-auth-option-write.path'
+        - 'init-hook-registration.$CALLBACK == no-auth-option-write.$CALLBACK'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/hooks/init/
+        - https://developer.wordpress.org/reference/functions/current_user_can/

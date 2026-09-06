@@ -1,0 +1,126 @@
+rules:
+  - id: claude.php.wordpress.access-control.dynamic-hook-gate-role-write-in-user-creation
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      Inside a function that creates a WordPress account
+      (wp_insert_user()/wp_create_user()), a request-array key is tested only
+      for non-emptiness (!empty($ARR[$KEY])) and, if present, that truthiness
+      alone is used to conditionally register a callback via add_filter()/
+      add_action() whose HOOK NAME is itself a runtime expression rather than
+      a hardcoded string literal — with no current_user_can() check anywhere
+      in the function (CWE-269 — Improper Privilege Management; CWE-912 —
+      Hidden Functionality).
+
+      This is the "developer backdoor" shape: legitimate plugin code registers
+      hooks with a literal, auditable name at load time. A dynamically-computed
+      hook name that is ONLY attached when an otherwise-unused request
+      parameter happens to be non-empty has no legitimate feature purpose — its
+      only effect is to let a request smuggle in extra behavior that static
+      review of the registration call site cannot see, because the actual hook
+      that gets wired up (and therefore the callback that runs) is not visible
+      as a string anywhere near the add_filter()/add_action() call.
+
+      Confirmed TP class: lastudio-element-kit <= 1.5.6.3 (CVE-2026-0920) —
+      ajax_register_handle() gated `add_filter($sys_meta_key, [$this,
+      'ajax_register_handle_backup'], 20)` behind `!empty($request
+      ['lakit_bkrole'])`, where $sys_meta_key was itself built through a
+      second filter that (only when a sibling file was loaded) rewrote the
+      inert placeholder name into WP core's real `insert_user_meta` hook —
+      the filter WP core fires from inside wp_insert_user() to let callbacks
+      edit the new account's usermeta, including `wp_capabilities` (the role).
+      The attached callback then unconditionally overwrote the new account's
+      role-bearing meta with a hardcoded privileged role, independent of the
+      actual value the attacker sent in the gating parameter — only its
+      presence mattered. Any unauthenticated visitor to the plugin's public
+      self-registration endpoint could add the one extra POST field and
+      register as an Administrator.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - The hook-name argument is a bare variable, a filtered value, or any
+          other non-literal expression — never a plain quoted string.
+        - The enclosing function creates a user account
+          (wp_insert_user()/wp_create_user()) and has no current_user_can()
+          call anywhere.
+        - The registered callback (trace it manually — cross-function/cross-
+          file, out of reach for this rule) ends up writing to a role- or
+          capability-denoting meta key, or the hook name itself resolves
+          (directly or through another filter) to a WP core hook that fires
+          during user creation/update (insert_user_meta, user_register,
+          profile_update, personal_options_update).
+
+      FALSE POSITIVE indicators:
+        - The hook name is a plain string literal (the common, auditable case)
+          — excluded by this rule already.
+        - current_user_can() gates the enclosing function, or the request-array
+          key is validated against an allow-list rather than only checked for
+          non-emptiness before the add_filter()/add_action() call.
+        - The registered callback (once traced) only affects display/formatting
+          concerns and never touches role, capability, or password data.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-269: Improper Privilege Management"
+        - "CWE-912: Hidden Functionality"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/269.html
+        - https://cwe.mitre.org/data/definitions/912.html
+        - https://developer.wordpress.org/reference/functions/wp_insert_user/
+        - https://developer.wordpress.org/reference/hooks/insert_user_meta/
+    patterns:
+      - pattern-either:
+          - pattern: add_filter($HOOK, $CB, ...)
+          - pattern: add_action($HOOK, $CB, ...)
+      # Excludes the common, auditable case: a literal hook name.
+      - pattern-not: add_filter("...", ...)
+      - pattern-not: add_filter('...', ...)
+      - pattern-not: add_action("...", ...)
+      - pattern-not: add_action('...', ...)
+      # Gated purely on non-emptiness of a request-derived array element —
+      # no allow-list, no signature check, just presence.
+      - pattern-inside: |
+          if (<... !empty($ARR[$KEY]) ...>) { ... }
+      # Only inside a function that also creates a WP account.
+      - pattern-either:
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+                <... wp_insert_user(...) ...>;
+                ...
+              }
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+                <... wp_create_user(...) ...>;
+                ...
+              }
+      # FP guard: an authorization check anywhere in the enclosing function
+      # (bare call, if-condition — including a negated early-return guard
+      # clause — or ternary-assignment form).
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can(...) ...>) { ... }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $CAPVAR = current_user_can(...) ? $A : $B;
+            ...
+          }

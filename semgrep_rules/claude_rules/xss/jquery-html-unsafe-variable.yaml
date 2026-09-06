@@ -1,0 +1,203 @@
+rules:
+  - id: claude.js.wordpress.xss.jquery-html-unsafe-variable
+    languages: [js, typescript]
+    severity: MEDIUM
+    message: |
+      jQuery .html() is called with dynamically built HTML (string
+      concatenation, array.join, innerHTML assignment, or template-literal
+      interpolation), or with a single bare variable/property passed straight
+      through with no construction or encoding at all (e.g. .html(url) fed
+      by a location.search parameter or an AJAX-response field). If any part
+      of the value originates from a server response (AJAX/JSON/REST) or the
+      page URL and contains user-controlled content, the data is parsed as
+      HTML and any embedded event handlers execute — enabling stored,
+      reflected, or DOM-based XSS (CWE-79).
+      Use .text() for plain text, or sanitize with DOMPurify before .html().
+      NOTE: PHP template files (.tpl.php, .php) containing inline JavaScript
+      are not scanned by this rule — audit those files manually.
+      TRIAGE — Template-literal rows built from a REST/AJAX response and
+      later joined into innerHTML/.html(): a common shape in admin "lookup"
+      / "debug" tools that fetch a record (e.g. a third-party API contact/
+      subscriber record) and render its fields client-side. If the record
+      can itself contain attacker-supplied text stored earlier through an
+      unrelated, unauthenticated write path (a public form submission, a
+      webhook, etc.), this is stored XSS triggered when a privileged user
+      opens the lookup tool — verify the write path separately.
+      TRIAGE — Escaping-helper detection is syntactic only: this rule
+      suppresses a match when the interpolated value is wrapped by a
+      call whose name contains esc/escape/sanitize/purify/striptags
+      directly inside the ${...}. Escaping performed one assignment earlier
+      (`const v = esc(x); ...${v}...`) is invisible to this check and will
+      still be flagged as a finding — before dismissing, check whether the
+      variable was assigned from such a call earlier in the same function.
+      TRIAGE — Partial escaping via custom helper in admin-only settings page:
+      If a .html()/.append() concatenation uses a plugin-defined escape helper
+      (e.g. strEscape(), htmlEncode()) on attribute-value parts but leaves
+      inner-text parts unescaped, and the JS file is enqueued only on an
+      admin settings page requiring manage_options, the finding is PR:H →
+      OOS for Wordfence. To confirm: grep for wp_enqueue_script() of that
+      JS file — if the hook or page slug requires manage_options, dismiss.
+      TRIAGE — Multi-step write flow FP: In booking/form/CRM plugins, the
+      AJAX JSON response feeding this .html() call may contain data that was
+      sanitized at an intermediate write step invisible to this rule. Pattern:
+      (1) raw user input written to table A columns (no sanitization); (2)
+      same fields re-processed as "meta fields" with sanitize_text_field()
+      and written to table B; (3) model hydration method (get_*_by_id())
+      overlays sanitized table B values onto table A results; (4) consumer
+      copies overlaid (sanitized) values to table C; (5) AJAX endpoint reads
+      from table C and returns JSON; (6) this .html() renders already-clean
+      data. Before confirming: read the model method that feeds the AJAX
+      response — if it merges a sanitized meta/fields table, the chain is
+      broken. Confirmed FP: Easy Appointments 3.12.24.1 customers.tpl.php
+      (raw ea_appointments columns overwritten by sanitized ea_fields values
+      in get_appintment_by_id() at dbmodels.php:481-482).
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [javascript, jquery, wordpress]
+      references:
+        - https://api.jquery.com/html/
+        - https://cheatsheetseries.owasp.org/cheatsheets/DOM_based_XSS_Prevention_Cheat_Sheet.html
+    # Exclude vendor/library files where all code is typically minified to one
+    # line or where .html() calls operate on admin-configured i18n strings
+    # (e.g., jquery.calendar.js, jquery.ui.js). Plugin-written JS is shipped
+    # unminified on wordpress.org; minified files are third-party code that
+    # cannot be meaningfully analyzed when collapsed to a single line.
+    #
+    # inc/ directories in WordPress plugins universally contain bundled third-party
+    # libraries (select2, datepicker, timepicker, color-picker-alpha, etc.).
+    # Plugin-authored JS lives under assets/js/, assets/src/, assets/blocks/, etc.
+    # Confirmed FP: ACF 6.8.0 assets/inc/select2/3/select2.js (6 hits — select2 v3/v4
+    # uses .html() / .append() internally for its own safe rendering pipeline).
+    #
+    # vendor/ directories contain Composer/npm dependencies — never plugin-authored code.
+    paths:
+      exclude:
+        - "jquery.*.js"   # jQuery plugin/extension library files (vendor code)
+        - "*.min.js"      # Minified files — all code on line 1, not reliably parseable
+        - "**/inc/**"     # Bundled third-party libraries (select2, datepicker, timepicker…)
+        - "**/select2/**" # Select2 library bundled outside inc/ (internal .html() rendering)
+        - "**/vendor/**"  # Composer/npm vendor directories
+        - "**/freemius/**"  # Freemius SDK — third-party library, OOS for Wordfence bounty. FP: independent-analytics 2.14.9 class-fs-plugin-updater.php:441
+    patterns:
+      - pattern-either:
+          # Array built from .map() / manual push passed to .html()
+          - pattern: $EL.html($VAR.join(...))
+          # Direct string concatenation inside .html() — catches patterns like:
+          #   jQuery('#el').html('<td>' + c.name + '</td>')
+          # $A + $B also matches multi-level concat: (A + B) + C, etc.
+          - pattern: $EL.html($A + $B)
+          # Bare identifier/member-expression passed straight to .html() with
+          # no construction operator at all — e.g. .html(url) or
+          # .html(response.title), commonly a value read from location.search
+          # or an AJAX/JSON response. Scoped to exclude string-literal and
+          # call-expression arguments (consistent with the existing
+          # buildStaticMenu()/DOMPurify.sanitize() exclusions below) so it
+          # only fires on the raw, unwrapped variable form.
+          - patterns:
+              - pattern: $EL.html($VAR)
+              - pattern-not: $EL.html("...")
+              - pattern-not: $EL.html(`...`)
+              - pattern-not: $EL.html($FUNC(...))
+          # .append() with string concatenation is equally dangerous
+          - pattern: $EL.append($A + $B)
+          - pattern: document.getElementById(...).innerHTML = $VAR;
+          # Template-literal HTML construction — a distinct building method
+          # from concatenation/.join(): backtick strings with ${} interpolation,
+          # assigned straight to innerHTML/.html(), accumulated into a row/html
+          # buffer (rows += `<tr>${x}</tr>`), or returned from a .map() callback
+          # that a caller later .join()s into the DOM.
+          - pattern: $ACC += `...${$VAR}...`
+          - pattern: $EL.innerHTML = `...${$VAR}...`
+          - pattern: $EL.html(`...${$VAR}...`)
+          - pattern: $ARR.map($PARAM => `...${$VAR}...`)
+          - pattern: $ARR.map(function($PARAM) { return `...${$VAR}...`; })
+      # Exclude innerHTML assignments where the variable name clearly identifies
+      # CSS/style content (not user-controlled HTML). A variable named 'css',
+      # 'style', 'cssText', 'styleContent', etc. is constructed from admin
+      # settings and does not carry attacker-controlled HTML.
+      - pattern-not:
+          patterns:
+            - pattern: document.getElementById(...).innerHTML = $CSS_VAR;
+            - metavariable-regex:
+                metavariable: $CSS_VAR
+                regex: "(?i)css|style"
+      # Exclude template-literal interpolations already wrapped by a named
+      # escaping helper at the call site (esc(), escapeHtml(), sanitizeX(),
+      # DOMPurify.sanitize(), striptags(), etc.) — the fix pattern WordPress
+      # plugin JS commonly adopts for this class. See TRIAGE note in message
+      # for the syntactic limitation (upstream-assignment escaping is missed).
+      - pattern-not:
+          patterns:
+            - pattern-either:
+                - pattern: $ACC += `...${$ESCFN(...)}...`
+                - pattern: $EL.innerHTML = `...${$ESCFN(...)}...`
+                - pattern: $EL.html(`...${$ESCFN(...)}...`)
+                - pattern: $ARR.map($PARAM => `...${$ESCFN(...)}...`)
+                - pattern: $ARR.map(function($PARAM) { return `...${$ESCFN(...)}...`; })
+            - metavariable-regex:
+                metavariable: $ESCFN
+                regex: "(?i).*(esc|escape|sanitize|purify|striptags).*"
+      # Exclude the equivalent escaping-helper wrapping for the STRING
+      # CONCATENATION sink shape (.html($A + $B) / .append($A + $B)) — the
+      # template-literal exclusion above does not cover concatenation, and a
+      # single dynamic value sandwiched between two fixed string-literal
+      # fragments, passed through an escaping-helper call, is fully
+      # neutralized regardless of which building method surrounds it.
+      # Confirmed FP: a single interpolated error-message value wrapped in a
+      # local escHtml() helper, concatenated between two literal HTML tag
+      # fragments, in a lazy-loaded panel's error-render call.
+      - pattern-not:
+          patterns:
+            - pattern-either:
+                - pattern: $EL.html("..." + $ESCFN(...) + "...")
+                - pattern: $EL.append("..." + $ESCFN(...) + "...")
+            - metavariable-regex:
+                metavariable: $ESCFN
+                regex: "(?i).*(esc|escape|sanitize|purify|striptags).*"
+      # TRIAGE gap closure: escaping performed one assignment BEFORE the sink
+      # rather than inline at the point of use — e.g. `const safe = escHtml(x);
+      # ...${safe}...` or `.html(safe)`. If the SAME variable referenced at the
+      # sink was assigned from a call whose name matches the escaping-helper
+      # convention anywhere earlier in the enclosing function, treat it as
+      # escaped (metavariable identity correlates it to whichever sink shape
+      # above bound that variable name).
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $F(...) {
+                  ...
+                  const $VAR = $ESCFN(...);
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $ESCFN
+                regex: "(?i).*(esc|escape|sanitize|purify|striptags).*"
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $F(...) {
+                  ...
+                  let $VAR = $ESCFN(...);
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $ESCFN
+                regex: "(?i).*(esc|escape|sanitize|purify|striptags).*"
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $F(...) {
+                  ...
+                  var $VAR = $ESCFN(...);
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $ESCFN
+                regex: "(?i).*(esc|escape|sanitize|purify|striptags).*"

@@ -1,0 +1,458 @@
+rules:
+  - id: claude.php.wordpress.rce.user-input-to-do-shortcode
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      User-controlled input flows into do_shortcode()/apply_shortcodes() without
+      validation against a permitted shortcode allowlist (CWE-94). Any registered
+      WordPress shortcode can be executed with attacker-supplied parameters.
+      apply_shortcodes() is a WP Core alias for do_shortcode() (shortcodes.php:223).
+
+      When the full shortcode expression (name + parameters) is user-controlled,
+      an attacker can invoke any registered shortcode — including those that expose
+      sensitive site data (e.g., CF7_bloginfo key='admin_email' exposes admin email
+      via contact-form-7-dynamic-text-extension 5.0.5).
+
+      Note: sanitize_text_field() does NOT prevent arbitrary shortcode execution.
+      It strips HTML tags but preserves shortcode bracket syntax ([ ] and any
+      parameter values), so shortcode strings pass through unchanged.
+      wp_kses_post() also does NOT strip shortcode syntax — it processes HTML
+      tags only, not shortcode brackets.
+
+      This also fires when do_shortcode()/apply_shortcodes() wraps directly
+      around a wp_kses_post()/sanitize_text_field() call, even if the value
+      passed to the sanitizer cannot be traced back to a superglobal within
+      the same function — e.g. it arrived as a parameter from a separate
+      calling function further up the chain. The sanitizer-then-sink adjacency
+      is treated as sufficient evidence on its own, since neither function
+      neutralizes shortcode syntax and the wrapped value is invariably
+      dynamic/externally-influenced content by the nature of the call.
+
+      Mitigation: validate the submitted shortcode tag name against an explicit
+      allowlist of tags expected for the calling form/context before passing
+      user input to do_shortcode(). strip_shortcodes() removes all shortcode
+      syntax and is a valid defense.
+
+      When Missing Authorization (CWE-862) is also present (no capability check
+      on the endpoint), note it as a secondary CWE.
+
+      TRIAGE REQUIRED — assess whether user input controls:
+        A) The full shortcode expression (tag name + parameters) — HIGH severity;
+           any registered shortcode callable.
+        B) Only parameter VALUES inside a developer-hardcoded tag name — severity
+           depends on what the specific shortcode callback does with user-supplied
+           parameter values (potential injection, info disclosure, or SSRF).
+    metadata:
+      category: security
+      cwe: "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Arbitrary Shortcode Execution"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/do_shortcode/
+        - https://developer.wordpress.org/apis/security/data-validation/
+      # CVE-2025-13146 (contact-form-7-dynamic-text-extension <= 5.0.6, latest
+      # as of this writing — Wordfence advisory notes only a partial patch in
+      # 5.0.4, vuln confirmed still live through 5.0.6):
+      # contact-form-7-dynamic-text-extension.php:779 (wpcf7dtx_js_handler(),
+      # registered on wp_ajax_nopriv_wpcf7dtx) —
+      #   $raw_value = sanitize_text_field(rawurldecode($field['value'])); // from $_POST
+      #   wpcf7dtx_get_dynamic($raw_value, ...)
+      # → includes/utilities.php:281-283 (separate file; cross-file hop) —
+      #   $shortcode_tag = '[' . $value . ']';
+      #   do_shortcode($shortcode_tag)
+      # sanitize_text_field() strips HTML tags but NOT shortcode bracket syntax.
+      # Unauthenticated attacker with a public-page nonce can invoke any DTX-registered
+      # shortcode, e.g. CF7_bloginfo key='admin_email' → exposes admin email address.
+      # CVSS 5.3 (AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N). The 5.0.4 nonce check does NOT
+      # neutralize this: it is wp_ajax_nopriv_-registered, and the nonce is embedded
+      # unauthenticated in every public page via wp_localize_script() on
+      # wp_enqueue_scripts — trivially readable from view-source by any visitor.
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: $_FILES
+          - pattern: filter_input(...)
+          # WP_REST_Request::get_param() (or any same-shaped request-object
+          # accessor) is the REST-API idiom for reading a route parameter —
+          # equally attacker-controlled as a raw superglobal. CVE-2025-49398
+          # (easy-appointments <= 3.12.14): $shortcode =
+          # $request->get_param('shortcode') on a POST route registered with
+          # permission_callback => '__return_true', straight into
+          # do_shortcode($shortcode).
+          - pattern: $REQUEST->get_param(...)
+          # WP_REST_Request also implements ArrayAccess, so a route/query/body
+          # parameter is equally readable via array-subscript syntax
+          # ($request['key']) as through the ->get_param() method above — same
+          # source, different accessor syntax. Common in REST-controller-style
+          # plugin architectures where the route registration (with its
+          # permission_callback) lives in a separate file/class from the
+          # controller method that actually reads the parameter and builds
+          # the shortcode, so a same-file "is this reachable unauthenticated"
+          # check on the controller alone would miss it. Constrained to
+          # request-named variables so a bare "$VAR['key']" read does not
+          # become a taint source for every config/args/settings array.
+          - patterns:
+              - pattern: $REQ[$KEY]
+              - metavariable-regex:
+                  metavariable: $REQ
+                  regex: ^\$(request|req|rest_request|wp_request|the_request)$
+      - pattern-either:
+          # wp_kses_post()/sanitize_text_field() strip HTML tags but NOT shortcode
+          # bracket syntax, so their return value is still a live shortcode
+          # expression. Modeled as a standalone source (not merely "passed-through
+          # taint") so the rule also fires when this call sits directly beside the
+          # sink inside a helper/render function that itself receives the raw
+          # value from a separate caller several function calls upstream — a
+          # call-boundary hop plain intraprocedural taint tracking cannot trace
+          # back to the originating superglobal, but the sanitizer-sink adjacency
+          # itself is already sufficient evidence of the same unsafe pattern.
+          - pattern: wp_kses_post(...)
+          - pattern: sanitize_text_field(...)
+      # str_replace() building a bracket-wrapped placeholder token (the same
+      # '[' . $VAR shape flagged by SHORTCODE_CONSTRUCTION_INJECTION) is the
+      # template merge-tag substitution used by mail/mandate/invoice text
+      # builders. Modeled as a standalone source for the same call-boundary-hop
+      # reason as wp_kses_post()/sanitize_text_field() above: the substituted
+      # value is caller-supplied by the nature of a generic template renderer,
+      # and the do_shortcode trigger is frequently reached via a Core content
+      # filter rather than an explicit do_shortcode() call. Excluded when the
+      # substituted value is itself wrapped in strip_shortcodes() (the fix).
+      - patterns:
+          - pattern: str_replace('[' . $KEY . ']', $VAL, $TEXT)
+          - pattern-not: str_replace('[' . $KEY . ']', strip_shortcodes(...), $TEXT)
+      # preg_replace_callback() with a brace/percent-delimited capture-group
+      # regex is the merge-tag/placeholder-token substitution idiom used by
+      # mail/template/completion-message renderers to resolve "{field}"-style
+      # tokens back to a submitted value. Modeled as a standalone source for
+      # the same call-boundary-hop reason as wp_kses_post()/sanitize_text_field()
+      # above: the callback resolving each token commonly lives in a separate
+      # method (often itself calling a generic "get submitted value by field
+      # name" getter), a hop plain intraprocedural taint tracking cannot trace
+      # back to the originating superglobal, but a token-substituted value is,
+      # by the nature of a generic merge-tag renderer, populated from request
+      # data the current rendering pass does not itself validate. The
+      # metavariable-regex requires an opening brace/percent delimiter
+      # immediately adjacent to a capture group's opening paren (and the
+      # mirrored closing pair) so an ordinary PCRE quantifier like "{2,4}"
+      # (digits/comma only, never an adjacent open-paren) is never mistaken
+      # for a token delimiter.
+      - patterns:
+          - pattern: preg_replace_callback($RE, $CB, $TEXT)
+          - metavariable-regex:
+              metavariable: $RE
+              regex: "(?s).*(\\\\?\\{\\(.*\\)\\\\?\\}|%\\(.*\\)%).*"
+      # preg_replace_callback() with a WordPress-shortcode-bracket-delimited
+      # capture-group regex (e.g. '/\[field ... id="(\w+)"...\]/') is the same
+      # merge-tag/placeholder-token substitution idiom as the brace/percent-
+      # delimited source above, but reuses actual shortcode syntax ('[', ']')
+      # as its own merge-tag delimiter instead of '{}'/'%%'. Modeled as a
+      # standalone source for the same call-boundary-hop reason: the resolved
+      # value is, by the nature of a generic field-merge-tag renderer,
+      # populated from request-submitted form data the current rendering pass
+      # does not itself re-validate for shortcode syntax, before the
+      # substituted string is later handed to a do_shortcode()/
+      # apply_shortcodes() sink elsewhere in the call chain. The regex
+      # requires an escaped bracket delimiter ('\[' ... '\]') with a capture
+      # group somewhere between them, so an unrelated preg_replace_callback()
+      # (e.g. one operating on plain word-boundary tokens) is not mistaken for
+      # this bracket-delimited merge-tag idiom.
+      - patterns:
+          - pattern: preg_replace_callback($RE, $CB, $TEXT)
+          - metavariable-regex:
+              metavariable: $RE
+              regex: '(?s).*\\\[.*\(.*\).*\\\].*'
+      # A post-like object's own `post_content` property flowing directly into
+      # a the_content-bound sink is the same shape as the bare-local-variable
+      # sources above, one property-access hop away: the object was fetched by
+      # an attacker-supplied ID in a custom AJAX/REST handler (bypassing the
+      # normal Loop, and any is_singular()-gated shortcode-stripping filter the
+      # plugin registers for its own single-post template), so the content is
+      # rendered without being re-validated at render time. Modeled as a
+      # standalone pseudo-source for the same call-boundary-hop reason as
+      # wp_kses_post()/sanitize_text_field() above: the round trip is written
+      # by one HTTP request (a public submission form) and read back by a
+      # completely different one, invisible to intraprocedural/interprocedural
+      # taint tracking — but a post's own post_content property is, by
+      # definition, whatever free-text content was submitted when the post was
+      # created/updated. CVE-2025-57928 (AWP Classifieds <= 4.4.3):
+      # unauthenticated ad-preview AJAX handler
+      # (wp_ajax_nopriv_awpcp_generate_listing_preview) fetched an
+      # attacker-chosen listing by ID with no ownership/capability check and
+      # rendered apply_filters('the_content', $listing->post_content); the
+      # front-end ad-submission form sanitized submitted text with
+      # wp_kses_post()/wp_strip_all_tags() but did not call
+      # strip_shortcodes(), so shortcode syntax planted by the submitter
+      # survived into post_content and any registered shortcode (including
+      # ones from other plugins) executed for any visitor supplying a valid
+      # listing ID.
+      - pattern: $OBJ->post_content
+      # A bare (non-literal) variable forms the ENTIRE bracket-wrapped shortcode
+      # expression — '[' . $X . ']' — immediately ahead of a do_shortcode()/
+      # apply_shortcodes() call. This is the "dynamic value evaluator" utility
+      # idiom common to CF7-extension / merge-tag / smart-tag plugins that offer
+      # shortcode-backed dynamic default values. CVE-2025-13146
+      # (contact-form-7-dynamic-text-extension <= 5.0.6):
+      # wpcf7dtx_get_dynamic($value, $tag = false, ...) performs exactly this
+      # concatenation on its own $value parameter (utilities.php:281-283), one
+      # function-call hop — a cross-FILE hop in the real plugin — away from the
+      # $_POST['shortcodes'][N]['value'] read in a separate nopriv AJAX handler
+      # (wpcf7dtx_js_handler(), main plugin file). That boundary is invisible to
+      # plain intraprocedural taint tracking, so the bracket-concatenation shape
+      # itself (occurring on a bare parameter, not a hardcoded literal) is
+      # modeled as a standalone source here — the same cross-boundary reasoning
+      # already used for wp_kses_post()/sanitize_text_field() above. A guarding
+      # nonce check on the caller's side does not neutralize this pattern: for a
+      # wp_ajax_nopriv_-registered action, a WordPress nonce only proves the
+      # request originated from a page that embedded it, and that nonce is
+      # served unauthenticated to every visitor — it is not a meaningful
+      # authorization boundary for this sink, so it is intentionally not
+      # modeled as a sanitizer. Distinguished from the narrower attribute-value
+      # breakout shape in shortcode-construction-injection.yaml, where the tag
+      # name is already hardcoded and only a parameter VALUE inside it is
+      # attacker-controlled.
+      - patterns:
+          - pattern-either:
+              - pattern: "'[' . $X . ']'"
+              - pattern: '"[" . $X . "]"'
+          - metavariable-regex:
+              metavariable: $X
+              regex: "^[^'\"]"
+          # Excludes the template-placeholder-token idiom above (str_replace's
+          # SEARCH argument): '[' . $X . ']' there is a literal token to find,
+          # never itself passed to do_shortcode() — already covered by its own
+          # correctly-scoped source/sanitizer pair.
+          - pattern-not-inside: str_replace('[' . $X . ']', $VAL, $TEXT)
+          - pattern-not-inside: str_replace("[" . $X . "]", $VAL, $TEXT)
+          # Excludes the case where $X was already reassigned through one of
+          # this rule's own sanitizers earlier in the enclosing function —
+          # without this, a fresh source match at the concatenation point
+          # would re-taint an already-sanitized value, since a sanitizer only
+          # cleanses an existing propagating taint chain and cannot suppress
+          # an unrelated later pattern-sources match on the same variable name.
+          - pattern-not-inside: |
+              function $FN(...) {
+                ...
+                $X = sanitize_key(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $FN(...) {
+                ...
+                $X = strip_shortcodes(...);
+                ...
+              }
+    pattern-sinks:
+      # do_shortcode() / apply_shortcodes() is the WordPress shortcode execution function.
+      # Any user-controlled string reaching it enables arbitrary shortcode execution.
+      - patterns:
+          - pattern-either:
+              - pattern: do_shortcode($X, ...)
+              - pattern: apply_shortcodes($X, ...)
+          # Fix shape from CVE-2025-49398 (easy-appointments 3.12.14.1): the
+          # shortcode tag name is extracted and checked against a fixed
+          # allow-list (in_array(..., true)) inside an early-return guard in
+          # the same function before the sink is reached — a REJECT guard: a
+          # negated in_array() check whose block halts execution (return/
+          # die/wp_die) before a disallowed tag can reach the sink. Narrowed
+          # from an earlier, broader form (any in_array() call anywhere
+          # inside an if-guard in the enclosing function, regardless of
+          # negation or control flow) after CVE-2024-13472
+          # (wc-product-table-lite 3.9.4->3.9.5) showed that broader form
+          # false-negatives on a common sibling idiom: a POSITIVE,
+          # non-halting in_array() that only filters which key=value pairs
+          # get appended to an attribute string (`if (in_array($key,
+          # $allowed)) { $attrs .= ...; }`) — it never rejects or validates
+          # the shortcode expression reaching the sink, so the broad form
+          # incorrectly treated the whole function as already-guarded
+          # (confirmed empirically: removing the old broad clause recovered
+          # the true positive at the CVE's pinned sink line). Requiring both
+          # the negation and a halting statement ties the exclusion to an
+          # actual reject-guard, not any allow-list-shaped conditional.
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... !in_array($TAG, ...) ...>) {
+                  ...
+                  return $RET;
+                  ...
+                }
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... !in_array($TAG, ...) ...>) {
+                  ...
+                  die(...);
+                  ...
+                }
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... !in_array($TAG, ...) ...>) {
+                  ...
+                  wp_die(...);
+                  ...
+                }
+                ...
+              }
+      # apply_filters() on a Core hook that WP Core itself binds do_shortcode() to
+      # (the_content, widget_text_content, widget_block_content — all @priority 11
+      # in wp-includes/default-filters.php) executes shortcodes with no explicit
+      # do_shortcode() call anywhere in the plugin's own source.
+      - patterns:
+          - pattern: apply_filters($HOOK, $X, ...)
+          - metavariable-regex:
+              metavariable: $HOOK
+              regex: "^['\"](the_content|widget_text_content|widget_block_content)['\"]$"
+          - focus-metavariable: $X
+          # Fix shape from CVE-2025-57928 (AWP Classifieds 4.4.3->4.4.4): a
+          # resource-scoped nonce check (wp_verify_nonce() tied to the fetched
+          # object's own ID/state) guarding the sink earlier in the same
+          # function is the generalizable form of the patch's added
+          # authorization gate (the plugin-specific
+          # is_current_user_allowed_to_preview_listing() ownership/auto-draft
+          # check itself is not generalizable, but the preceding
+          # wp_verify_nonce() guard it was added alongside is a recognizable,
+          # reusable "this handler now checks before rendering" signal).
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (! wp_verify_nonce(...)) { ... }
+                ...
+              }
+      # Custom "run/execute this shortcode with these args" wrapper utility —
+      # a plugin-defined function (NOT do_shortcode()/apply_shortcodes()
+      # themselves, nor WP Core's own shortcode_atts()/has_shortcode()/
+      # add_shortcode()/shortcode_exists()/get_shortcode_regex()/
+      # shortcode_unautop()) whose name contains "shortcode", called with a
+      # tag argument plus an attributes value. Mirrors the common cross-file
+      # "build '[tag attr=\"val\" ...]' from an array, then do_shortcode() it"
+      # utility idiom: the actual do_shortcode()/apply_shortcodes() call
+      # lives inside the wrapper's own body, typically in a different file
+      # than the caller — a hop plain intraprocedural taint tracking cannot
+      # see across, so the wrapper call site itself is modeled as the sink.
+      # CVE-2024-13495 (GamiPress <= 7.2.1):
+      # gamipress_ajax_get_logs()/gamipress_ajax_get_user_earnings() sanitize
+      # each $_REQUEST value with sanitize_text_field() only (which does not
+      # strip '[' / ']'), merge it via shortcode_atts(), then hand the array
+      # to a same-named "*_do_shortcode()" wrapper utility that builds and
+      # executes '[tag attr="value" ...]' via do_shortcode() — unauthenticated
+      # arbitrary shortcode execution via attribute-value bracket breakout.
+      - patterns:
+          - pattern: $FUNC($TAG, $ATTS, ...)
+          - metavariable-regex:
+              metavariable: $FUNC
+              regex: '(?i)^(?!(do_shortcode|apply_shortcodes|shortcode_atts|shortcode_unautop|has_shortcode|add_shortcode|shortcode_exists|get_shortcode_regex)$).*shortcode.*$'
+          - focus-metavariable: $ATTS
+          # Fix shape from CVE-2024-13495 (GamiPress 7.2.1->7.2.2): a
+          # str_replace() call stripping the literal '[' / ']' characters
+          # (either array order) appears anywhere in the enclosing function.
+          # The real-world fix loops over the array being built and
+          # reassigns each element through this call — array-element
+          # reassignment inside a loop that Semgrep's taint-sanitizer
+          # granularity does not reliably cleanse (confirmed empirically),
+          # so the exclusion is modeled structurally here instead of relying
+          # solely on the pattern-sanitizers entry below.
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                str_replace(array('[', ']'), '', $V);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                str_replace(array(']', '['), '', $V);
+                ...
+              }
+    pattern-sanitizers:
+      - pattern-either:
+          # str_replace() stripping the literal '[' / ']' characters (either
+          # array order) is the real-world fix for the wrapper-sink shape
+          # above when applied via a straightforward whole-variable
+          # reassignment (as opposed to a per-element array-loop
+          # reassignment, which that sink's own pattern-not-inside exclusion
+          # handles instead, since Semgrep's taint-sanitizer array-element
+          # granularity does not reliably cleanse the loop form).
+          # CVE-2024-13495 (GamiPress 7.2.1->7.2.2).
+          - pattern: str_replace(array('[', ']'), '', $X)
+          - pattern: str_replace(array(']', '['), '', $X)
+      - pattern-either:
+          # Numeric casts — produce an integer, which cannot form a valid shortcode
+          # expression. Prevents false positives when user supplies an ID that is
+          # embedded as a parameter value in a developer-hardcoded shortcode tag.
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          # sanitize_key() restricts output to [a-z0-9_-]. While this could match
+          # a shortcode tag name, it strips spaces and brackets, so the full
+          # shortcode expression '[tag key=value]' cannot pass through as executable
+          # when both the tag name AND parameters are processed by sanitize_key().
+          - pattern: sanitize_key(...)
+          # strip_shortcodes() removes all WordPress shortcode bracket syntax from a
+          # string, neutralizing it before it reaches a do_shortcode()-bound sink.
+          - pattern: strip_shortcodes(...)
+          # NOTE: sanitize_text_field() is intentionally NOT listed here.
+          # It strips HTML tags (<, >, and tag content) but preserves shortcode
+          # bracket syntax. A value like "CF7_bloginfo key='admin_email'" passes
+          # through sanitize_text_field() unchanged and remains executable via
+          # do_shortcode(). Confirmed: contact-form-7-dynamic-text-extension 5.0.5.
+      # preg_replace() with a negated-character-class allow-list regex (the
+      # `/[^permitted-chars]/` idiom, replacement ''): every byte outside the
+      # explicit permitted set is stripped. When that idiom is used ahead of
+      # this sink it removes '[' and ']' along with any quote characters the
+      # same way strip_shortcodes() does, neutralizing shortcode-bracket
+      # construction — distinct from esc_attr()/sanitize_text_field() alone,
+      # neither of which touches '[' or ']'. Modeled narrowly (regex literal
+      # must open with a quote, a single delimiter char, then '[^') so an
+      # unrelated preg_replace() call (e.g. one that only normalizes
+      # whitespace) is not mistaken for a bracket-stripping allow-list.
+      - patterns:
+          - pattern: preg_replace($RE, '', $X)
+          - metavariable-regex:
+              metavariable: $RE
+              regex: "^['\"].\\[\\^"
+      # preg_replace() with a positive (denylist) character class that opens
+      # immediately after the delimiter (an unescaped '[', not the '[^'
+      # negated-allowlist form the branch above already covers) and lists
+      # both the opening and closing shortcode bracket characters ('\[' and
+      # '\]') as members to strip. Fix shape from CVE-2024-13472
+      # (wc-product-table-lite 3.9.4->3.9.5): the patch replaced a broken
+      # alternation regex ('/\[\]\s|<\s/' — matches only a literal, adjacent
+      # '[]' pair followed by whitespace, or '<' followed by whitespace; a
+      # lone '[' or ']', or a '<' not immediately followed by whitespace,
+      # passes through untouched) with a real character class
+      # ('/[\[\]<>]/') that strips every '[', ']', '<', '>' byte
+      # individually — a materially different, effective bracket-stripping
+      # idiom the existing negated-allowlist branch above does not
+      # recognize (this class is not negated). The anchor requires an
+      # unescaped '[' immediately after the one-character delimiter — the
+      # broken pre-fix alternation has no class-opening '[' at all (it
+      # starts with the escaped literal '\[' instead), so it does not
+      # qualify as a sanitizer.
+      - patterns:
+          - pattern: preg_replace($RE, '', $X)
+          - metavariable-regex:
+              metavariable: $RE
+              regex: "^['\"].\\["
+          - metavariable-regex:
+              metavariable: $RE
+              regex: '.*\\\[.*'
+          - metavariable-regex:
+              metavariable: $RE
+              regex: '.*\\\].*'

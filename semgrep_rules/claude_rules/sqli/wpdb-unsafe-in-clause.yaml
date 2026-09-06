@@ -1,0 +1,95 @@
+rules:
+  - id: claude.php.wordpress.sqli.wpdb-unsafe-in-clause
+    languages: [php]
+    severity: HIGH
+    message: |
+      An implode() call constructs a comma-separated list that is concatenated
+      into a $wpdb SQL execution method, or into a sprintf()-built "IN (%s)"
+      SQL fragment, but the array values are not integer-cast via
+      array_map('intval'/​'absint') or wp_parse_id_list(). If any array element
+      contains user input, the IN() clause is SQL-injectable (CWE-89). The
+      sprintf() shape is common in plugins with a custom query-builder/ORM
+      layer, where the fragment is stored and executed several calls later
+      rather than passed straight to $wpdb.
+
+      sanitize_text_field() on individual values is insufficient — it preserves
+      parentheses, OR, AND, semicolons, and other SQL metacharacters.
+
+      Fix: cast each value to integer, or use prepare() with placeholder arrays:
+        // Safe: integer cast
+        $wpdb->query("... IN (" . implode(',', array_map('intval', $ids)) . ")");
+
+        // Safe: prepare with placeholders
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+        $wpdb->query($wpdb->prepare("... IN ($placeholders)", ...$ids));
+
+      TRIAGE GUIDANCE
+      ───────────────────────────────────────────────────────────────────
+      TRUE POSITIVE indicators:
+        - $ARR originates from explode(), preg_split(), or a direct $_POST/$_GET
+          array parameter without per-element integer casting.
+        - The IN() clause is used in DELETE, UPDATE, or SELECT WHERE conditions.
+
+      FALSE POSITIVE indicators:
+        - $ARR is built from hardcoded values or database reads (not user input).
+        - $ARR is processed through array_map('intval'/​'absint') on a prior line
+          that Semgrep cannot see (search mode does not cross statements).
+        - The implode() constructs placeholder strings ('%s','%s',...) not values.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+        - https://developer.wordpress.org/reference/functions/wp_parse_id_list/
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-either:
+                  - pattern: $wpdb->query("..." . implode($SEP, $ARR) . "...", ...)
+                  - pattern: $wpdb->get_results("..." . implode($SEP, $ARR) . "...", ...)
+                  - pattern: $wpdb->get_row("..." . implode($SEP, $ARR) . "...", ...)
+                  - pattern: $wpdb->get_var("..." . implode($SEP, $ARR) . "...", ...)
+                  - pattern: $wpdb->get_col("..." . implode($SEP, $ARR) . "...", ...)
+                  - pattern: $wpdb->query("..." . implode($SEP, $ARR), ...)
+                  - pattern: $wpdb->get_results("..." . implode($SEP, $ARR), ...)
+                  - pattern: $wpdb->get_row("..." . implode($SEP, $ARR), ...)
+                  - pattern: $wpdb->get_var("..." . implode($SEP, $ARR), ...)
+                  - pattern: $wpdb->get_col("..." . implode($SEP, $ARR), ...)
+              # Exclude safe array_map integer-cast patterns
+              - pattern-not: $wpdb->$METHOD("..." . implode($SEP, array_map('intval', $SAFE)) . "...", ...)
+              - pattern-not: $wpdb->$METHOD("..." . implode($SEP, array_map('absint', $SAFE)) . "...", ...)
+              - pattern-not: $wpdb->$METHOD("..." . implode($SEP, array_map('floatval', $SAFE)) . "...", ...)
+              - pattern-not: $wpdb->$METHOD("..." . implode($SEP, array_map('sanitize_key', $SAFE)) . "...", ...)
+              - pattern-not: $wpdb->$METHOD("..." . implode($SEP, array_map('intval', $SAFE)), ...)
+              - pattern-not: $wpdb->$METHOD("..." . implode($SEP, array_map('absint', $SAFE)), ...)
+              - pattern-not: $wpdb->$METHOD("..." . implode($SEP, array_map('floatval', $SAFE)), ...)
+              - pattern-not: $wpdb->$METHOD("..." . implode($SEP, array_map('sanitize_key', $SAFE)), ...)
+              # Exclude placeholder construction via array_fill — these build '%s,%s,...' not values
+              - pattern-not: $wpdb->$METHOD("..." . implode($SEP, array_fill(...)) . "...", ...)
+              - pattern-not: $wpdb->$METHOD("..." . implode($SEP, array_fill(...)), ...)
+              # Exclude wp_parse_id_list — returns array of absint values
+              - pattern-not: $wpdb->$METHOD("..." . implode($SEP, wp_parse_id_list($SAFE)) . "...", ...)
+              - pattern-not: $wpdb->$METHOD("..." . implode($SEP, wp_parse_id_list($SAFE)), ...)
+              # Exclude when entire expression is inside prepare()
+              - pattern-not-inside: $wpdb->prepare(...)
+          # Variant: sprintf()-built "IN (%s)" fragment handed to a custom
+          # query-builder/ORM raw-fragment method instead of straight to
+          # $wpdb — implode() may sit inside a ternary, not a bare argument.
+          - patterns:
+              - pattern: sprintf($FMT, ..., <... implode($SEP, $ARR) ...>)
+              - metavariable-regex:
+                  metavariable: $FMT
+                  regex: (?i).*\bIN\s*\(\s*%s\s*\).*
+              - pattern-not: sprintf($FMT, ..., <... implode($SEP, array_map('intval', $SAFE)) ...>)
+              - pattern-not: sprintf($FMT, ..., <... implode($SEP, array_map('absint', $SAFE)) ...>)
+              - pattern-not: sprintf($FMT, ..., <... implode($SEP, array_map('floatval', $SAFE)) ...>)
+              - pattern-not: sprintf($FMT, ..., <... implode($SEP, array_map('sanitize_key', $SAFE)) ...>)
+              - pattern-not: sprintf($FMT, ..., <... implode($SEP, wp_parse_id_list($SAFE)) ...>)
+              - pattern-not: sprintf($FMT, ..., <... implode($SEP, array_fill(...)) ...>)

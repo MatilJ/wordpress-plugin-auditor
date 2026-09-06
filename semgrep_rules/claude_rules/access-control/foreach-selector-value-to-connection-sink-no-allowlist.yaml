@@ -1,0 +1,104 @@
+rules:
+  - id: claude.php.wordpress.access-control.foreach-selector-value-to-connection-sink-no-allowlist
+    languages: [php]
+    severity: HIGH
+    message: |
+      A loop iterates over a multi-value selector field taken from a form/AJAX
+      submission and passes each item, unchecked, as the destination-selector
+      argument to a function that performs an outbound integration action
+      (subscribing a contact, adding a lead, syncing to an external list or
+      connection). There is no membership check of the item against a
+      server-side allow-list of destinations the site owner actually
+      configured for that same form/context (CWE-266 / CWE-639).
+
+      Generic value sanitizers (sanitize_text_field(), trim(), is_array())
+      do NOT close this gap — they clean the string's characters or shape,
+      they do not restrict WHICH destination can be targeted. When a form's
+      submitters are meant to be restricted to a fixed set of pre-configured
+      destinations (a specific mailing list, CRM segment, or connection ID),
+      a submitter who controls this value can redirect the write to any
+      destination the underlying integration API accepts — bypassing a
+      restriction the site owner explicitly configured, in effect exercising
+      a level of control the submitter's role was never meant to have.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - The containing handler is reachable without authentication
+          (wp_ajax_nopriv_*, a front-end template_redirect/init hook with no
+          capability gate, or a REST route whose permission_callback returns
+          true).
+        - The loop item reaches the sink call with no in_array($ITEM,
+          $ALLOWED) (or equivalent membership check) gating that call.
+
+      FALSE POSITIVE indicators:
+        - An in_array($ITEM, $ALLOWED, true) (or equivalent) check gates the
+          call, and $ALLOWED is computed server-side from the site's own
+          saved configuration for that specific form/context (not
+          re-derived from the same request).
+        - The destination argument is a hardcoded literal, not the loop item.
+        - The handler requires a capability beyond Subscriber/Customer.
+
+      Fix: before invoking the sink, validate the loop item against the
+      server-side allow-list of destinations the site owner actually
+      configured for this form/context, e.g.
+      in_array($item, $allowed_destinations, true).
+    metadata:
+      category: security
+      cwe:
+        - "CWE-266: Incorrect Privilege Assignment"
+        - "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/266.html
+        - https://cwe.mitre.org/data/definitions/639.html
+        - https://owasp.org/www-community/vulnerabilities/Insecure_Direct_Object_Reference
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern: |
+                  foreach ($ITEMS as $ITEM) {
+                    ...
+                    $CLASS::$METHOD(...,$ITEM,...);
+                    ...
+                  }
+              - pattern-not: |
+                  foreach ($ITEMS as $ITEM) {
+                    ...
+                    if (in_array($ITEM, $ALLOWED)) {
+                      ...
+                      $CLASS::$METHOD(...,$ITEM,...);
+                      ...
+                    }
+                    ...
+                  }
+          - patterns:
+              - pattern: |
+                  foreach ($ITEMS as $ITEM) {
+                    ...
+                    $OBJ->$METHOD(...,$ITEM,...);
+                    ...
+                  }
+              - pattern-not: |
+                  foreach ($ITEMS as $ITEM) {
+                    ...
+                    if (in_array($ITEM, $ALLOWED)) {
+                      ...
+                      $OBJ->$METHOD(...,$ITEM,...);
+                      ...
+                    }
+                    ...
+                  }
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: "(?i).*(subscribe|add_lead|add_contact|add_subscriber|add_member|to_connection|to_list|sync_contact).*"
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"

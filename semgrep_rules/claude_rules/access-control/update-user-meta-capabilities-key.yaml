@@ -1,0 +1,318 @@
+rules:
+  - id: claude.php.wordpress.access.update-user-meta-capabilities-key
+    languages: [php]
+    severity: HIGH
+    message: |
+      update_user_meta() called with a meta key matching the WordPress
+      capabilities meta key pattern. Direct writes to the capabilities
+      usermeta row bypass the set_role()/add_cap() API and can inject
+      arbitrary roles (CWE-269 — Improper Privilege Management).
+
+      The capabilities meta key is {$wpdb->prefix}capabilities (default:
+      wp_capabilities). Multisite prefixed variants (wp_2_capabilities,
+      wp_3_capabilities) are also valid targets — incomplete blocklists
+      that only block 'wp_capabilities' miss these (CVE-2026-7641).
+
+      Limitation: this rule matches literal string keys, name-hinted
+      variables, and the foreach-loop-key idiom described below. A key
+      built from unrelated runtime concatenation (e.g.,
+      $wpdb->prefix . 'capabilities') with no enclosing foreach still
+      requires manual audit — use grep-scanner TIER4_ROLE_MANIPULATION
+      and TIER4_OPTION_WRITES results to trace these patterns.
+
+      Fix: never allow user input to control the meta key in
+      update_user_meta(). Use set_role()/add_cap() API with proper
+      current_user_can('promote_users') authorization checks.
+
+      Extended coverage: the meta-key match now also includes 'role' and
+      'permission' tokens (plugins commonly store a custom RBAC role/
+      permission set under a *_capabilities, *_roles, or *_permissions
+      usermeta key, not only the WP-core wp_capabilities key), and the
+      rule is now silent when the enclosing function/method contains a
+      current_user_can(), user_can(), or a *->permission_check(...)-style
+      authorization call anywhere in its body (CWE-266 — Incorrect
+      Privilege Assignment: an unauthenticated/self-service REST or AJAX
+      handler took a target user ID and a caller-supplied role/permission
+      list straight from the request and wrote them to usermeta with zero
+      capability gate; the fix added exactly this kind of check-and-bail
+      at function entry). This still is not full taint/control-flow
+      analysis — a check that exists in a *different* function in the
+      call chain, or a same-function ownership comparison that isn't one
+      of the three literal guard calls above (e.g. comparing the target ID
+      to get_current_user_id()), will not suppress the finding and needs
+      manual triage.
+
+      Foreach-key coverage: also fires when the meta key is the loop-key
+      variable of a foreach() over a request/JSON-body-derived array (e.g.
+      iterating a decoded php://input payload or a $_POST/$_REQUEST-derived
+      array), with no in_array()/isset()/!empty()/array_key_exists()
+      membership check binding that same key variable against a distinct,
+      non-request-derived allow-list array before the call (CWE-266). A
+      check on a companion field's VALUE (e.g. a submitted label matched
+      against a list of known labels) does not neutralize this — the key
+      itself, which becomes the meta_key argument, must be the thing
+      validated.
+
+      Derived-key coverage: also fires on the common "strip a form-field
+      prefix" idiom — a per-iteration variable is assigned from
+      sanitize_key(...) inside the same foreach (not necessarily the loop
+      key itself; e.g. substr()/str_replace() peeling a 'meta_' prefix off
+      the request field name before sanitizing it) and that derived
+      variable, not the raw loop key, becomes the meta_key argument — with
+      no allow-list membership check on the derived variable anywhere in
+      the loop. Same underlying flaw (CWE-269): the derivation only cleans
+      the string's characters, it never restricts WHICH key name may be
+      written, so 'meta_wp_capabilities' still derives to 'wp_capabilities'.
+
+      Wrapper-indirection coverage: also fires when the meta key/value are
+      not written directly at the request-derived loop site but forwarded
+      through a thin two-parameter setter (commonly named set_meta(),
+      save_user_meta(), or similar) whose body contains nothing but an
+      unconditional update_user_meta() call using its own two parameters,
+      with no in_array()/array_key_exists()/isset()/!empty() key gate
+      anywhere in the setter's own body (CWE-269). This is the common
+      WordPress-plugin idiom of a single low-level meta-setter method
+      called from a foreach loop elsewhere in the same class/file — Semgrep
+      does not correlate the loop key across the function-call boundary, so
+      this branch targets the setter definition itself, which is also where
+      real-world patches for this idiom add the guard (the fix is a
+      chokepoint fix, not a per-call-site fix).
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - Meta key is user-controlled and can be set to wp_capabilities
+        - Meta key contains 'capabilities'/'role'/'permission' and the
+          value (the role/permission list) is user-controlled
+        - Handler lacks current_user_can()/user_can()/permission_check()
+          anywhere in the same function — confirm no ownership check
+          (e.g. target ID === get_current_user_id()) is present instead
+        - The meta key is derived via sanitize_key() (optionally preceded
+          by substr()/str_replace() prefix-stripping) from a request-array
+          loop item, with no in_array()/isset()/array_key_exists() check
+          on that derived variable before the write.
+
+      FALSE POSITIVE indicators:
+        - Meta key is hardcoded to a non-capability key that merely
+          contains the word 'capabilities' in a display context
+          (e.g., 'profile_capabilities_display')
+        - Handler has manage_options or promote_users capability check
+          (now machine-suppressed if current_user_can()/user_can() is
+          the literal call; still manually verify custom-named checks)
+        - Value is hardcoded, not user-controlled
+        - The derived meta-key variable is checked with in_array()/
+          array_key_exists()/isset() against a distinct allow-list array,
+          and the failing branch `continue`s before reaching the write —
+          this is the fix shape and is machine-suppressed below. A
+          same-named lookup used only to fetch per-field display/type
+          config (not gating the write with a skip) does NOT suppress.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-269: Improper Privilege Management"
+        - "CWE-266: Incorrect Privilege Assignment"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/update_user_meta/
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+        - https://cwe.mitre.org/data/definitions/266.html
+        - https://cwe.mitre.org/data/definitions/269.html
+        - https://www.wordfence.com/blog/2024/07/7000-wordpress-sites-affected-by-privilege-escalation-vulnerability-in-profilegrid-wordpress-plugin/
+    patterns:
+      - pattern-either:
+          - pattern: update_user_meta($ID, 'wp_capabilities', ...)
+          - pattern: update_user_meta($ID, "wp_capabilities", ...)
+          - patterns:
+              - pattern: update_user_meta($ID, $KEY, ...)
+              - metavariable-regex:
+                  metavariable: $KEY
+                  regex: .*(capabilit|role|permission).*
+          - patterns:
+              - pattern: update_user_meta($ID, $KEY, ...)
+              - focus-metavariable: $KEY
+              - pattern-inside: |
+                  foreach ($ARR as $KEY => $ITEM) { ... }
+              - metavariable-regex:
+                  metavariable: $ARR
+                  regex: (?i).*(post|request|get|data|input|payload|params|fields|body|meta).*
+              - pattern-not-inside: |
+                  foreach ($ARR as $KEY => $ITEM) {
+                    ...
+                    if (<... in_array($KEY, ...) ...>) { ... }
+                    ...
+                  }
+              - pattern-not-inside: |
+                  foreach ($ARR as $KEY => $ITEM) {
+                    ...
+                    if (<... isset($ALLOWED[$KEY]) ...>) { ... }
+                    ...
+                  }
+              - pattern-not-inside: |
+                  foreach ($ARR as $KEY => $ITEM) {
+                    ...
+                    if (<... ! empty($ALLOWED[$KEY]) ...>) { ... }
+                    ...
+                  }
+              - pattern-not-inside: |
+                  foreach ($ARR as $KEY => $ITEM) {
+                    ...
+                    if (<... array_key_exists($KEY, $ALLOWED) ...>) { ... }
+                    ...
+                  }
+          # Derived-key coverage (CWE-269): the meta key argument is NOT the
+          # raw loop key itself but a separate variable assigned from
+          # sanitize_key(...) somewhere inside the same foreach (the common
+          # "strip the 'meta_' form-field prefix, then sanitize" idiom). Only
+          # a character sanitizer runs — no allow-list membership check binds
+          # the derived variable — so any request-supplied field name,
+          # including one that derives to 'wp_capabilities', is honored.
+          #
+          # The negative clauses below require the guard to actually skip
+          # the iteration (a `continue` inside the gating if-block) before
+          # the write, rather than merely appearing anywhere in the loop body
+          # — real-world handlers commonly look up a per-field DISPLAY/type
+          # config via an unrelated `isset($fields_map[$key])` check (used
+          # only to reformat the value, e.g. date/number normalization) that
+          # never gates the write at all; a plain "does this if exist
+          # anywhere in the loop" test would be fooled by that and wrongly
+          # suppress the true positive (confirmed against the real CVE
+          # source, which contains exactly such an incidental lookup).
+          - patterns:
+              - pattern: update_user_meta($ID, $METAKEY, ...)
+              - focus-metavariable: $METAKEY
+              - pattern-inside: |
+                  foreach ($ARR as $KEY => $ITEM) {
+                    ...
+                    $METAKEY = sanitize_key(...);
+                    ...
+                  }
+              - metavariable-regex:
+                  metavariable: $ARR
+                  regex: (?i).*(post|request|get|data|input|payload|params|fields|body|meta).*
+              - pattern-not-inside: |
+                  foreach ($ARR as $KEY => $ITEM) {
+                    ...
+                    if (<... in_array($METAKEY, ...) ...>) {
+                      ...
+                      continue;
+                      ...
+                    }
+                    ...
+                    update_user_meta($ID, $METAKEY, ...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  foreach ($ARR as $KEY => $ITEM) {
+                    ...
+                    if (<... ! in_array($METAKEY, ...) ...>) {
+                      ...
+                      continue;
+                      ...
+                    }
+                    ...
+                    update_user_meta($ID, $METAKEY, ...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  foreach ($ARR as $KEY => $ITEM) {
+                    ...
+                    if (<... array_key_exists($METAKEY, $ALLOWED) ...>) {
+                      ...
+                      continue;
+                      ...
+                    }
+                    ...
+                    update_user_meta($ID, $METAKEY, ...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  foreach ($ARR as $KEY => $ITEM) {
+                    ...
+                    if (<... ! array_key_exists($METAKEY, $ALLOWED) ...>) {
+                      ...
+                      continue;
+                      ...
+                    }
+                    ...
+                    update_user_meta($ID, $METAKEY, ...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  foreach ($ARR as $KEY => $ITEM) {
+                    ...
+                    if (<... ! isset($ALLOWED[$METAKEY]) ...>) {
+                      ...
+                      continue;
+                      ...
+                    }
+                    ...
+                    update_user_meta($ID, $METAKEY, ...);
+                    ...
+                  }
+          # Wrapper-indirection coverage (CWE-269/CWE-266): a thin two-arg
+          # meta-setter method/function ($KEY, $VALUE) forwards BOTH of its
+          # own parameters straight into update_user_meta() with no key
+          # allow-list/deny-list check anywhere in its body. This is the
+          # common "central low-level setter" idiom (e.g. a set_meta()/
+          # save_user_meta() helper called from a foreach over request data
+          # elsewhere in the class) — Semgrep cannot correlate the caller's
+          # loop key across the function-call boundary, but the wrapper
+          # itself is the natural, and in the real patch actually used,
+          # chokepoint for the guard: the fix added the deny-list check
+          # inside this exact setter rather than at each call site. Flagging
+          # the ungated setter directly avoids depending on interprocedural
+          # taint tracking.
+          - patterns:
+              - pattern: update_user_meta($ID, $KEY, $VALUE, ...)
+              - pattern-inside: |
+                  function $METHOD($KEY, $VALUE) {
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $METHOD($KEY, $VALUE) {
+                    ...
+                    if (<... in_array($KEY, ...) ...>) { ... }
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $METHOD($KEY, $VALUE) {
+                    ...
+                    if (<... array_key_exists($KEY, ...) ...>) { ... }
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $METHOD($KEY, $VALUE) {
+                    ...
+                    if (<... isset($ALLOWED[$KEY]) ...>) { ... }
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $METHOD($KEY, $VALUE) {
+                    ...
+                    if (<... ! empty($ALLOWED[$KEY]) ...>) { ... }
+                    ...
+                  }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... current_user_can(...) ...>;
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... user_can(...) ...>;
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... $OBJ->permission_check(...) ...>;
+            ...
+          }

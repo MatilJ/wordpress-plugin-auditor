@@ -1,0 +1,38 @@
+rules:
+  - id: claude.php.wordpress.xss.kses-allowed-event-handlers
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      Custom wp_kses() allowed HTML array includes event handler attributes
+      (onclick, onerror, onload, etc.). wp_kses() will preserve these attributes,
+      rendering XSS protection ineffective. Remove event handler attributes from
+      the allowlist.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      # FALSE POSITIVE — unrelated array literal, not a wp_kses() allowlist:
+      # a plain 'onclick' => '...' key also occurs in WP_Admin_Bar::add_node()'s
+      # documented 'meta' argument (a legitimate, intentional admin-bar-node
+      # API field, unrelated to HTML sanitization) and in other plugin-defined
+      # config arrays that happen to reuse the same key name. The bare
+      # pattern-regex below matched such an array literal with no wp_kses()
+      # call anywhere nearby.
+    patterns:
+      - pattern-regex: "['\"](onclick|onerror|onload|onmouseover|onfocus|onmouseout|onchange|onsubmit|onkeyup|onkeydown|onmouseenter|onmouseleave)['\"]\\s*=>"
+      - pattern-not-inside: |
+          $wp_admin_bar->add_node(...);
+      - pattern-not-inside: |
+          add_node(...);
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/vendor_prefixed/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"

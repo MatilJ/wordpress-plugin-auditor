@@ -1,0 +1,87 @@
+rules:
+  - id: claude.php.wordpress.sqli.sql-keyword-blocklist-array-iteration
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      An array literal holds one or more regex strings that match SQL DML
+      keyword pairs (SELECT/FROM, DELETE/FROM, UPDATE/SET, INSERT/INTO,
+      UNION/SELECT), the array-of-patterns idiom typically iterated with
+      foreach() + preg_match($pattern, $input) to null out user input that
+      matches any entry. This is the same weak-denylist-as-sanitizer defense
+      as a direct preg_match($literal_regex, ...) call, just expressed as a
+      data-driven loop instead of a single call site — a bypass payload that
+      avoids every listed keyword PAIR (e.g. a bare SLEEP()/BENCHMARK() call
+      with no preceding SELECT, or a stacked/boolean-based technique) is not
+      caught by any entry and reaches the SQL sink unfiltered.
+      Replace this blocklist with $wpdb->prepare() and %s/%d/%f placeholders
+      for all user-controlled values passed to SQL queries (CWE-89).
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+      # WHY THIS RULE IS QUARANTINED (not shipped in claude_rules/sqli/)
+      # ─────────────────────────────────────────────────────────────────────
+      # Companion to claude_rules/sqli/sql-keyword-blocklist-sanitizer.yaml,
+      # which only matches a regex literal passed DIRECTLY as a preg_match()
+      # argument. The real-world variant of this shape stores the same kind
+      # of keyword-pair regex strings in an array and iterates it (foreach +
+      # preg_match($loop_var, ...)) — the sibling rule's metavariable-regex
+      # cannot see through the array indirection, so it never fires on this
+      # shape (false negative). This rule closes that gap by matching any
+      # array literal containing at least one such regex-string element.
+      #
+      # KNOWN LIMITATION — vendor patches to this exact shape typically add
+      # ONE more entry to the array (covering the specific bypass payload
+      # that was reported) rather than replacing the blocklist mechanism
+      # with $wpdb->prepare(). The array literal — and therefore this rule's
+      # match — legitimately still exists, at the same file:line, in the
+      # "fixed" release. This rule cannot pass the standard two-version
+      # CVE oracle (fire on affected / silent on patched) for that class of
+      # incremental vendor fix, so it stays out of the shipped corpus and is
+      # kept here as a documented, manually-triaged lead instead. A hit is
+      # still worth triage: the underlying weak-denylist defense is real and
+      # commonly still bypassable via a keyword/function the array omits.
+      #
+      # TRIAGE GUIDANCE
+      # ─────────────────────────────────────────────────────────────────────
+      # 1. Confirm the array is actually iterated with preg_match()/
+      #    preg_match_all() against user-controlled input (foreach over the
+      #    array, or array_map/array_filter with a preg_match callback).
+      # 2. Trace where the checked variable flows next — a SQL context
+      #    (query string, $wpdb->prepare() format-string argument, a
+      #    preg_replace() rewrite of an already-built WHERE/JOIN clause)
+      #    with no further parameterization means the denylist is the ONLY
+      #    guard: HIGH risk.
+      # 3. Enumerate keywords/functions the array does NOT test for (e.g.
+      #    SLEEP, BENCHMARK, GET_LOCK, EXTRACTVALUE, a boolean-based payload
+      #    with no listed keyword at all) to build a bypass PoC.
+      # 4. If the checked variable is only ever passed as a %s/%d argument
+      #    to $wpdb->prepare() after the check (never concatenated into a
+      #    raw query or a preg_replace() rewrite): LOW risk, prepare() is
+      #    the real guard and this blocklist is redundant defense-in-depth.
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+        - "**/tests/**"
+        - "**/test/**"
+    patterns:
+      - pattern-either:
+          - pattern: array(..., $REGEX, ...)
+          - pattern: "[..., $REGEX, ...]"
+      - metavariable-regex:
+          metavariable: $REGEX
+          # Same keyword-pair signal as the sibling direct-call rule; see that
+          # file's comment for the fullmatch-semantics note on this Semgrep
+          # version (leading/trailing .* account for string delimiters and
+          # regex modifier suffixes such as /pattern/im).
+          regex: '(?i).*(select.{0,30}from|delete.{0,30}from|update.{0,30}set|insert.{0,30}into|union.{0,30}select).*'

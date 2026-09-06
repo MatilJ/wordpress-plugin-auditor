@@ -1,0 +1,134 @@
+rules:
+  - id: claude.php.wordpress.sqli.preg-replace-wp-sql-filter-taint
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      User-controlled input flows into the replacement argument of preg_replace() (or
+      str_replace()) that modifies a WordPress SQL filter clause array key ('where', 'join',
+      'having', 'select'). Functions like sanitize_text_field() do not escape SQL
+      metacharacters. If this code runs inside a get_meta_sql, posts_where, posts_join,
+      or similar SQL filter hook, WordPress Core will execute the modified clause with
+      the injected payload, enabling time-based or blind SQL injection (CWE-89).
+      Escape the value with $wpdb->prepare() before incorporating it into a SQL clause.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+        - https://developer.wordpress.org/reference/hooks/get_meta_sql/
+        - https://developer.wordpress.org/reference/hooks/posts_where/
+        - https://developer.wordpress.org/reference/hooks/posts_join/
+      # WHY THIS RULE EXISTS
+      # ─────────────────────────────────────────────────────────────────────
+      # WordPress SQL filter hooks (get_meta_sql, posts_where, posts_join, posts_having)
+      # receive a SQL fragment array keyed by 'where', 'join', etc. Plugins modify these
+      # fragments directly and return them. WordPress Core then executes the modified SQL.
+      # This creates a taint sink that is INVISIBLE to rules targeting $wpdb->query() —
+      # there is no explicit query execution in the plugin's function body.
+      #
+      # Vulnerable pattern (Ultimate Member ≤2.9.1, class-member-directory.php:1782–1881):
+      #   function change_meta_sql($sql, ...) {           ← registered on get_meta_sql filter
+      #     $search = $this->prepare_search($_POST['search']); // sanitize_text_field only
+      #     $search_where = $context->get_search_sql($search, $core_search, 'both');
+      #     $sql['where'] = preg_replace(
+      #       '/(' . $join . '.meta_value = \'' . wp_slash($search) . '\')/im',
+      #       trim($search_where) . " $1",  ← replacement contains $search (user input)
+      #       $sql['where'],
+      #       1
+      #     );
+      #     return $sql;  ← WP Core executes this modified SQL
+      #   }
+      #
+      # WHY THE EXISTING wpdb-query-user-input-taint RULE MISSES THIS
+      # ─────────────────────────────────────────────────────────────────────
+      # The taint terminates in this function's body at `return $sql` — there is no
+      # $wpdb->query() / $wpdb->get_col() call visible here. WordPress Core executes
+      # the SQL fragment after the filter callback returns, making the execution point
+      # invisible to intra-procedural taint rules.
+      #
+      # TRIAGE GUIDANCE
+      # ─────────────────────────────────────────────────────────────────────
+      # TRUE POSITIVE indicators:
+      #   - The function is registered via add_filter('get_meta_sql', ...) or
+      #     add_filter('posts_where', ...) or similar SQL modification hook.
+      #   - The user input reaching $REPLACEMENT is not passed through $wpdb->prepare()
+      #     before the preg_replace / str_replace call.
+      #
+      # FALSE POSITIVE indicators:
+      #   - The function is not a SQL filter hook callback (verify add_filter calls).
+      #   - The tainted value was passed through $wpdb->prepare() earlier in the chain
+      #     but Semgrep's taint tracking missed the sanitizer (e.g., prepare() called on
+      #     an intermediate variable that was then passed to get_search_sql()).
+      #   - $REPLACEMENT is only pattern matching syntax like "$1" or "\\1" (backrefs),
+      #     not actual user data.
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: $_FILES
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+          # REST API: WP_REST_Request objects carry user-supplied parameters.
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: $REQUEST->get_query_params()
+          - pattern: $REQUEST['...']
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              # preg_replace modifying WordPress SQL filter array keys
+              - pattern: preg_replace($PAT, $REPLACEMENT, $SQL['where'], ...)
+              - pattern: preg_replace($PAT, $REPLACEMENT, $SQL['join'], ...)
+              - pattern: preg_replace($PAT, $REPLACEMENT, $SQL['having'], ...)
+              - pattern: preg_replace($PAT, $REPLACEMENT, $SQL['select'], ...)
+              # str_replace variants of the same pattern
+              - pattern: str_replace($SEARCH, $REPLACEMENT, $SQL['where'])
+              - pattern: str_replace($SEARCH, $REPLACEMENT, $SQL['join'])
+              - pattern: str_replace($SEARCH, $REPLACEMENT, $SQL['having'])
+              - pattern: str_replace($SEARCH, $REPLACEMENT, $SQL['select'])
+          - focus-metavariable: $REPLACEMENT
+    pattern-sanitizers:
+      - pattern-either:
+          # Parameterized queries: the replacement value is pre-escaped by prepare()
+          - pattern: $wpdb->prepare(...)
+          # SQL escaping functions
+          - pattern: esc_sql(...)
+          # Numeric casts: no SQL metacharacters possible
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          # sanitize_key: [a-z0-9_-] only — no SQL metacharacters
+          - pattern: sanitize_key(...)
+          # Array-level numeric sanitization
+          - pattern: array_map('absint', ...)
+          - pattern: array_map('intval', ...)
+          - pattern: array_map('floatval', ...)
+          # wp_parse_id_list() → array of absint values — no SQL metacharacters
+          - pattern: wp_parse_id_list(...)
+          # sanitize_title() → [a-z0-9%-_] only — no SQL metacharacters
+          - pattern: sanitize_title(...)
+          # sanitize_html_class() → [A-Za-z0-9_-] only — no SQL metacharacters
+          - pattern: sanitize_html_class(...)
+          # DateTime/DateTimeImmutable: constructor throws on non-date input,
+          # ->format() outputs only date components — no SQL metacharacters.
+          - pattern: new DateTime(...)
+          - pattern: new DateTimeImmutable(...)
+          # map_deep() — recursive variant of array_map for nested arrays/objects
+          - pattern: map_deep($X, 'absint')
+          - pattern: map_deep($X, 'intval')
+          - pattern: map_deep($X, 'sanitize_key')

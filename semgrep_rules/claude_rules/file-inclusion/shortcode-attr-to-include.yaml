@@ -1,0 +1,173 @@
+rules:
+  - id: claude.php.wordpress.lfi.shortcode-attr-to-include
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A shortcode attribute, widget instance value, or block attribute flows
+      into include/require or a WordPress template loading function. Shortcode
+      attributes are user-controlled in post content (Contributor+). Widget
+      instance values are controlled by users with edit_theme_options. Block
+      attributes are Contributor-controlled via block JSON. Any of these
+      flowing to an include sink produces LFI (CWE-98 / CWE-22).
+      Resolve the path with an allowlist lookup or sanitize_file_name()
+      before inclusion.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program ('PHP Remote File Inclusion')"
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - "CVE-2026-1257: Administrative Shortcodes shortcode slug attribute LFI"
+        - "CVE-2023-0340: Custom Content Shortcode attribute file inclusion"
+        - "CVE-2025-2158: WordPress Review Plugin post custom field LFI"
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — shortcode attribute directly in include path:
+      #   $template = $atts['template'];
+      #   include PLUGIN_DIR . '/templates/' . $template . '.php';
+      #   -> Contributor writes [shortcode template="../../wp-config"] in post.
+      #
+      # TRUE POSITIVE — widget instance flows to load_template:
+      #   $tpl = $instance['template_file'];
+      #   load_template($tpl);
+      #   -> Widget editor writes arbitrary path.
+      #
+      # FALSE POSITIVE — allowlist resolution:
+      #   $templates = ['grid' => 'grid.php', 'list' => 'list.php'];
+      #   $tpl = $templates[$atts['layout']] ?? 'grid.php';
+      #   include PLUGIN_DIR . '/templates/' . $tpl;
+      #   -> User controls lookup key, not the path values.
+      #
+      # FALSE POSITIVE — sanitize_file_name on attribute:
+      #   $name = sanitize_file_name($atts['template']);
+      #   include PLUGIN_DIR . '/templates/' . $name . '.php';
+      #   -> sanitize_file_name strips traversal.
+      #
+      # FALSE POSITIVE — array_key_exists() allow-list, value re-assigned
+      # back into the SAME attribute key (not a fresh variable):
+      #   $atts['design'] = ( $atts['design'] && array_key_exists( trim( $atts['design'] ), $known_designs ) )
+      #                        ? trim( $atts['design'] ) : 'design-1';
+      #   include PLUGIN_DIR . '/templates/masonry/' . $atts['design'] . '.php';
+      #   -> Re-validated against a known-good set before the sink re-reads
+      #   the same array key. Because the guarded re-read uses the identical
+      #   $atts[$key] expression as the taint source, an ordinary
+      #   pattern-sanitizer on the assignment's RHS does not suppress this —
+      #   the sink's own occurrence still syntactically matches
+      #   pattern-sources — so the guard is matched structurally via
+      #   pattern-not-inside on the sink instead (CVE-2025-31082,
+      #   blog-designer-pack).
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: $ATTS[$KEY]
+              - pattern: $ATTS["..."]
+              - pattern: $ATTS['...']
+          - metavariable-regex:
+              metavariable: $ATTS
+              regex: '^\$(atts|instance|attributes|args|settings|block_attributes|widget_args)$'
+    pattern-propagators:
+      - pattern: shortcode_atts($DEFAULTS, $INPUT, ...)
+        from: $INPUT
+        to: return
+      - pattern: wp_parse_args($INPUT, ...)
+        from: $INPUT
+        to: return
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: include $X;
+              - pattern: include($X);
+              - pattern: include_once $X;
+              - pattern: include_once($X);
+              - pattern: require $X;
+              - pattern: require($X);
+              - pattern: require_once $X;
+              - pattern: require_once($X);
+              - pattern: load_template($X, ...)
+              - pattern: locate_template($X, ...)
+              - pattern: get_template_part($X, ...)
+              # Static/method calls — Semgrep does not match self::func()
+              # or $this->func() with bare func() patterns.
+              - pattern: self::locate_template($X, ...)
+              - pattern: static::locate_template($X, ...)
+              - pattern: $OBJ->locate_template($X, ...)
+              - pattern: self::load_template($X, ...)
+              - pattern: static::load_template($X, ...)
+              - pattern: $OBJ->load_template($X, ...)
+              - pattern: self::get_template_part($X, ...)
+              - pattern: static::get_template_part($X, ...)
+              - pattern: $OBJ->get_template_part($X, ...)
+          # array_key_exists()-ternary allow-list guard, self-reassignment
+          # shape (see FALSE POSITIVE note above): the attribute's own array
+          # key is re-validated and re-assigned to itself (or a hardcoded
+          # default) earlier in the SAME function before the sink re-reads
+          # that key. Ordinary pattern-sanitizers cannot suppress this
+          # because the sink's re-read is itself a fresh pattern-sources
+          # match, independent of the assignment history of that key —
+          # matched structurally via pattern-not-inside instead, mirroring
+          # the allow-list-validator-gate approach used in the sibling
+          # claude.php.wordpress.lfi.template-function-user-input rule.
+          - pattern-not-inside:
+              patterns:
+                - pattern-either:
+                    - pattern: |
+                        function $FUNC(...) {
+                          ...
+                          $F_ATTS[$F_KEY] = array_key_exists($F_ATTS[$F_KEY], $F_ARR) ? $F_ATTS[$F_KEY] : $F_DEFAULT;
+                          ...
+                        }
+                    - pattern: |
+                        function $FUNC(...) {
+                          ...
+                          $F_ATTS[$F_KEY] = ( $F_ATTS[$F_KEY] && array_key_exists($F_ATTS[$F_KEY], $F_ARR) ) ? $F_ATTS[$F_KEY] : $F_DEFAULT;
+                          ...
+                        }
+                    - pattern: |
+                        function $FUNC(...) {
+                          ...
+                          $F_ATTS[$F_KEY] = array_key_exists(trim($F_ATTS[$F_KEY]), $F_ARR) ? trim($F_ATTS[$F_KEY]) : $F_DEFAULT;
+                          ...
+                        }
+                    - pattern: |
+                        function $FUNC(...) {
+                          ...
+                          $F_ATTS[$F_KEY] = ( $F_ATTS[$F_KEY] && array_key_exists(trim($F_ATTS[$F_KEY]), $F_ARR) ) ? trim($F_ATTS[$F_KEY]) : $F_DEFAULT;
+                          ...
+                        }
+                - metavariable-regex:
+                    metavariable: $F_ATTS
+                    regex: '^\$(atts|instance|attributes|args|settings|block_attributes|widget_args)$'
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_file_name(...)
+          - pattern: basename(...)
+          - pattern: sanitize_key(...)
+          - pattern: realpath(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          - pattern: sanitize_title(...)
+          - pattern: sanitize_html_class(...)
+          - pattern: validate_file(...)
+          # Value re-assigned to itself only if it is confirmed to be a key
+          # of a fixed, known-good array (array_key_exists()), otherwise
+          # replaced by a hardcoded default — the attribute can no longer
+          # select an arbitrary path even though its raw character set was
+          # never restricted by a filename-safe sanitizer. Mirrors the
+          # in_array()-ternary allowlist guard used for the same idiom
+          # elsewhere in this rule family; trim()-wrapped variants cover the
+          # common "trim the value before both the lookup and the use" shape.
+          - pattern: "array_key_exists($X, $ARR) ? $X : $DEFAULT"
+          - pattern: "( $X && array_key_exists($X, $ARR) ) ? $X : $DEFAULT"
+          - pattern: "array_key_exists(trim($X), $ARR) ? trim($X) : $DEFAULT"
+          - pattern: "( $X && array_key_exists(trim($X), $ARR) ) ? trim($X) : $DEFAULT"

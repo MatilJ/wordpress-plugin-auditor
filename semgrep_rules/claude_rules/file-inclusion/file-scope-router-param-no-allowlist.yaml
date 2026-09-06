@@ -1,0 +1,127 @@
+rules:
+  - id: claude.php.wordpress.lfi.file-scope-router-param-no-allowlist
+    languages: [php]
+    severity: HIGH
+    message: |
+      A file-scope "page"/"mode"/"action" dispatcher — a controller script
+      included directly as the plugin's front-end entry point, with no
+      enclosing function — reads a request parameter, passes it only
+      through a character-set-agnostic filter (sanitize_text_field(),
+      wp_unslash(), trim()) or no filter at all, none of which block "../"
+      traversal or restrict the value to a fixed route name, and
+      concatenates it directly into an include/require path. No allow-list
+      check (in_array() against a fixed, known set of routes) appears
+      anywhere in the file before the include. Because the value is never
+      validated against a known set of routes, an attacker fully controls
+      which local .php file — or, via path traversal, any other file
+      ending in the expected extension — is executed: unauthenticated
+      Local File Inclusion (CWE-98 / CWE-22). Validate the value against a
+      hardcoded allow-list (in_array($value, $known_routes, true)) — or
+      resolve it with realpath() and verify containment in the intended
+      directory — before it is ever used to build the include path.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program ('PHP Remote File Inclusion')"
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $PARAM = $RHS;
+              ...
+              include $DIR . $PARAM . $EXT;
+          - pattern: |
+              $PARAM = $RHS;
+              ...
+              include($DIR . $PARAM . $EXT);
+          - pattern: |
+              $PARAM = $RHS;
+              ...
+              include_once $DIR . $PARAM . $EXT;
+          - pattern: |
+              $PARAM = $RHS;
+              ...
+              include_once($DIR . $PARAM . $EXT);
+          - pattern: |
+              $PARAM = $RHS;
+              ...
+              require $DIR . $PARAM . $EXT;
+          - pattern: |
+              $PARAM = $RHS;
+              ...
+              require($DIR . $PARAM . $EXT);
+          - pattern: |
+              $PARAM = $RHS;
+              ...
+              require_once $DIR . $PARAM . $EXT;
+          - pattern: |
+              $PARAM = $RHS;
+              ...
+              require_once($DIR . $PARAM . $EXT);
+      # $RHS must be a bare superglobal access, or one wrapped only in a
+      # character-set-agnostic filter — anchored regex over the captured
+      # source text (not a nested AST pattern-either), because a nested
+      # pattern-either here would match whenever the sub-pattern occurs
+      # ANYWHERE inside the bound snippet: an unanchored $_POST[...]
+      # alternative would then also match e.g.
+      # sanitize_file_name($_POST['x']) since the array access is nested
+      # inside that (actually-safe) call. Anchoring the whole captured text
+      # avoids that false match.
+      - metavariable-pattern:
+          metavariable: $RHS
+          patterns:
+            - pattern-regex: '^\$_(REQUEST|GET|POST)\s*\[.*\]$|^(sanitize_text_field|wp_unslash|trim)\s*\(\s*\$_(REQUEST|GET|POST)\s*\[.*\]\s*\)$'
+      # File-scope only: function/method bodies are covered by the
+      # dataflow-based sibling rule for this same source-sink pair.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+          }
+      # Allow-list/re-validation guard present between the assignment and
+      # the include, tied to the SAME variable ($PARAM) — as a bare
+      # in_array() check, as the condition (possibly nested/negated) of an
+      # if-block, or as a self-reassignment through a path-safe function.
+      # Requiring $PARAM as the guard's own argument (rather than a bare
+      # "does this function appear anywhere later in the file" match) keeps
+      # an unrelated in_array()/basename() call elsewhere in the same
+      # file — validating a completely different value — from masking a
+      # genuinely unguarded $PARAM.
+      - pattern-not-inside: |
+          $PARAM = $RHS;
+          ...
+          in_array($PARAM, ...);
+          ...
+      - pattern-not-inside: |
+          $PARAM = $RHS;
+          ...
+          if (<... in_array($PARAM, ...) ...>) {
+            ...
+          }
+          ...
+      - pattern-not-inside: |
+          $PARAM = $RHS;
+          ...
+          $PARAM = basename($PARAM);
+          ...
+      - pattern-not-inside: |
+          $PARAM = $RHS;
+          ...
+          $PARAM = sanitize_key($PARAM);
+          ...
+      - pattern-not-inside: |
+          $PARAM = $RHS;
+          ...
+          $PARAM = realpath($PARAM);
+          ...
+      - pattern-not-inside: |
+          $PARAM = $RHS;
+          ...
+          validate_file($PARAM, ...);
+          ...

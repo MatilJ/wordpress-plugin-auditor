@@ -1,0 +1,37 @@
+rules:
+  - id: claude.php.wordpress.access-control.wp-query-perm-readable
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      WP_Query (or get_posts) constructed with 'perm' => 'readable'.
+      This parameter only author-scopes 'private'-status posts. 'draft',
+      'pending', 'future', and 'trash' statuses are returned without
+      per-author restriction — all matching posts from all authors are
+      exposed. Verify that post_status is not user-controllable or is
+      restricted to 'publish' only. A Contributor who can set post_status
+      via a shortcode attribute or request parameter can read other
+      authors' non-public content (CWE-862).
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: LOW
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: Missing Authorization
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/classes/wp_query/
+    # Fires on any WP_Query/get_posts construction using perm=readable.
+    # perm=readable is a WP_Query-specific argument; FP rate outside that context is minimal.
+    pattern-either:
+      # Array key assignment: $args['perm'] = 'readable'
+      - pattern: $ARGS['perm'] = 'readable'
+      # Array initialization: $args = array('perm' => 'readable', ...)
+      - pattern: $ARGS = array(..., 'perm' => 'readable', ...)
+      # Inline array literal passed to WP_Query
+      - pattern: new WP_Query(array(..., 'perm' => 'readable', ...))
+      # Inline array literal passed to get_posts
+      - pattern: get_posts(array(..., 'perm' => 'readable', ...))

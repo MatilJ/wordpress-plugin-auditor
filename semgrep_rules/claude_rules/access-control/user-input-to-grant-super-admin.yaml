@@ -1,0 +1,59 @@
+rules:
+  - id: claude.php.wordpress.access.user-input-to-grant-super-admin
+    mode: taint
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      User-controlled input flows into the $user_id argument of
+      grant_super_admin(). An attacker can grant themselves network-wide
+      super admin privileges on multisite (CWE-269).
+
+      WP Core: grant_super_admin($user_id) at capabilities.php:1215
+      adds the user login to the site_admins site option via
+      update_site_option(). No capability check inside the function —
+      the caller must verify authorization.
+
+      Fix: require current_user_can('manage_network_users') and verify
+      the requesting user is already a super admin before calling.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - user_id comes from POST/GET/REQUEST
+        - Handler lacks manage_network or manage_network_users cap check
+        - Reachable from wp_ajax_nopriv_ or unauthenticated endpoint
+
+      FALSE POSITIVE indicators:
+        - Handler has is_super_admin() or manage_network check
+        - Only reachable from network admin screens (PR:H)
+        - user_id is hardcoded or derived from authenticated context
+    metadata:
+      category: security
+      cwe: "CWE-269: Improper Privilege Management"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/grant_super_admin/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: $REQUEST->get_body()
+    pattern-sinks:
+      - patterns:
+          - pattern: grant_super_admin($USER_ID)
+          - focus-metavariable: $USER_ID

@@ -1,0 +1,42 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.user-pass-in-response
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A WP_User object cast to array, or the user_pass field accessed directly,
+      flows into a JSON response or REST API return value. Casting WP_User to
+      array exposes the data->user_pass field containing the bcrypt password
+      hash. If the enclosing endpoint lacks appropriate authorization, any
+      caller can retrieve password hashes for offline cracking (CWE-200).
+
+      Always unset sensitive fields before returning user data:
+        unset($user_data['user_pass'], $user_data['user_activation_key']);
+      Or use an explicit allowlist of fields to include in the response.
+    metadata:
+      category: security
+      cwe: "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Sensitive Data Exposure"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/classes/wp_user/
+        - https://cwe.mitre.org/data/definitions/200.html
+    pattern-sources:
+      - pattern-either:
+          - pattern: (array) get_userdata(...)
+          - pattern: (array) get_user_by(...)
+          - pattern: (array) new WP_User(...)
+          - pattern: $U->data->user_pass
+          - pattern: $U->user_pass
+    pattern-sinks:
+      - pattern-either:
+          - pattern: wp_send_json($X, ...)
+          - pattern: wp_send_json_success($X, ...)
+          - pattern: wp_send_json_error($X, ...)
+          - pattern: new WP_REST_Response($X, ...)
+          - pattern: rest_ensure_response($X)

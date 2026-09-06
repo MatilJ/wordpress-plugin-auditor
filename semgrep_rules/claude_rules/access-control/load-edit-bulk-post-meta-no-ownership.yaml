@@ -1,0 +1,97 @@
+# Detects load-edit.php hook handlers that verify the bulk-posts nonce and iterate a
+# post-ID collection without a per-resource current_user_can('edit_post', $id) check.
+# Catches both direct meta writes and delegation to helper methods (inter-procedural miss
+# avoided by anchoring on the nonce + foreach loop structure rather than the sink).
+rules:
+
+  - id: claude.php.wordpress.access-control.load-edit-bulk-post-meta-no-ownership
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A function verifies the 'bulk-posts' nonce with check_admin_referer() and iterates
+      a collection of post IDs via foreach, but contains no per-resource
+      current_user_can('edit_post', $id) check anywhere in the function body.
+
+      check_admin_referer('bulk-posts') verifies CSRF intent — it does NOT check whether the
+      authenticated user is authorised to modify each specific post. Any user whose role
+      includes edit_posts can obtain the bulk-posts nonce from the post list table (edit.php)
+      and then modify the restriction, visibility, or other status of posts they do not own,
+      including posts authored by Administrators (CWE-862 Missing Authorization / IDOR).
+
+      This pattern also fires when the per-ID operation is delegated to a helper method
+      (e.g. self::set_status($id)) — the absence of a per-resource capability gate in the
+      calling function is the defect regardless of what the callee does.
+
+      Remediation: add a per-resource capability check before processing each ID:
+        if ( ! current_user_can( 'edit_post', $post_id ) ) { continue; }
+      or elevate the required capability to cover cross-user operations:
+        if ( ! current_user_can( 'edit_others_posts' ) ) { wp_die(...); }
+    patterns:
+      # Must call the posts list-table nonce check — structural indicator that this
+      # function processes a bulk post-list action from the admin edit.php screen.
+      - pattern: check_admin_referer('bulk-posts')
+      # Must be inside a function that also contains a foreach loop over a variable —
+      # distinguishes bulk-iteration handlers from single-post handlers.
+      - pattern-inside: |
+          function $FUNC(...) {
+            ...
+            foreach ($ITEMS as $ITEM) { ... }
+            ...
+          }
+      # Exclude: per-resource edit_post check — user is authorised for each post ID.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            current_user_can('edit_post', ...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can('edit_post', ...) ...>) { ... }
+            ...
+          }
+      # Exclude: edit_others_posts check — gates the whole operation to privileged users.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            current_user_can('edit_others_posts');
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can('edit_others_posts') ...>) { ... }
+            ...
+          }
+      # Exclude: manage_options check — admin-only gate, PR:H, out of scope for bounty.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            current_user_can('manage_options');
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can('manage_options') ...>) { ... }
+            ...
+          }
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/functions/check_admin_referer/
+        - https://developer.wordpress.org/reference/functions/current_user_can/

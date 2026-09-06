@@ -1,0 +1,76 @@
+rules:
+  - id: claude.php.wordpress.xss.block-attribute-string-concat-tag-name
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: >
+      A Gutenberg block render callback reads an attribute from $attributes and
+      uses it in a string concatenation expression without context-appropriate escaping.
+      Block attributes are Contributor-controlled via the Code Editor. Payloads without
+      < or > characters bypass wp_kses() at save time and can inject HTML elements in
+      tag-name position or break out of HTML attribute boundaries at render time.
+      Fix: use tag_escape() for tag names, esc_attr() for attribute values, or validate
+      against an allowlist.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Stored Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/tag_escape/
+        - https://cwe.mitre.org/data/definitions/79.html
+    # Scope the source to WordPress's block/shortcode render-callback convention,
+    # where $attributes/$atts is the callback's own parameter — excludes unrelated
+    # local variables (e.g. parsed certificate/ASN.1 data) that happen to share the name.
+    pattern-sources:
+      - patterns:
+          - pattern: $attributes[$KEY]
+          - pattern-either:
+              - pattern-inside: |
+                  function $FUNC($attributes, $...ARGS) {
+                    ...
+                  }
+              - pattern-inside: |
+                  function $FUNC(array $attributes, $...ARGS) {
+                    ...
+                  }
+      - patterns:
+          - pattern: $atts[$KEY]
+          - pattern-either:
+              - pattern-inside: |
+                  function $FUNC($atts, $...ARGS) {
+                    ...
+                  }
+              - pattern-inside: |
+                  function $FUNC(array $atts, $...ARGS) {
+                    ...
+                  }
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: tag_escape(...)
+          - pattern: sanitize_key(...)
+          - pattern: esc_html(...)
+          - pattern: esc_attr(...)
+          - pattern: esc_url(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: sanitize_html_class(...)
+          - pattern: (int) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: sanitize_text_field(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $X . $SINK
+              - pattern: $SINK . $X
+          # wp_nonce_field()'s $name parameter (and its $action-derived nonce
+          # value) is esc_attr()-escaped internally by WP core before output —
+          # a concatenation result passed directly as an argument to it is not
+          # a raw HTML-attribute sink, regardless of the value's origin.
+          - pattern-not-inside: wp_nonce_field(...)

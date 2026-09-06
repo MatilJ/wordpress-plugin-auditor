@@ -1,0 +1,233 @@
+rules:
+  # Detects a variable placed directly into an HTML href, src, or action
+  # attribute without esc_url() wrapping — via explicit string concatenation
+  # (branch 1) or PHP double-quoted string interpolation (branch 2). The two
+  # forms are distinct AST shapes in semgrep's PHP parser (Op(Concat) vs.
+  # ConcatString(InterpolatedConcat)), so both are needed to cover the class.
+  - id: claude.php.wordpress.xss.string-concat-url-attr-no-esc-url
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A variable is placed directly into an HTML href, src, or action
+      attribute — either via string concatenation or PHP double-quoted
+      string interpolation — without esc_url() wrapping. If the variable
+      originates from user-controlled storage (option values, post meta,
+      comment fields, shortcode attributes), an attacker can inject
+      javascript: protocol URIs or break out of the attribute context with
+      quote characters to inject arbitrary HTML attributes (CWE-79).
+
+      Fix: wrap the URL variable with esc_url() before concatenation, or
+      switch interpolation to concatenation so esc_url() can be applied:
+        '<a href="' . esc_url($url) . '">'
+
+      TRIAGE: Verify the variable source reaches user-controlled data
+      (options written via AJAX, post meta, widget settings, stored comment
+      fields such as comment_author_url). Hardcoded URLs, admin-only option
+      values, WP URL generator functions (admin_url, home_url,
+      get_permalink, get_comment_link, etc.), or developer-configured arrays
+      are false positives. Also FP if the value is passed through esc_url()
+      or wp_kses() before output.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    pattern-either:
+      # Branch 1: explicit dot-concatenation — '<a href="' . $VAR . '">'
+      - patterns:
+          - pattern: $LEFT . $VAR . $RIGHT
+          - metavariable-regex:
+              metavariable: $LEFT
+              regex: ".*(?:href|src|action)\\s*=\\s*['\"]\\s*['\"]$"
+          - metavariable-regex:
+              metavariable: $VAR
+              # Each safe-function alternative allows an optional leading backslash
+              # (\?) so fully-qualified calls like \esc_url(...) — the common style
+              # in namespaced plugins — are recognized the same as bare esc_url(...).
+              # (A single outer \? before the group does not work: backtracking lets
+              # the engine skip it and match the un-prefixed alternative anyway, so
+              # each alternative must carry its own optional backslash.)
+              regex: "^(?!\\\\?esc_(url_raw|url|attr|html)\\b|\\\\?admin_url\\b|\\\\?get_admin_url\\b|\\\\?home_url\\b|\\\\?site_url\\b|\\\\?get_site_url\\b|\\\\?plugins_url\\b|\\\\?content_url\\b|\\\\?get_permalink\\b|\\\\?get_the_permalink\\b|\\\\?get_comment_link\\b|\\\\?wp_nonce_url\\b|\\\\?wp_get_attachment_url\\b|\\\\?network_admin_url\\b|\\\\?get_edit_post_link\\b|\\\\?get_delete_post_link\\b|\\\\?wp_login_url\\b|\\\\?wp_logout_url\\b|\\\\?menu_page_url\\b).*"
+          - pattern-not-inside: esc_url(...)
+          - pattern-not-inside: esc_url_raw(...)
+          - pattern-not-inside: esc_attr(...)
+          - pattern-not-inside: wp_kses(...)
+          - pattern-not-inside: wp_kses_post(...)
+          # Object-method-wrapper equivalents: plugins that wrap WP core escaping
+          # functions behind an injectable/mockable facade object (a common
+          # dependency-injection pattern for unit-testability, e.g. mailpoet's
+          # lib/WP/Functions.php: $this->wp->escUrl(...)) call the same safe
+          # function through a camelCase method instead of the bare global. The
+          # object variable itself is intentionally left as a bare metavariable
+          # so this generalizes across plugins regardless of the wrapper's name
+          # (mailpoet uses $this->wp; others may use $this->wpFunctions, etc.).
+          - pattern-not-inside: $OBJ->escUrl(...)
+          - pattern-not-inside: $OBJ->escUrlRaw(...)
+          - pattern-not-inside: $OBJ->escAttr(...)
+          - pattern-not-inside: $OBJ->wpKses(...)
+          - pattern-not-inside: $OBJ->wpKsesPost(...)
+          # Constrain $VAR to a single leaf expression (not itself a further
+          # concatenation). On chains of 4+ terms, $LEFT . $VAR . $RIGHT otherwise
+          # binds combinatorially — e.g. $VAR absorbing "$link . '\" target=...'" as
+          # one compound match alongside the clean $VAR=$link match for the same
+          # source line — which lets the compound binding evade the exact-identity
+          # sanitizer check below. The clean single-variable binding (if present)
+          # still matches and is unaffected.
+          - metavariable-pattern:
+              metavariable: $VAR
+              patterns:
+                - pattern-not: $A . $B
+          # Exclude: $VAR is itself directly a call to esc_url()/esc_attr() or their
+          # object-method-wrapper equivalents (e.g. '<a href="' . $this->wp->escUrl($x) . '">').
+          # The metavariable-regex above only recognizes bare global-function-call text
+          # anchored at the start of $VAR, so it misses $VAR being a method-call expression
+          # like $OBJ->escUrl(...) — this structural (not text-anchored) check catches that.
+          - metavariable-pattern:
+              metavariable: $VAR
+              patterns:
+                - pattern-not: esc_url(...)
+                - pattern-not: esc_url_raw(...)
+                - pattern-not: esc_attr(...)
+                - pattern-not: $OBJ->escUrl(...)
+                - pattern-not: $OBJ->escUrlRaw(...)
+                - pattern-not: $OBJ->escAttr(...)
+          # Exclude: the variable was assigned the result of esc_url()/esc_url_raw()
+          # earlier in the same function — a common sanitize-then-use idiom that a
+          # lexical pattern-not-inside at the concatenation site alone cannot see,
+          # since the esc_url() call is a separate statement, not a syntactic
+          # ancestor of the concatenation. The esc_url() argument need not be the
+          # same variable being assigned (e.g. $icon = esc_url(plugins_url(...));)
+          # — metavariable consistency on $VAR still requires the ASSIGNED variable
+          # to match the one used at the concatenation site, so sanitizing a
+          # different variable does not suppress this rule for the tainted one.
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = esc_url(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = esc_url_raw(...);
+                ...
+              }
+          # Same "assigned earlier in the same function" idiom, but via a bare WP
+          # core URL-generator function instead of an explicit escaper. These
+          # functions always return a site-internal, non-attacker-controlled URL
+          # (built from get_option('siteurl')/get_option('home') or a post's own
+          # permalink structure) — the rule's own message already documents these
+          # as FPs when they appear directly at the concat site; this closes the
+          # same gap for the "assigned to a variable first, concatenated later"
+          # idiom, which the direct-call regex below cannot see since $VAR is a
+          # bare variable name at the concat site, not the generator call itself.
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = home_url(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = get_home_url(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = admin_url(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = get_admin_url(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = site_url(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = get_site_url(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = get_permalink(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = get_the_permalink(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = get_comment_link(...);
+                ...
+              }
+          # Same "assigned earlier in the same function" idiom, via the object-
+          # method-wrapper form (see rationale above).
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = $OBJ->escUrl(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $VAR = $OBJ->escUrlRaw(...);
+                ...
+              }
+      # Branch 2: double-quoted string interpolation — "<a href='$var'>", and
+      # its prefixed variant "<a href='mailto:$var'>" (a static scheme/path
+      # literal — mailto:, tel:, #, a relative path — sitting between the
+      # opening quote and the interpolated variable; a table/grid-column cell
+      # formatter that builds a mailto:/tel: link from a stored data value is
+      # a concrete recurring instance). Semgrep's PHP grammar desugars string
+      # interpolation to a ConcatString(InterpolatedConcat) call, a different
+      # node than Op(Concat), so branch 1's pattern cannot see it. Bind the
+      # whole assigned/appended string to $STR and text-match its source for
+      # a bare $variable sitting inside the attribute's quotes, with only
+      # literal text (no function call — that shape is structurally
+      # impossible once esc_url()/esc_attr() is applied, since PHP's curly-
+      # brace interpolation syntax cannot call a bare global function)
+      # allowed between the quote and the $.
+      - patterns:
+          - pattern-either:
+              - pattern: $DEST = $STR
+              - pattern: $DEST .= $STR
+          - metavariable-regex:
+              metavariable: $STR
+              regex: "(?s).*(?:href|src|action)\\s*=\\s*['\"][^'\"]*\\{?\\$[A-Za-z_][A-Za-z0-9_]*.*"
+          - metavariable-regex:
+              metavariable: $STR
+              regex: "^(?!.*(?:esc_url|esc_attr|esc_html|wp_kses)\\().*"
+          - pattern-not-inside: esc_url(...)
+          - pattern-not-inside: esc_url_raw(...)
+          - pattern-not-inside: esc_attr(...)
+          - pattern-not-inside: wp_kses(...)
+          - pattern-not-inside: wp_kses_post(...)
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"

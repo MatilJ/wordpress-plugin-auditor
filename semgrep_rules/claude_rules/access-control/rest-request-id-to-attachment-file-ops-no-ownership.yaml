@@ -1,0 +1,75 @@
+rules:
+  - id: claude.php.wordpress.access-control.rest-request-id-to-attachment-file-ops-no-ownership
+    languages: [php]
+    severity: HIGH
+    message: |
+      A REST API handler reads a resource ID from request parameters, resolves
+      it to a filesystem path via get_attached_file(), and performs destructive
+      file operations (unlink, rename, copy, file_put_contents) without a
+      per-resource ownership check such as current_user_can('edit_post', $id)
+      (CWE-862 / CWE-639).
+
+      Any user whose role satisfies the route's permission_callback can target
+      attachments owned by higher-privileged users — deleting, replacing, or
+      overwriting their files.
+
+      Required fix: add current_user_can('edit_post', $attachment_id) or
+      current_user_can('delete_post', $attachment_id) before file operations.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-639: Authorization Bypass Through User-Controlled Key"
+        - "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Insecure Direct Object Reference (IDOR)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/get_attached_file/
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+    patterns:
+      - pattern-either:
+          - pattern: get_attached_file(...)
+      - pattern-inside:
+          pattern-either:
+            - pattern: |
+                function $FUNC($REQUEST, ...) {
+                  ...
+                  $REQUEST->get_param(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC($REQUEST, ...) {
+                  ...
+                  $REQUEST->get_json_params();
+                  ...
+                }
+            - pattern: |
+                function $FUNC($REQUEST, ...) {
+                  ...
+                  $REQUEST->get_params();
+                  ...
+                }
+            - pattern: |
+                function $FUNC($REQUEST, ...) {
+                  ...
+                  $REQUEST->get_body_params();
+                  ...
+                }
+            - pattern: |
+                function $FUNC($REQUEST, ...) {
+                  ...
+                  $REQUEST->get_body();
+                  ...
+                }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can($CAP, $ID) ...>) {
+              ...
+            }
+            ...
+          }

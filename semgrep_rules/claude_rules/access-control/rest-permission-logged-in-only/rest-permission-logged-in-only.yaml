@@ -1,0 +1,56 @@
+rules:
+  # is_user_logged_in() checks only whether a valid WordPress session exists
+  # (pluggable.php:1258 — returns wp_get_current_user()->exists()). Any user
+  # with ANY role including Subscriber passes this check. Using it as a REST
+  # API permission_callback provides no capability-based authorization —
+  # functionally equivalent to "any authenticated user can access this endpoint."
+  #
+  # This is an audit-level rule. Many endpoints are intentionally Subscriber+
+  # accessible (e.g., user profile endpoints). Triage is required to determine
+  # whether the endpoint's operations warrant a higher capability check.
+  - id: claude.php.wordpress.access-control.rest-permission-logged-in-only
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      REST route registered with 'permission_callback' => 'is_user_logged_in'.
+      This allows ANY authenticated user (including Subscribers) to access the
+      endpoint — is_user_logged_in() only checks for a valid session, not
+      capabilities (CWE-862). Source: pluggable.php:1258.
+
+      TRIAGE: Verify whether the endpoint performs operations that require a
+      higher capability (e.g., manage_options, edit_others_posts). If so,
+      replace with a closure calling current_user_can('appropriate_capability').
+      If the endpoint is intentionally Subscriber+, this is expected behavior.
+
+      Remediation: replace 'is_user_logged_in' with a closure or named function
+      that calls current_user_can() with the appropriate capability.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/#permissions-callback
+        - https://developer.wordpress.org/reference/functions/is_user_logged_in/
+    pattern-either:
+      - pattern: |
+          register_rest_route(..., ..., [..., 'permission_callback' => 'is_user_logged_in', ...])
+      - pattern: |
+          register_rest_route(..., ..., [..., "permission_callback" => "is_user_logged_in", ...])
+      - pattern: |
+          register_rest_route(..., ..., array(..., 'permission_callback' => 'is_user_logged_in', ...))
+      - pattern: |
+          register_rest_route(..., ..., array(..., "permission_callback" => "is_user_logged_in", ...))
+      - pattern: |
+          register_rest_route(..., ..., array(array(..., 'permission_callback' => 'is_user_logged_in', ...)))
+      - pattern: |
+          register_rest_route(..., ..., array(array(..., "permission_callback" => "is_user_logged_in", ...)))
+      - pattern: |
+          register_rest_route(..., ..., [[..., 'permission_callback' => 'is_user_logged_in', ...]])
+      - pattern: |
+          register_rest_route(..., ..., [[..., "permission_callback" => "is_user_logged_in", ...]])

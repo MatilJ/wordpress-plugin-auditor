@@ -1,0 +1,224 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+  # Closes a reachability gap in
+  # claude.php.wordpress.access-control.admin-init-no-auth-option-write: that
+  # rule only fires when the option/theme-mod write appears DIRECTLY in the
+  # same function registered on admin_init. A recurring WP variant is a
+  # multi-step admin wizard / tabbed-settings class: the admin_init-registered
+  # method walks a request-selected step/tab through a callback table (e.g.
+  # call_user_func($steps[$step]['view'], ...)) which itself calls a further
+  # sibling method that performs the write — two or more dynamic-dispatch hops
+  # away from the hook registration, which a fixed-depth call-chain join
+  # cannot trace statically. This rule instead scopes the join to CLASS
+  # co-membership: the same class both registers an admin_init callback with
+  # no auth check of its own, and defines another method — also with no auth
+  # check of its own — that performs the write from request data. This trades
+  # proof of the exact call path for robustness against arbitrary dispatch
+  # depth; TRIAGE confirms the actual reachability.
+  - id: claude.php.wordpress.access-control.admin-init-class-option-write-no-capability
+    mode: join
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A class registers a method on admin_init with no current_user_can() or
+      nonce check of its own, and that SAME class defines another method —
+      also with no current_user_can() or nonce check of its own — that writes
+      an option or theme mod (update_option, add_option, delete_option,
+      update_site_option, delete_site_option, set_theme_mod) built from
+      request-supplied data. admin_init fires for every authenticated user
+      (Subscriber+) requesting any /wp-admin/ URL, before WordPress checks
+      whether that user actually holds the capability the requested admin
+      page is registered to require. Classes shaped like a multi-step setup
+      wizard or tabbed settings screen commonly route a request-selected
+      step/tab through a callback table (e.g. call_user_func on a
+      $steps[$step]['view'] entry) to reach the writing method — several
+      dynamic-dispatch hops beyond the hook registration itself (CWE-862).
+
+      TRIAGE REQUIRED:
+      1. Confirm an actual call path exists from the admin_init-registered
+         method to the writing method (a step/tab dispatch table keyed by
+         $_GET/$_POST, a switch statement, or a direct call). This join
+         proves class co-membership, not a verified call graph — read both
+         methods to confirm the write is genuinely reachable from the hook.
+      2. Confirm the write depends on user-supplied input ($_GET, $_POST,
+         $_REQUEST) rather than a hardcoded/internal value.
+      3. Confirm neither method is gated by a capability/nonce check
+         performed by a wrapping caller outside the class, or by a
+         page-registration capability argument (e.g. add_submenu_page) —
+         that only affects menu visibility/direct-page-render access, not the
+         admin_init hook itself, which fires first regardless.
+
+      Fix: add current_user_can() with the appropriate capability AND a nonce
+      check before the write — either in the admin_init-registered method
+      before any dispatch, or inside the writing method so every call path
+      inherits the gate.
+    join:
+      rules:
+        # This sub-rule only captures $CALLBACK/$CLS from the add_action() call
+        # site itself (typically inside __construct()) — that call site is NOT
+        # textually inside the function it names, so auth-check absence cannot
+        # be checked here. That check is the separate "callback-no-auth"
+        # sub-rule below, joined on $CALLBACK identity.
+        - id: admin-init-registration-in-class
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_action('admin_init', [..., '$CALLBACK'], ...);
+                - pattern: add_action('admin_init', '$CALLBACK', ...);
+                - pattern: add_action('admin_init', array($OBJ, '$CALLBACK'), ...);
+            - pattern-inside: |
+                class $CLS {
+                  ...
+                }
+
+        - id: callback-no-auth
+          languages: [php]
+          patterns:
+            - pattern: |
+                function $CALLBACK(...) {
+                  ...
+                }
+            - pattern-inside: |
+                class $CLS {
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  wp_verify_nonce(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  check_admin_referer(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  check_ajax_referer(...);
+                  ...
+                }
+
+        - id: class-write-no-cap
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: update_option(...)
+                - pattern: add_option(...)
+                - pattern: delete_option(...)
+                - pattern: update_site_option(...)
+                - pattern: delete_site_option(...)
+                - pattern: set_theme_mod(...)
+            - pattern-inside: |
+                function $INNER(...) {
+                  ...
+                }
+            - pattern-inside: |
+                class $CLS {
+                  ...
+                }
+            # The writing method must actually consume request-supplied data
+            # somewhere in its body — a write built only from hardcoded values
+            # cannot be a missing-authorization vulnerability.
+            - pattern-either:
+                - pattern-inside: |
+                    function $INNER(...) {
+                      ...
+                      <... $_GET ...>;
+                      ...
+                    }
+                - pattern-inside: |
+                    function $INNER(...) {
+                      ...
+                      <... $_POST ...>;
+                      ...
+                    }
+                - pattern-inside: |
+                    function $INNER(...) {
+                      ...
+                      <... $_REQUEST ...>;
+                      ...
+                    }
+                - pattern-inside: |
+                    function $INNER(...) {
+                      ...
+                      <... $_COOKIE ...>;
+                      ...
+                    }
+            - pattern-not-inside: |
+                function $INNER(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $INNER(...) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                function $INNER(...) {
+                  ...
+                  wp_verify_nonce(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $INNER(...) {
+                  ...
+                  check_admin_referer(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $INNER(...) {
+                  ...
+                  check_ajax_referer(...);
+                  ...
+                }
+
+      on:
+        - 'admin-init-registration-in-class.path == callback-no-auth.path'
+        - 'admin-init-registration-in-class.$CALLBACK == callback-no-auth.$CALLBACK'
+        - 'callback-no-auth.path == class-write-no-cap.path'
+        - 'callback-no-auth.$CLS == class-write-no-cap.$CLS'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/hooks/admin_init/
+        - https://developer.wordpress.org/apis/security/nonces/

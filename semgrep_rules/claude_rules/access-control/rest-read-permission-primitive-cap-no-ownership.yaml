@@ -1,0 +1,147 @@
+rules:
+  - id: claude.php.wordpress.access-control.rest-read-permission-primitive-cap-no-ownership
+    languages: [php]
+    severity: HIGH
+    message: |
+      A single-item REST/AJAX read-permission check relies on WordPress's coarse
+      'read' capability as if it were a per-object meta capability, or a class
+      exposes a single-item GET route whose permission_callback resolves to a
+      get_item_permissions_check() method that is never defined in the class
+      itself (inherited from a base class of unverified origin).
+
+      current_user_can('read', $id) — or the equivalent
+      current_user_can($post_type_object->cap->read, $id) — is NOT a per-object
+      check. WordPress's own get_post_type_capabilities() (wp-includes/post.php)
+      hard-codes cap->read to the literal primitive 'read' whenever
+      map_meta_cap is true; that value is used internally by map_meta_cap()'s own
+      'read_post' resolution (the public/published-post branch), never registered
+      as a real meta capability. Every default WordPress role from Subscriber
+      upward holds 'read', and passing an object ID alongside it is silently
+      ignored — the check is unconditionally true for any logged-in user
+      regardless of the object's author, status, or visibility (CWE-639 /
+      CWE-862). The correct per-object capability is the meta cap 'read_post'
+      (current_user_can('read_post', $id)), which WordPress maps through
+      map_meta_cap()'s real ownership/status logic, or an explicit
+      author-id/role comparison.
+
+      The structural variant (missing get_item_permissions_check() override) is
+      a companion lead: a REST controller that delegates its single-item read
+      gate to an inherited method whose implementation cannot be verified in
+      this file may be relying on exactly this broken primitive-capability
+      pattern in its base class — confirm what the inherited method actually
+      checks before ruling this out.
+
+      Fix (direct misuse):
+        if ( ! current_user_can( 'read_post', $id ) ) {
+            return new WP_Error( 'rest_forbidden', __( 'Access denied.' ), [ 'status' => 403 ] );
+        }
+      Fix (structural — add an explicit per-class override):
+        public function get_item_permissions_check( $request ) {
+            $post = get_post( (int) $request['id'] );
+            if ( ! $post ) {
+                return new WP_Error( 'invalid_id', __( 'Invalid ID.' ), [ 'status' => 404 ] );
+            }
+            if ( current_user_can( 'manage_options' ) ) {
+                return true;
+            }
+            return get_current_user_id() === (int) $post->post_author;
+        }
+
+      TRIAGE:
+      - Direct-call branch (current_user_can('read', $id) / ->cap->read): HIGH
+        confidence — there is no legitimate reason to pass an object ID
+        alongside the literal 'read' capability string; this is essentially
+        always the bug described above, not a stylistic choice.
+      - Missing-override branch: MEDIUM confidence, requires manual follow-up.
+        Trace the base class's own get_item_permissions_check(). If it performs
+        a real per-object ownership/status check (e.g. WordPress core's
+        WP_REST_Posts_Controller, or a plugin base class using
+        current_user_can('read_post', ...)), this is a false positive — inheriting
+        a correct implementation without overriding it is normal, safe OOP reuse.
+        Only actionable when the base class's read check resolves to the
+        primitive 'read' capability (or an equivalently non-object-scoped check)
+        for a route that returns non-public, per-object, or credential-bearing data.
+    metadata:
+      category: security
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      # TRIAGE GUIDANCE — Common FP patterns:
+      #
+      # 1. Missing-override branch fires whenever a class doesn't redefine
+      #    get_item_permissions_check() — this is normal OOP reuse when the base
+      #    class's own implementation is a real per-object check. Only actionable
+      #    when the base class's read-context capability resolves to the coarse
+      #    'read' primitive (or similar) rather than a meta capability like
+      #    'read_post'. Known-safe WP-core base classes are excluded already;
+      #    plugin-defined base classes must be traced manually.
+      #
+      # 2. Direct-call branch: current_user_can('read') with NO second argument
+      #    is the correct, intentional coarse "can this user access wp-admin at
+      #    all" check — not flagged by this rule (requires an object-id argument
+      #    to match).
+      #
+      # 3. current_user_can('read_post', $id) / current_user_can('edit_post', $id)
+      #    are genuine per-object meta-capability checks — excluded.
+      vulnerability_class: "Insecure Direct Object Reference (IDOR) / Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+        - https://developer.wordpress.org/reference/functions/map_meta_cap/
+        - https://developer.wordpress.org/reference/functions/register_post_type/
+        - https://cwe.mitre.org/data/definitions/639.html
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/admin/**"
+    pattern-either:
+      # Branch A (structural lead): a class registers a single-item READABLE
+      # route whose permission_callback is get_item_permissions_check(), but
+      # that method is not defined anywhere in the same class body — the read
+      # gate is entirely delegated to an unverified inherited implementation.
+      # Known-safe WordPress core REST base classes are excluded since
+      # inheriting their (correct) implementation without overriding it is
+      # normal, safe reuse.
+      - patterns:
+          - pattern: |
+              array(..., 'permission_callback' => array($this, 'get_item_permissions_check'), ...)
+          - pattern-not-inside: |
+              class $C {
+                ...
+                function get_item_permissions_check($REQUEST) { ... }
+                ...
+              }
+          - pattern-not-inside: |
+              class $C extends WP_REST_Controller {
+                ...
+              }
+          - pattern-not-inside: |
+              class $C extends WP_REST_Posts_Controller {
+                ...
+              }
+          - pattern-not-inside: |
+              class $C extends WP_REST_Terms_Controller {
+                ...
+              }
+          - pattern-not-inside: |
+              class $C extends WP_REST_Comments_Controller {
+                ...
+              }
+          - pattern-not-inside: |
+              class $C extends WP_REST_Attachments_Controller {
+                ...
+              }
+          - pattern-not-inside: |
+              class $C extends WP_REST_Users_Controller {
+                ...
+              }
+      # Branch B (direct misuse): current_user_can() invoked with the literal
+      # 'read' capability string plus a second (object-id) argument — the
+      # coarse primitive capability used as if it were a per-object meta check.
+      - pattern: current_user_can('read', $ID)
+      - pattern: current_user_can("read", $ID)
+      - pattern: current_user_can($OBJ->cap->read, $ID)

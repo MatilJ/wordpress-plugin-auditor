@@ -1,0 +1,163 @@
+rules:
+  - id: claude.php.wordpress.access-control.ajax-post-id-to-wp-update-post-no-ownership
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A post ID from an HTTP request parameter flows into wp_update_post()
+      without a per-resource capability check. wp_update_post() does NOT
+      perform internal authorization — the caller must verify
+      current_user_can('edit_post', $post_id) before invocation (CWE-862
+      Missing Authorization / IDOR).
+
+      A common mistake: the handler checks current_user_can('edit_posts')
+      (plural, no ID) which is a class-level gate — it verifies the user
+      CAN edit posts in general, but does NOT authorize editing a SPECIFIC
+      post owned by another user.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - Only nonce/class-level capability checked before the post write.
+        - No current_user_can('edit_post', $post_id) with the specific ID.
+        - post_id reaches wp_update_post from POST/GET/REQUEST/REST params.
+
+      FALSE POSITIVE indicators:
+        - Handler has current_user_can('manage_options') — admin-only (PR:H).
+        - Handler calls current_user_can('edit_post', $post_id) with the ID.
+        - The post ID comes from a DB query (taint broken by server read).
+        - The handler only modifies posts owned by the current user (verified
+          via get_post($id)->post_author === get_current_user_id()).
+
+      Impact: Attacker can modify any post's title, content, excerpt, status,
+      and author — enabling site defacement, SEO poisoning, or watering-hole
+      injection.
+
+      Fix: verify ownership before writing:
+        if ( ! current_user_can( 'edit_post', (int) $post_id ) ) {
+            wp_send_json_error( 'Unauthorized', 403 );
+        }
+
+      Real-world CVEs: CVE-2025-14080 (Frontend Post Submission Manager Lite),
+      CVE-2026-1925 (EmailKit).
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Arbitrary Content Modification"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_update_post/
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+        - https://owasp.org/www-project-top-ten/2021/A01_2021-Broken_Access_Control
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: json_decode(file_get_contents("php://input"), ...)
+          - pattern: file_get_contents("php://input")
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: $wpdb->get_results(...)
+          - pattern: $wpdb->get_row(...)
+          - pattern: $wpdb->get_var(...)
+          - pattern: $wpdb->get_col(...)
+          - pattern: get_option(...)
+          - pattern: get_user_meta(...)
+    pattern-sinks:
+      # Each sink alternative excludes the case documented in this rule's own
+      # "FALSE POSITIVE indicators" above: current_user_can('manage_options')
+      # anywhere in the enclosing function, bare or inside an if-condition
+      # (e.g. `if ( ! current_user_can('manage_options') ) { wp_die(...); }`,
+      # the common WP capability-guard idiom). A manage_options gate is
+      # sitewide-admin-equivalent — per-resource ownership is moot once that
+      # gate has passed, and Administrator-floor (PR:H) findings are out of
+      # scope for this program regardless.
+      - patterns:
+          - pattern: wp_update_post(array('ID' => $POST_ID, ...))
+          - focus-metavariable: $POST_ID
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                current_user_can('manage_options');
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... current_user_can('manage_options') ...>) {
+                  ...
+                }
+                ...
+              }
+      - patterns:
+          - pattern: wp_update_post(array("ID" => $POST_ID, ...))
+          - focus-metavariable: $POST_ID
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                current_user_can('manage_options');
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... current_user_can('manage_options') ...>) {
+                  ...
+                }
+                ...
+              }
+      - patterns:
+          - pattern: |
+              $ARGS['ID'] = $POST_ID;
+              ...
+              wp_update_post($ARGS);
+          - focus-metavariable: $POST_ID
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                current_user_can('manage_options');
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... current_user_can('manage_options') ...>) {
+                  ...
+                }
+                ...
+              }
+      - patterns:
+          - pattern: |
+              $ARGS = array('ID' => $POST_ID, ...);
+              ...
+              wp_update_post($ARGS);
+          - focus-metavariable: $POST_ID
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                current_user_can('manage_options');
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... current_user_can('manage_options') ...>) {
+                  ...
+                }
+                ...
+              }
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"

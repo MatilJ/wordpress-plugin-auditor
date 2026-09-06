@@ -1,0 +1,157 @@
+rules:
+  - id: claude.php.wordpress.xss.rest-field-update-callback-unsanitized-meta
+    languages: [php]
+    severity: HIGH
+    message: |
+      The `update_callback` of `register_rest_field()` passes the REST-API-supplied
+      `$meta_value` directly to a meta/option write function without sanitization.
+      The `update_callback` parameter is entirely attacker-controlled — it is the
+      decoded JSON value from the REST API request body. Any authenticated user with
+      `edit_post` capability can store arbitrary values, and if those values are later
+      rendered without output escaping (e.g. `echo $focalPoint['x']` with no
+      `esc_attr()`), this enables Stored Cross-Site Scripting (CWE-79).
+
+      Confirmed pattern (brizy <= 2.8.12, editor/rest-extend.php:82):
+        register_rest_field( $types, 'brizy_attachment_focal_point', [
+            'update_callback' => function ( $meta_value, $post ) {
+                // $meta_value is raw REST input — no sanitization
+                update_post_meta( $post->ID, 'brizy_attachment_focal_point', $meta_value );
+            }
+        ]);
+      The stored value was echoed without esc_attr() in admin/views/featured-image.php:4,14,15.
+
+      Fix: sanitize `$meta_value` before storage using the appropriate function:
+        Numeric           →  (int) $meta_value  or  absint($meta_value)
+        Plain text        →  sanitize_text_field($meta_value)
+        HTML              →  wp_kses_post($meta_value)
+        URL               →  esc_url_raw($meta_value)
+        Array of strings  →  array_map('sanitize_text_field', (array) $meta_value)
+
+      TRIAGE NOTES:
+        • Hits where the write function receives a sanitized expression
+          (e.g. sanitize_text_field($meta_value)) are NOT matched by this rule.
+        • Hits where an intermediate variable is sanitized before the write call
+          are not matched (the parameter name differs from the write-call argument).
+        • FALSE POSITIVE: if the rendered sink already applies output escaping
+          (esc_attr(), esc_html()) at the point of echo, the XSS impact is removed;
+          however, storing unsanitized data is still poor practice and should be fixed
+          at the write side.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Scripting (XSS) / Missing Sanitization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/modifying-responses/
+        - https://developer.wordpress.org/apis/security/sanitizing/
+        - https://developer.wordpress.org/reference/functions/register_rest_field/
+    patterns:
+      # Outer anchor: must be inside a register_rest_field() call.
+      # This prevents false positives from standalone functions that happen to
+      # have the same parameter-to-write pattern outside the REST field context.
+      - pattern-inside: register_rest_field(...)
+      # Single pattern that binds $META_VALUE consistently:
+      # the closure's first parameter AND the write-function's value argument
+      # must be the exact same identifier. This ensures sanitize_text_field($META),
+      # or intermediate variables ($clean = sanitize(...); write($clean))
+      # fail to match because the third argument differs from $META_VALUE.
+      - pattern-either:
+          - pattern: |
+              function ($META_VALUE, ...) {
+                ...
+                update_post_meta($ID, $KEY, $META_VALUE);
+                ...
+              }
+          - pattern: |
+              function ($META_VALUE, ...) {
+                ...
+                add_post_meta($ID, $KEY, $META_VALUE);
+                ...
+              }
+          - pattern: |
+              function ($META_VALUE, ...) {
+                ...
+                update_user_meta($ID, $KEY, $META_VALUE);
+                ...
+              }
+          - pattern: |
+              function ($META_VALUE, ...) {
+                ...
+                update_option($KEY, $META_VALUE);
+                ...
+              }
+          - pattern: |
+              function ($META_VALUE, ...) {
+                ...
+                update_site_option($KEY, $META_VALUE);
+                ...
+              }
+      # Semgrep PHP matches metavariables through cast operators (known behaviour):
+      # (int) $meta_value and (float) $meta_value are caught by the above patterns
+      # despite not being the raw identifier. Exclude these explicitly because
+      # integer/float casts are safe — XSS requires string injection.
+      - pattern-not: |
+          function ($META_VALUE, ...) {
+            ...
+            update_post_meta($ID, $KEY, (int) $META_VALUE);
+            ...
+          }
+      - pattern-not: |
+          function ($META_VALUE, ...) {
+            ...
+            add_post_meta($ID, $KEY, (int) $META_VALUE);
+            ...
+          }
+      - pattern-not: |
+          function ($META_VALUE, ...) {
+            ...
+            update_user_meta($ID, $KEY, (int) $META_VALUE);
+            ...
+          }
+      - pattern-not: |
+          function ($META_VALUE, ...) {
+            ...
+            update_option($KEY, (int) $META_VALUE);
+            ...
+          }
+      - pattern-not: |
+          function ($META_VALUE, ...) {
+            ...
+            update_site_option($KEY, (int) $META_VALUE);
+            ...
+          }
+      - pattern-not: |
+          function ($META_VALUE, ...) {
+            ...
+            update_post_meta($ID, $KEY, (float) $META_VALUE);
+            ...
+          }
+      - pattern-not: |
+          function ($META_VALUE, ...) {
+            ...
+            add_post_meta($ID, $KEY, (float) $META_VALUE);
+            ...
+          }
+      - pattern-not: |
+          function ($META_VALUE, ...) {
+            ...
+            update_user_meta($ID, $KEY, (float) $META_VALUE);
+            ...
+          }
+      - pattern-not: |
+          function ($META_VALUE, ...) {
+            ...
+            update_option($KEY, (float) $META_VALUE);
+            ...
+          }
+      - pattern-not: |
+          function ($META_VALUE, ...) {
+            ...
+            update_site_option($KEY, (float) $META_VALUE);
+            ...
+          }

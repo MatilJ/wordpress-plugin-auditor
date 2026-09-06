@@ -1,0 +1,109 @@
+rules:
+  - id: claude.php.wordpress.access-control.shortcode-id-attr-get-post-meta-no-status-check
+    languages: [php]
+    severity: WARNING
+    message: |
+      A shortcode callback calls get_post_meta() using a post ID sourced directly
+      from shortcode_atts() without first verifying the referenced post's
+      publication status (get_post_status() or current_user_can('read_post', $id)).
+      Any user role that can insert shortcodes (typically Contributor+) can supply
+      an arbitrary post ID and read post meta from draft, private, pending, or
+      trash posts — leaking business data such as addresses, coordinates, contact
+      details, or opening hours before the post is published (CWE-862, CWE-200).
+
+      Contrast with the safe pattern used by AJAX search handlers, which include
+      an explicit AND posts.post_status = 'publish' guard in their SQL queries.
+
+      Required fix: verify the post is public before reading its meta:
+        $post_status = get_post_status( $atts['id'] );
+        if ( 'publish' !== $post_status ) {
+            return '';
+        }
+        $meta = get_post_meta( $atts['id'], 'my_meta_key', true );
+
+      TRIAGE — FP scenarios:
+      1. The shortcode is only rendered inside the_loop on a public archive page
+         (the rendered post is already public). Confirm by checking all call sites
+         for do_shortcode() or the shortcode tag in theme templates.
+      2. The shortcode reads non-sensitive plugin configuration meta (a layout
+         preference, a display flag) rather than user PII or business contact data.
+         Lower severity but still technically an IDOR; adjust confidence accordingly.
+      3. An upstream caller (e.g., a Gutenberg block render_callback) already gates
+         on current_user_can() before invoking do_shortcode(). Manual trace required.
+
+      NOTE: This rule matches the common pattern where shortcode_atts() reassigns
+      the $atts parameter variable (e.g., $atts = shortcode_atts($defs, $atts)).
+      The less common rename variant ($parsed = shortcode_atts($defs, $atts))
+      requires a manual grep for get_post_meta calls inside shortcode callbacks.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Insecure Direct Object Reference"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/apis/security/user-capabilities-and-roles/
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/
+    # Freemius SDK is always a bundled third-party library; OOS for Wordfence bounty.
+    paths:
+      exclude:
+        - "**/freemius/**"
+    patterns:
+      # Anchor: get_post_meta() is called with an array-key access on the variable
+      # that was populated by shortcode_atts() in the same function scope.
+      # Hit is reported at the get_post_meta() call line.
+      - pattern: get_post_meta($ATTS[$ID_KEY], ...)
+      # Must be inside a shortcode callback where $ATTS is reassigned via
+      # shortcode_atts() — matches both the direct form
+      # ($atts = shortcode_atts($defs, $atts)) and the wrapped form
+      # ($atts = wpsl_bool_check(shortcode_atts($defs, $atts))).
+      # Deep expression matching (<... ...>) finds shortcode_atts() nested
+      # inside any number of wrapper function calls.
+      - pattern-inside: |
+          function $FUNC($ATTS, ...) {
+            ...
+            $ATTS = <... shortcode_atts($DEFAULTS, $ATTS, ...) ...>;
+            ...
+          }
+      # Exclude: function calls get_post_status() — the post's publish state is
+      # being verified before use, which is the canonical defensive fix.
+      # Using function $FUNC(...) (not $FUNC($ATTS,...)) avoids metavariable
+      # binding conflicts that can prevent the exclusion from firing.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            get_post_status(...);
+            ...
+          }
+      # Exclude: function calls current_user_can() as a standalone statement.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      # Exclude: function uses current_user_can() inside an if condition
+      # (the common pattern: if (!current_user_can('read_post', $id)) { return ''; }).
+      # Required in addition to the standalone form — Semgrep's statement-level
+      # pattern does not match function calls that appear only inside if conditions.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can(...) ...>) {
+              ...
+            }
+            ...
+          }
+      # Exclude: function retrieves the full post object, which developers typically
+      # follow with a ->post_status check before proceeding.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            get_post(...);
+            ...
+          }

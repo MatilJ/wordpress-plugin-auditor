@@ -1,0 +1,82 @@
+rules:
+  - id: claude.php.wordpress.sqli.unescaped-row-interpolation-sql-export-write
+    languages: [php]
+    severity: HIGH
+    message: |
+      Inside a foreach loop over a database result set, a value read from a
+      row object property is written to a stream/file as part of a generated
+      SQL statement text — via direct string interpolation inside a quoted
+      SQL string-literal position (e.g. "...,\"{$row->field}\")" or
+      "...,'{$row->field}')") — with no esc_sql() (or equivalent) escaping
+      applied to the property. This is CWE-89 SQL Injection.
+
+      This is a "generate-then-re-execute" (second-order) SQL injection: the
+      generated text is not executed immediately — it is written out (most
+      commonly to a downloadable database export/backup/"dump" .sql file)
+      for LATER execution by a corresponding import/restore feature that runs
+      each generated statement via $wpdb->query() with no further escaping or
+      preparation. The row value itself may have been written to the
+      database safely (via $wpdb->prepare()), but that only prevents SQL
+      injection into the ORIGINAL insert — it does nothing to stop the same
+      stored value, if it ever contains a literal quote character (e.g.
+      because it originated from an unauthenticated public form, comment,
+      tracking/analytics event, or any other attacker-influenced field),
+      from breaking out of the quoted literal when the value is later
+      re-embedded into freshly generated SQL text without its own escaping.
+
+      Fix: apply esc_sql() to every row-derived value before interpolating it
+      into generated SQL text, or build the fragment with a placeholder
+      (e.g. fprintf() with %s and an esc_sql()-wrapped argument, or
+      $wpdb->prepare() with %s/%d/%i) instead of raw string interpolation.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+      # TRIAGE GUIDANCE
+      # TRUE POSITIVE: the enclosing foreach iterates over a $wpdb->get_results()/
+      # get_row() result set (directly, or via a repository/helper one call
+      # away), and the value interpolated inside the quoted position has no
+      # esc_sql()/intval()/absint()/(int)/(float) cast applied anywhere on the
+      # same statement. Confirm a companion import/replay feature exists that
+      # later re-executes the generated text via $wpdb->query() (or similar)
+      # without re-escaping — that re-execution is the actual injection point,
+      # even though this rule reports the generation site (matching the real
+      # patch, which fixed the generation site, not the later executor).
+      # FALSE POSITIVE: the interpolated property is itself already the
+      # result of esc_sql()/an int cast/absint() etc. at the interpolation
+      # site; or the written text is never re-executed as SQL anywhere (e.g.
+      # a human-readable report, CSV, or log line rather than a SQL dump).
+      # KNOWN LIMITATION: this is a pattern-mode (non-taint) rule and only
+      # requires the quoted-interpolation shape inside a foreach — it does
+      # not itself verify the loop truly iterates $wpdb rows or that a
+      # re-execution sink exists; confirm both manually before reporting.
+    patterns:
+      - pattern-inside: |
+          foreach ($ROWS as $ROW) { ... }
+      - pattern-either:
+          - pattern: fwrite($STREAM, $S)
+          - pattern: fwrite($STREAM, $S, $LEN)
+          - pattern: fputs($STREAM, $S)
+          - pattern: fputs($STREAM, $S, $LEN)
+          - pattern: fprintf($STREAM, $S)
+          - pattern: fprintf($STREAM, $S, ...)
+      - metavariable-regex:
+          metavariable: $S
+          regex: '(?s).*(\\"\{\$[A-Za-z_][A-Za-z0-9_]*->[A-Za-z_][A-Za-z0-9_]*\}\\"|''\{\$[A-Za-z_][A-Za-z0-9_]*->[A-Za-z_][A-Za-z0-9_]*\}'').*'
+      # Fix-derived FP guard: the patch replaced the raw interpolation with
+      # fprintf()'s %s placeholder plus a separately-passed esc_sql()-wrapped
+      # argument — the format string itself no longer contains the property
+      # interpolation, so the metavariable-regex above already excludes it;
+      # these pattern-not clauses make that exclusion explicit for the
+      # fprintf($S, ...) branch, which otherwise ignores trailing arguments.
+      - pattern-not: fprintf($STREAM, $S, esc_sql(...))
+      - pattern-not: fprintf($STREAM, $S, esc_sql(...), ...)

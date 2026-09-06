@@ -1,0 +1,334 @@
+rules:
+  - id: claude.php.wordpress.lfi.template-selector-param-to-include-no-sanitizer
+    languages: [php]
+    severity: HIGH
+    message: |
+      A template/layout/view selector — or the same shape used to pick a
+      pluggable backend by name (an "app"/"provider"/"gateway"/"driver"
+      selector, as in multi-provider OAuth/social-login or payment/SMS
+      gateway dispatch) — is concatenated directly into an include/require
+      path or a WP template-loading call (get_template_part, locate_template,
+      load_template — optionally through a thin "add extension" helper),
+      with no path sanitizer anywhere in the function body. The selector is
+      either a formal function parameter, or a local
+      variable populated by extract(shortcode_atts(...)) / extract(wp_parse_args(...))
+      — the common idiom shortcode and widget callbacks use to turn their
+      $atts/$instance array into named variables. Because the value is not
+      resolved through an allow-list, whatever the caller (or, for
+      shortcode/widget callbacks, whoever renders that shortcode) supplies
+      selects the included file; when any reachable call site derives this
+      value from the request — including indirectly, e.g. an AJAX handler
+      that rebuilds and executes a shortcode string from $_REQUEST — this is
+      unauthenticated Local File Inclusion (CWE-98 / CWE-22). The same flaw
+      also appears split across two functions: a resolver method builds
+      "$base_dir . $param . $ext" and returns it, and a sibling loader
+      method assigns the result, checks only file_exists()/is_file(), and
+      then includes it — the mere-existence check does not constrain the
+      path to the template directory, so traversal segments in $param still
+      resolve to an arbitrary local .php file. The same shape also occurs in
+      a WP template PARTIAL file with no enclosing function — the file
+      itself is the include target, extract(shortcode_atts(...)) runs
+      directly at file scope, and the extracted selector is then handed to
+      a second, project-specific "get_template"/"render_view"-style wrapper
+      function that performs the actual include internally. Reduce the value to a safe
+      charset (preg_replace allow-list or
+      sanitize_file_name()/sanitize_key()/basename()), then resolve it with
+      realpath() and verify the result is still inside the intended
+      template directory before including it.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program ('PHP Remote File Inclusion')"
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+    patterns:
+      - pattern-either:
+          - pattern: include $DIR . $PARAM . $EXT;
+          - pattern: include($DIR . $PARAM . $EXT);
+          - pattern: include_once $DIR . $PARAM . $EXT;
+          - pattern: include_once($DIR . $PARAM . $EXT);
+          - pattern: require $DIR . $PARAM . $EXT;
+          - pattern: require($DIR . $PARAM . $EXT);
+          - pattern: require_once $DIR . $PARAM . $EXT;
+          - pattern: require_once($DIR . $PARAM . $EXT);
+          # Case-normalized selector: the selector is lowercased/uppercased
+          # in place (strtolower()/strtoupper()) immediately before the
+          # concatenation, rather than through a named "add extension"-style
+          # helper — the idiomatic way a pluggable-backend dispatcher
+          # (payment/SMS "engine"/gateway selection) makes the selector
+          # match case-insensitively before it becomes part of the path.
+          # CVE-2025-62075 (Simple Payment): $engine, an $_REQUEST-derived
+          # payment-gateway selector, is lowercased and concatenated into a
+          # require_once path with only a file_exists() existence guard.
+          - pattern: include $DIR . strtolower($PARAM) . $EXT;
+          - pattern: include($DIR . strtolower($PARAM) . $EXT);
+          - pattern: include_once $DIR . strtolower($PARAM) . $EXT;
+          - pattern: include_once($DIR . strtolower($PARAM) . $EXT);
+          - pattern: require $DIR . strtolower($PARAM) . $EXT;
+          - pattern: require($DIR . strtolower($PARAM) . $EXT);
+          - pattern: require_once $DIR . strtolower($PARAM) . $EXT;
+          - pattern: require_once($DIR . strtolower($PARAM) . $EXT);
+          - pattern: include $DIR . strtoupper($PARAM) . $EXT;
+          - pattern: include($DIR . strtoupper($PARAM) . $EXT);
+          - pattern: include_once $DIR . strtoupper($PARAM) . $EXT;
+          - pattern: include_once($DIR . strtoupper($PARAM) . $EXT);
+          - pattern: require $DIR . strtoupper($PARAM) . $EXT;
+          - pattern: require($DIR . strtoupper($PARAM) . $EXT);
+          - pattern: require_once $DIR . strtoupper($PARAM) . $EXT;
+          - pattern: require_once($DIR . strtoupper($PARAM) . $EXT);
+          - pattern: include $DIR . $THIS->$HELPER($PARAM, $EXT);
+          - pattern: include($DIR . $THIS->$HELPER($PARAM, $EXT));
+          - pattern: include_once $DIR . $THIS->$HELPER($PARAM, $EXT);
+          - pattern: include_once($DIR . $THIS->$HELPER($PARAM, $EXT));
+          - pattern: require $DIR . $THIS->$HELPER($PARAM, $EXT);
+          - pattern: require($DIR . $THIS->$HELPER($PARAM, $EXT));
+          - pattern: require_once $DIR . $THIS->$HELPER($PARAM, $EXT);
+          - pattern: require_once($DIR . $THIS->$HELPER($PARAM, $EXT));
+          # Resolver-returns-path shape: the base-dir + param + extension
+          # concatenation lives in a separate resolver method/function; the
+          # loader only re-checks file_exists()/is_file() (not a path
+          # containment check) before including the resolved variable.
+          - pattern: |
+              $PATHVAR = $THIS->$HELPER($PARAM, ...);
+              ...
+              if (file_exists($PATHVAR)) {
+                ...
+                include $PATHVAR;
+                ...
+              }
+          - pattern: |
+              $PATHVAR = $THIS->$HELPER($PARAM, ...);
+              ...
+              if (file_exists($PATHVAR)) {
+                ...
+                include_once $PATHVAR;
+                ...
+              }
+          - pattern: |
+              $PATHVAR = $THIS->$HELPER($PARAM, ...);
+              ...
+              if (file_exists($PATHVAR)) {
+                ...
+                require $PATHVAR;
+                ...
+              }
+          - pattern: |
+              $PATHVAR = $THIS->$HELPER($PARAM, ...);
+              ...
+              if (file_exists($PATHVAR)) {
+                ...
+                require_once $PATHVAR;
+                ...
+              }
+          - pattern: |
+              $PATHVAR = $HELPER($PARAM, ...);
+              ...
+              if (file_exists($PATHVAR)) {
+                ...
+                include $PATHVAR;
+                ...
+              }
+          - pattern: |
+              $PATHVAR = $HELPER($PARAM, ...);
+              ...
+              if (is_file($PATHVAR)) {
+                ...
+                include $PATHVAR;
+                ...
+              }
+          # WP template-loading functions: same "$dir . $param [. $ext]"
+          # concatenation, just handed to get_template_part/locate_template/
+          # load_template instead of a raw include. These already append
+          # ".php" internally, so a 2-part concat (no trailing $EXT) is the
+          # common shape as well as the 3-part one.
+          - pattern: get_template_part($DIR . $PARAM . $EXT, ...)
+          - pattern: get_template_part($DIR . $PARAM, ...)
+          - pattern: locate_template($DIR . $PARAM . $EXT, ...)
+          - pattern: locate_template($DIR . $PARAM, ...)
+          - pattern: load_template($DIR . $PARAM . $EXT, ...)
+          - pattern: load_template($DIR . $PARAM, ...)
+          - pattern: self::get_template_part($DIR . $PARAM . $EXT, ...)
+          - pattern: self::get_template_part($DIR . $PARAM, ...)
+          - pattern: static::get_template_part($DIR . $PARAM . $EXT, ...)
+          - pattern: static::get_template_part($DIR . $PARAM, ...)
+          - pattern: $OBJ->get_template_part($DIR . $PARAM . $EXT, ...)
+          - pattern: $OBJ->get_template_part($DIR . $PARAM, ...)
+          # Custom (non-core) template-loading wrapper: a project-specific
+          # function — not include()/require() or a WP-core template
+          # function above — whose name signals it resolves and includes a
+          # template internally (e.g. "xyz_get_template", "theme_render_view").
+          - patterns:
+              - pattern: $CUSTOMFUNC($DIR . $PARAM . $EXT, ...)
+              - metavariable-regex:
+                  metavariable: $CUSTOMFUNC
+                  regex: '(?i).*(?:get_|load_|include_|render_|locate_)(?:template|view|partial|layout)\w*$'
+      - pattern-either:
+          # Original shape: the selector is a formal function parameter.
+          - pattern-inside: |
+              function $FUNC(..., $PARAM, ...) {
+                ...
+              }
+          # Shortcode/widget-callback shape: the selector is a local
+          # variable produced by extract() over shortcode_atts()/
+          # wp_parse_args() rather than a declared parameter — the
+          # idiomatic way WP shortcode and widget callbacks turn their
+          # incoming $atts/$instance array into named variables.
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+                extract(shortcode_atts($DEFAULTS, $ATTS));
+                ...
+              }
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+                extract(shortcode_atts($DEFAULTS, $ATTS), $EXTR_TYPE);
+                ...
+              }
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+                extract(wp_parse_args($ATTS, $DEFAULTS));
+                ...
+              }
+          # Template PARTIAL file shape: same extract(shortcode_atts(...))
+          # idiom, but running directly at file scope — the file itself is
+          # the include target (loaded by a caller's template-loading
+          # wrapper), so there is no enclosing function to match against.
+          - pattern-inside: |
+              extract(shortcode_atts($DEFAULTS, $ATTS));
+              ...
+          - pattern-inside: |
+              extract(shortcode_atts($DEFAULTS, $ATTS), $EXTR_TYPE);
+              ...
+          - pattern-inside: |
+              extract(wp_parse_args($ATTS, $DEFAULTS));
+              ...
+      - metavariable-regex:
+          metavariable: $PARAM
+          # app/appname/app_name/provider/gateway/driver/engine/social_app:
+          # the same dynamic-dispatch-by-name shape used to pick a
+          # pluggable backend (OAuth/social-login app, payment/SMS gateway
+          # or payment "engine") by an unvalidated name concatenated into
+          # an include/require path. Trailing "(_\w+)?" also covers
+          # compound selector names such as "layout_style" or
+          # "template_type".
+          regex: "^\\$?(layout|template|tpl|view|page|section|module|widget|partial|style|app|appname|app_name|provider|gateway|driver|engine|social_app)(_\\w+)?$"
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            realpath(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            basename(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            sanitize_file_name(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            sanitize_key(...);
+            ...
+          }
+      # sanitize_key() applied via a ternary/conditional-expression RHS
+      # ("$style = isset($style) ? sanitize_key($style) : 'modern';") is a
+      # bare-statement-pattern miss above — the deep operator reaches it
+      # regardless of nesting depth inside the assignment RHS.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $X = <... sanitize_key(...) ...>;
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            preg_replace(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            validate_file(...);
+            ...
+          }
+      # Allow-list validator function shape: the fix introduces a
+      # project-specific "is this a known-good value" helper (typically
+      # backed by in_array() against a static whitelist) and calls it as an
+      # early guard clause on the selector, exiting when the check fails —
+      # rather than sanitizing the string in place, the invalid path is
+      # simply never reached. Matched as three separate clauses (wp_die/
+      # die/exit) rather than a pattern-either so each stays a plain
+      # function-scoped snippet.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (!$VALIDATOR($PARAM)) {
+              ...
+              wp_die(...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (!$VALIDATOR($PARAM)) {
+              ...
+              die(...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (!$VALIDATOR($PARAM)) {
+              ...
+              exit;
+              ...
+            }
+            ...
+          }
+      # File-scope template-partial equivalents of the guards above, for
+      # the no-enclosing-function context. Anchored to the same
+      # extract(shortcode_atts(...)) statement as that context clause (not a
+      # bare/unanchored sequence) so the search for a downstream guard stays
+      # within this file's actual statement sequence instead of matching
+      # unrelated code elsewhere.
+      - pattern-not-inside: |
+          extract(shortcode_atts($DEFAULTS, $ATTS));
+          ...
+          if (!in_array($PARAM, array(...))) {
+            $PARAM = "...";
+          }
+          ...
+      - pattern-not-inside: |
+          extract(shortcode_atts($DEFAULTS, $ATTS));
+          ...
+          sanitize_file_name(...);
+          ...
+      - pattern-not-inside: |
+          extract(shortcode_atts($DEFAULTS, $ATTS));
+          ...
+          basename(...);
+          ...
+      - pattern-not-inside: |
+          extract(shortcode_atts($DEFAULTS, $ATTS));
+          ...
+          sanitize_key(...);
+          ...

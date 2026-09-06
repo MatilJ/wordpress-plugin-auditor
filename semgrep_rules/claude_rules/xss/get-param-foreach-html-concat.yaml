@@ -1,0 +1,100 @@
+rules:
+  - id: claude.php.wordpress.xss.get-param-foreach-html-concat
+    languages: [php]
+    severity: HIGH
+    message: |
+      Superglobal values from $_GET, $_POST, or $_REQUEST are iterated via
+      foreach and concatenated into a string without encoding (urlencode,
+      esc_attr, htmlspecialchars). If this string is later embedded in HTML
+      (e.g. an iframe src attribute), an attacker can inject HTML attributes
+      or break out of attribute context. Apply urlencode() to both key and
+      value when building URL query strings, or esc_attr() when inserting
+      into HTML attributes.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+    patterns:
+      - pattern-either:
+          # foreach ($_GET as $k => $v) with $v concatenated unescaped
+          - pattern: |
+              foreach ($_GET as $KEY => $VALUE) {
+                ...
+                $RESULT .= <... $VALUE ...>;
+                ...
+              }
+          - pattern: |
+              foreach ($_POST as $KEY => $VALUE) {
+                ...
+                $RESULT .= <... $VALUE ...>;
+                ...
+              }
+          - pattern: |
+              foreach ($_REQUEST as $KEY => $VALUE) {
+                ...
+                $RESULT .= <... $VALUE ...>;
+                ...
+              }
+          # Variant: foreach ($_GET as $k => $v) with $k concatenated unescaped
+          - pattern: |
+              foreach ($_GET as $KEY => $VALUE) {
+                ...
+                $RESULT .= <... $KEY ...>;
+                ...
+              }
+          - pattern: |
+              foreach ($_POST as $KEY => $VALUE) {
+                ...
+                $RESULT .= <... $KEY ...>;
+                ...
+              }
+          - pattern: |
+              foreach ($_REQUEST as $KEY => $VALUE) {
+                ...
+                $RESULT .= <... $KEY ...>;
+                ...
+              }
+      - pattern-not:
+          # Safe: urlencode applied to the value
+          pattern: |
+            foreach ($SUPERGLOBAL as $KEY => $VALUE) {
+              ...
+              $RESULT .= <... urlencode($VALUE) ...>;
+              ...
+            }
+      - pattern-not:
+          pattern: |
+            foreach ($SUPERGLOBAL as $KEY => $VALUE) {
+              ...
+              $RESULT .= <... rawurlencode($VALUE) ...>;
+              ...
+            }
+      - pattern-not:
+          pattern: |
+            foreach ($SUPERGLOBAL as $KEY => $VALUE) {
+              ...
+              $RESULT .= <... esc_attr($VALUE) ...>;
+              ...
+            }
+      - pattern-not:
+          pattern: |
+            foreach ($SUPERGLOBAL as $KEY => $VALUE) {
+              ...
+              $RESULT .= <... htmlspecialchars($VALUE) ...>;
+              ...
+            }
+      - pattern-not:
+          pattern: |
+            foreach ($SUPERGLOBAL as $KEY => $VALUE) {
+              ...
+              $RESULT .= <... esc_url($VALUE) ...>;
+              ...
+            }

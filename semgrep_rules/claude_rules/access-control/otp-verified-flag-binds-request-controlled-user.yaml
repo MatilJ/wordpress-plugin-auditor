@@ -1,0 +1,287 @@
+rules:
+  - id: claude.php.wordpress.access-control.otp-verified-flag-binds-request-controlled-user
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function checks a generic "OTP/2FA verified" session/transient flag, or
+      a third-party identity-verification API response (e.g. a phone/email OTP
+      provider), then resolves the account to act on via get_user_by() using an
+      identifier read back from request/session data, and either writes a new
+      credential (update_user_meta()/add_user_meta()) or grants a live session
+      directly (wp_set_auth_cookie()/wp_set_current_user()) to that account —
+      with no re-verification that the identity the challenge actually verified
+      matches the identifier used to resolve the account.
+
+      The verified-flag/response only proves the requester completed a
+      challenge for SOME identifier (e.g. their own phone/email) — it does not
+      prove the requester owns the DIFFERENT account resolved by get_user_by().
+      If that account identifier is attacker-influenced (a request field, or a
+      session value set earlier in the same unauthenticated flow) and is never
+      cross-checked against the identity field the verification response itself
+      returned, an attacker can complete a legitimate challenge for an
+      identifier they control, then bind that identifier to an arbitrary victim
+      account (e.g. an administrator) and be logged in as that account —
+      unauthenticated privilege escalation / account takeover (CWE-266) or
+      authentication bypass (CWE-287).
+
+      Fix: before writing the new credential / granting the session, re-verify
+      that the caller actually owns the target account (e.g. wp_check_password()
+      against a submitted password, or a server-set flag proven to have been set
+      only after such a check for this exact user ID) — do not rely solely on an
+      unscoped "verified" boolean. For a third-party verification response,
+      compare the identity field the response itself returned against the
+      identifier used to resolve the account and reject on mismatch.
+
+      A fourth shape reaches the same class from a different resolver: a
+      request-handling function looks up a candidate account with a plural,
+      meta-value-style lookup (get_users()) — commonly keyed on a phone/email
+      identifier taken from the request — takes the first row back, and
+      grants a live session directly to it. Nothing in that same function
+      ever calls a dedicated challenge/one-time-code verification function
+      (a name containing check/verify/valid plus code/otp/sms/token/2fa/mfa),
+      so the session grant is provably not gated by any in-scope proof that
+      the requester passed a challenge tied to that specific identifier —
+      only by the identifier's presence/format or a generic, unrelated
+      validator's boolean result.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - The account resolved by get_user_by() can differ from the identifier
+          that actually received/verified the OTP (e.g. taken from a POST field
+          the client controls on the final "complete login" request).
+        - No wp_check_password() (or equivalent proof-of-ownership check tied to
+          this specific user) executes before the write, in this function or a
+          function it calls.
+        - The OTP-verified flag is a boolal transaction status, not itself bound
+          to the resolved user's ID.
+        - A local OTP/token-named validator function reads its own prior
+          challenge state back from $_SESSION but never runs
+          hash_equals($_SESSION[...], ...) against the identifier the caller
+          supplies at verification time — so the check only proves the token
+          is internally self-consistent, not that it was issued for that
+          identifier.
+        - A get_users() lookup keyed on a request-controlled identifier feeds
+          the first result straight into wp_set_auth_cookie()/
+          wp_set_current_user(), with no direct, in-function call to any
+          code/OTP/SMS-style verification routine gating that grant.
+
+      FALSE POSITIVE indicators:
+        - The user acted on is always get_current_user_id() / the same user who
+          started the OTP challenge (identifier fixed server-side, not re-read
+          from the request).
+        - wp_check_password() (or a session flag provably set only after such a
+          check for this user) gates the write.
+        - The written meta is non-sensitive (display preference, not a
+          login-relevant credential) and does not feed a later auth decision.
+        - The same function directly calls a code/OTP/SMS verification-named
+          routine (regardless of where the code itself lives) before the
+          get_users() result is granted a session — the routine's mere
+          presence in-scope is the fix this branch's oracle relies on.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-266: Incorrect Privilege Assignment"
+        - "CWE-287: Improper Authentication"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/266.html
+        - https://cwe.mitre.org/data/definitions/287.html
+        - https://developer.wordpress.org/reference/functions/wp_check_password/
+        - https://developer.wordpress.org/reference/functions/update_user_meta/
+        - https://developer.wordpress.org/reference/functions/wp_set_auth_cookie/
+    patterns:
+      - pattern-either:
+          # Branch group 1: a resolved account is given a new stored credential
+          # (update_user_meta()/add_user_meta()) with no password check anywhere
+          # in the function.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        get_user_by($TYPE, $UNAME);
+                        ...
+                        update_user_meta($USER->$PROP->ID, ...);
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        get_user_by($TYPE, $UNAME);
+                        ...
+                        add_user_meta($USER->$PROP->ID, ...);
+                        ...
+                      }
+              - pattern-not: |
+                  function $FUNC(...) {
+                    ...
+                    wp_check_password(...);
+                    ...
+                  }
+              - pattern-not: |
+                  function $FUNC(...) {
+                    ...
+                    if (<... wp_check_password(...) ...>) { ... }
+                    ...
+                  }
+              - pattern-not: |
+                  function $FUNC(...) {
+                    ...
+                    if (<... $GATE ...>) {
+                      ...
+                      wp_die(...);
+                      ...
+                    }
+                    ...
+                    get_user_by($TYPE, $UNAME);
+                    ...
+                    update_user_meta($USER->$PROP->ID, ...);
+                    ...
+                  }
+              - pattern-not: |
+                  function $FUNC(...) {
+                    ...
+                    if (<... $GATE ...>) {
+                      ...
+                      exit(...);
+                      ...
+                    }
+                    ...
+                    get_user_by($TYPE, $UNAME);
+                    ...
+                    update_user_meta($USER->$PROP->ID, ...);
+                    ...
+                  }
+          # Branch group 2: a third-party verification API response is checked only
+          # for its own presence/token field (e.g. an OTP-provider "idToken"), then an
+          # account resolved from a request-controlled identifier is granted a live
+          # session directly — with no check that the identity the response itself
+          # returned matches that identifier.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $RESP = $VERIFY_CALL(...);
+                        ...
+                        if (<... isset($RESP->$TOKENFIELD) ...>) {
+                          ...
+                        } else {
+                          ...
+                          $USER = get_user_by($TYPE, $UID);
+                          ...
+                          wp_set_auth_cookie($USER->ID, ...);
+                          ...
+                        }
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $RESP = $VERIFY_CALL(...);
+                        ...
+                        if (<... isset($RESP->$TOKENFIELD) ...>) {
+                          ...
+                        } else {
+                          ...
+                          $USER = get_user_by($TYPE, $UID);
+                          ...
+                          wp_set_current_user($USER->ID);
+                          ...
+                        }
+                        ...
+                      }
+              - pattern-not: |
+                  function $FUNC(...) {
+                    ...
+                    $RESP = $VERIFY_CALL(...);
+                    ...
+                    $VERIFIED = <... $RESP->$IDFIELD ...>;
+                    ...
+                    if (<... $VERIFIED ...>) {
+                      ...
+                    }
+                    ...
+                    $USER = get_user_by($TYPE, $UID);
+                    ...
+                  }
+              - pattern-not: |
+                  function $FUNC(...) {
+                    ...
+                    $RESP = $VERIFY_CALL(...);
+                    ...
+                    if (<... hash_equals($RESP->$IDFIELD, ...) ...>) {
+                      ...
+                    }
+                    ...
+                    $USER = get_user_by($TYPE, $UID);
+                    ...
+                  }
+          # Branch group 3: a local, self-contained OTP/transaction-token validator
+          # function (named accordingly) reads its own prior challenge state back
+          # from $_SESSION (e.g. a stored OTP value or transaction marker) but its
+          # body never re-checks that state against the identifier the challenge
+          # was actually issued for via hash_equals($_SESSION[...], ...) — so the
+          # validator only proves the caller holds A token that is internally
+          # self-consistent (e.g. derived from a static site secret), never that
+          # the token was issued for the SPECIFIC identifier later used to resolve
+          # and log in an account. An attacker can complete the challenge for an
+          # identifier they control and reuse the resulting token/transaction pair
+          # against a different, victim identifier.
+          - patterns:
+              - pattern: |
+                  function $VALIDATE(...) {
+                    ...
+                    <... $_SESSION[$SKEY] ...>;
+                    ...
+                  }
+              - metavariable-regex:
+                  metavariable: $VALIDATE
+                  regex: "(?i)^(?!(?:send|generate|create|issue)_).*(otp|token|verif|2fa|mfa).*"
+              - pattern-not-inside: |
+                  function $VALIDATE(...) {
+                    ...
+                    hash_equals($_SESSION[$SKEY2], ...);
+                    ...
+                  }
+          # Branch group 4: a request-handling function resolves a candidate account via
+          # a plural, meta-value-style lookup (get_users()) — commonly keyed on a
+          # phone/email identifier taken from the request — takes the first result, and
+          # grants a live session directly (wp_set_auth_cookie()/wp_set_current_user())
+          # to it, with no call anywhere in that same function to a dedicated
+          # challenge/one-time-code verification routine (name containing
+          # check/verify/valid plus code/otp/sms/token/2fa/mfa). The grant is gated only
+          # by the identifier's presence/format or an unrelated generic validator's
+          # boolean result, never by an in-scope proof the requester passed a challenge
+          # tied to that identifier — an attacker supplies any registered user's
+          # identifier and is logged in without ever completing that challenge.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $USERS = get_users($ARGS);
+                        ...
+                        $USER = $USERS[0];
+                        ...
+                        wp_set_auth_cookie($USER->$PROP, ...);
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $USERS = get_users($ARGS);
+                        ...
+                        $USER = $USERS[0];
+                        ...
+                        wp_set_current_user($USER->$PROP);
+                        ...
+                      }
+              - pattern-not-regex: "(?i).*(check|verify|valid).*(code|otp|sms|token|2fa|mfa).*"

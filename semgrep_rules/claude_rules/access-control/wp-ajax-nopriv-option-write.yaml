@@ -1,0 +1,153 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+
+  # wp_ajax_nopriv_ and admin_post_nopriv_ handlers fire for unauthenticated
+  # visitors. A callback that writes to wp_options without any capability or
+  # nonce check allows any visitor to modify site settings — including
+  # users_can_register, default_role, siteurl, and home — enabling full
+  # site takeover.
+  #
+  # This rule is a higher-signal refinement of the generic
+  # admin-post-nopriv-hook-missing-auth rule: it specifically requires an
+  # option-write sink (update_option, add_option, delete_option,
+  # update_site_option, delete_site_option) in the callback body, making
+  # every match a CRITICAL finding rather than a generic "missing auth" lead.
+
+  - id: claude.php.wordpress.access-control.wp-ajax-nopriv-option-write
+    mode: join
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      A callback registered on a wp_ajax_nopriv_ or admin_post_nopriv_ hook
+      performs an option write (update_option, add_option, delete_option,
+      update_site_option, delete_site_option) without any capability check
+      (current_user_can) or nonce verification (wp_verify_nonce,
+      check_ajax_referer, check_admin_referer). Any unauthenticated visitor
+      can invoke this endpoint and modify arbitrary site options (CWE-862).
+
+      Impact: An attacker can set users_can_register=1 and
+      default_role=administrator, then register a new admin account for
+      full site takeover. Alternatively, overwrite siteurl/home to redirect
+      all traffic, or deactivate security plugins via active_plugins.
+
+      TRIAGE:
+      1. Confirm the option write depends on user-supplied input
+         ($_GET, $_POST, $_REQUEST, php://input).
+      2. Check for auth checks in called sub-functions — this rule only
+         inspects the direct callback body.
+      3. If the option name is hardcoded and the value is not attacker-
+         controlled, impact may be limited — but still Missing Authorization.
+      4. delete_option + add_option pairs bypass update_option hooks and
+         are equally dangerous.
+
+      Fix: add current_user_can('manage_options') and wp_verify_nonce()
+      before the option write, or remove the nopriv hook registration
+      if unauthenticated access is not intended.
+    join:
+      rules:
+        - id: nopriv-hook-registration
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_action('$ACTION', [..., '$CALLBACK'], ...);
+                - pattern: add_action('$ACTION', '$CALLBACK', ...);
+                - pattern: add_action('$ACTION', array($OBJ, '$CALLBACK'), ...);
+            - metavariable-regex:
+                metavariable: $ACTION
+                regex: (wp_ajax_nopriv_.*|admin_post_nopriv_.*)
+
+        - id: no-auth-option-write
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      update_option(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      add_option(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      delete_option(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      update_site_option(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      delete_site_option(...);
+                      ...
+                    }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  wp_verify_nonce(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  check_ajax_referer(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  check_admin_referer(...);
+                  ...
+                }
+
+      on:
+        - 'nopriv-hook-registration.path == no-auth-option-write.path'
+        - 'nopriv-hook-registration.$CALLBACK == no-auth-option-write.$CALLBACK'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-269: Improper Privilege Management"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Arbitrary Options Update"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/hooks/wp_ajax_nopriv_action/
+        - https://developer.wordpress.org/reference/functions/update_option/

@@ -1,0 +1,149 @@
+rules:
+  - id: claude.php.wordpress.sqli.sql-filter-hook-where-concat-unprepared
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function matching WordPress's SQL-clause filter-hook callback
+      contract (a single array parameter carrying 'where'/'join'/'having'/
+      'groupby'/'orderby'/'limits' clause keys, returned unchanged in shape)
+      concatenates a bare, non-cast, non-escaped variable directly into one
+      of those clause keys. WordPress core executes the returned array's
+      clauses verbatim as raw SQL when the callback is registered on
+      comments_clauses, posts_clauses, get_meta_sql, or a similar
+      *_clauses filter (CWE-89) — there is no $wpdb->query()/get_results()
+      call visible in the callback itself, which makes this sink invisible
+      to rules keyed on a literal $wpdb-> receiver.
+
+      Fix: cast the interpolated value with (int)/(float)/absint()/intval(),
+      or route it through $wpdb->prepare()/esc_sql() before concatenating
+      it into the returned clause fragment.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+        - https://developer.wordpress.org/reference/hooks/comments_clauses/
+        - https://developer.wordpress.org/reference/hooks/posts_clauses/
+      # TRIAGE GUIDANCE — this is a pattern-based (non-taint) lead: the
+      # interpolated variable frequently originates from a class property set
+      # in a DIFFERENT method (the request-handling entry point) earlier in
+      # the same request lifecycle, not from a superglobal read visible in
+      # this function — a second-order/cross-method flow OSS Semgrep's
+      # intra-procedural taint tracking cannot trace. Manually confirm:
+      #
+      # TRUE POSITIVE — the interpolated variable (or class property it
+      # reads) is ultimately set from $_GET/$_POST/$_REQUEST/a REST
+      # parameter in a sibling method reachable from the same request (e.g.
+      # an AJAX handler that populates $this->someArgs[...] before
+      # triggering the WP_Query/get_comments() call that fires this filter).
+      #
+      # FALSE POSITIVE — the interpolated variable is a WP-core-supplied
+      # value already present on the incoming array unmodified (re-
+      # concatenating $ARGS['where'] itself), a $wpdb-> table-name/charset
+      # property, a hardcoded literal, or a value the same function already
+      # cast/escaped before this concatenation.
+    patterns:
+      - pattern-either:
+          - pattern: $ARGS[$KEY] = $BEFORE . $VAR . $AFTER;
+          - pattern: $ARGS[$KEY] = $BEFORE . $VAR;
+          - pattern: $ARGS[$KEY] .= $VAR;
+          # PHP's '.=' right-hand side is a single expression node — when it
+          # is itself a concat chain (e.g. ".= 'literal' . $tainted"), the
+          # bare "$ARGS[$KEY] .= $VAR;" branch above binds the WHOLE chain
+          # to $VAR, which then fails the leaf-only metavariable-pattern
+          # constraint below and silently stops matching. This branch
+          # decomposes that chain the same way the $BEFORE.$VAR.$AFTER
+          # branch does for '=', binding $VAR to the chain's last element.
+          - pattern: $ARGS[$KEY] .= $BEFORE . $VAR;
+      # Structural gate: the assignment must sit inside a function whose
+      # first parameter is the same array ($ARGS) that is later returned —
+      # the WP SQL-clause filter-hook callback contract (comments_clauses,
+      # posts_clauses, get_meta_sql, and siblings all follow this shape).
+      # Split from the sink pattern above (rather than nested inside one
+      # big function-skeleton pattern) so the reported finding location is
+      # the injection statement itself, not the enclosing function's first
+      # line.
+      - pattern-inside: |
+          function $FUNC($ARGS, ...) {
+            ...
+          }
+      - pattern-inside: |
+          function $FUNC($ARGS, ...) {
+            ...
+            return $ARGS;
+          }
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: "(?i)^[\"'](where|join|having|groupby|orderby|limits|select|distinct|fields|clauses)[\"']$"
+      # $VAR must be a leaf, not itself a nested concatenation (avoids a
+      # later cast/sanitizer call several elements down the same chain
+      # being absorbed into a larger, unexcluded $VAR sub-tree — the same
+      # rationale documented at length in the sibling
+      # bare-variable-concat-unprepared-wpdb-query rule).
+      - metavariable-pattern:
+          metavariable: $VAR
+          patterns:
+            - pattern-not: $X . $Y
+            - pattern-not: (int) $X
+            - pattern-not: (float) $X
+            - pattern-not: intval(...)
+            - pattern-not: absint(...)
+            - pattern-not: floatval(...)
+            - pattern-not: esc_sql(...)
+            - pattern-not: sanitize_key(...)
+            - pattern-not: $WPDB->prepare(...)
+            - pattern-not: "\"...\""
+            - pattern-not: "'...'"
+            # Re-concatenating the incoming clause array's own existing
+            # value back onto itself (the "preserve prior WHERE" idiom,
+            # e.g. "... . $args['where']") is not new taint.
+            - pattern-not: $ARGS[$ANYKEY]
+            # $wpdb's own table-name/charset/collate properties carry no
+            # attacker influence.
+            - pattern-not: $WPDB->$PROP
+      # $VAR was cast/escaped earlier in the same function — mirrors the
+      # sibling bare-variable-concat rule's "assigned earlier" exclusions.
+      - pattern-not-inside: |
+          function $ANYFUNC(...) {
+            ...
+            $VAR = intval(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $ANYFUNC(...) {
+            ...
+            $VAR = absint(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $ANYFUNC(...) {
+            ...
+            $VAR = floatval(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $ANYFUNC(...) {
+            ...
+            $VAR = (int) $CASTSRC;
+            ...
+          }
+      - pattern-not-inside: |
+          function $ANYFUNC(...) {
+            ...
+            $VAR = (float) $CASTSRC;
+            ...
+          }
+      - pattern-not-inside: |
+          function $ANYFUNC(...) {
+            ...
+            $VAR = esc_sql(...);
+            ...
+          }

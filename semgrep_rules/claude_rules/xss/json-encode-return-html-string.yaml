@@ -1,0 +1,219 @@
+rules:
+  - id: claude.php.wordpress.xss.json-encode-return-html-string
+    languages: [php]
+    severity: HIGH
+    message: |
+      json_encode() or wp_json_encode() result is embedded in a PHP return string via
+      interpolation or concatenation. If the return value is used as HTML output (e.g.,
+      a Gutenberg block render callback, shortcode handler, or template method) and the
+      JSON is placed inside a single-quoted HTML attribute, the unescaped result allows
+      attribute context breakout: json_encode() without JSON_HEX_APOS does not encode
+      single quotes, so a stored value containing ' terminates the attribute early and
+      allows injection of arbitrary event handlers (e.g., onmouseover=alert(1)).
+
+      TRIAGE REQUIRED: Verify the function return value is used as HTML output and
+      the JSON string is embedded inside a single- or double-quoted HTML attribute.
+      Not vulnerable if the function returns JSON to a REST API, an array to
+      WP_REST_Response, or embeds JSON in a <script> block (JS context).
+
+      Fix: wrap with esc_attr() before embedding:
+        $encoded = esc_attr( json_encode( $data, JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP ) );
+        return "<div data-attributes='{$encoded}'></div>";
+
+      Confirmed TP: GiveWP 4.14.6 — src/Campaigns/Blocks/CampaignComments/Controller/
+        BlockRenderController.php:23. Author-level stored XSS via givewp_campaign_comments
+        shortcode title parameter. CVSS 8.8.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      # Confidence is LOW because the rule detects the structural pattern (json_encode result
+      # in a return expression) but cannot determine from PHP alone whether the return value
+      # is used as HTML (vulnerable) or JSON/array (safe). Every hit requires manual
+      # verification of how the return value is consumed (echoed as HTML vs API response).
+      # The deep expression match <... $ENCODED ...> fires on interpolation, concatenation,
+      # and any other form that includes $ENCODED as a sub-expression of the return value.
+      vulnerability_class: "Stored Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/esc_attr/
+        - https://www.php.net/manual/en/function.json-encode.php
+        - https://html.spec.whatwg.org/#attribute-value-(single-quoted)-state
+    pattern-either:
+      # Form 1a: json_encode result assigned to var, then embedded in return expression
+      # via PHP string interpolation: return "...'$ENCODED'..."
+      # Catches GiveWP BlockRenderController pattern and similar block render callbacks.
+      - patterns:
+          - pattern: |
+              $ENCODED = json_encode(...);
+              ...
+              return <... $ENCODED ...>;
+          # Exclude: esc_attr() wraps the encoded value anywhere in the return expression.
+          # Uses deep match because esc_attr($ENCODED) may appear inside a concatenation:
+          #   return "..." . esc_attr($encoded) . "...";
+          - pattern-not: |
+              $ENCODED = json_encode(...);
+              ...
+              return <... esc_attr($ENCODED) ...>;
+          # Exclude: esc_html() also encodes & → &amp; — safe in attribute contexts.
+          - pattern-not: |
+              $ENCODED = json_encode(...);
+              ...
+              return <... esc_html($ENCODED) ...>;
+          # Exclude: bare return of just the JSON string, not embedded in HTML.
+          # pattern-not without deep match: only excludes exactly "return $ENCODED".
+          - pattern-not: |
+              $ENCODED = json_encode(...);
+              ...
+              return $ENCODED;
+          # Exclude: json_encode result passed to md5() as a cache key.
+          # md5() always returns a 32-char [0-9a-f] hex string — cannot produce HTML
+          # metacharacters regardless of input content. Confirmed FP: web-stories 1.42.0
+          # Shopping/Shopify_Query.php:401 — $cache_args used only in md5($cache_args).
+          - pattern-not: |
+              $ENCODED = json_encode(...);
+              ...
+              return <... md5($ENCODED) ...>;
+          # Exclude: json_encode result passed to base64_encode()/rawurlencode()/urlencode()
+          # for URL/transport encoding, not HTML embedding — same reasoning as md5() above,
+          # these encodings map every byte to a fixed safe charset ([A-Za-z0-9+/=] or %XX),
+          # so no HTML metacharacter can survive into the returned string. Confirmed FP:
+          # mailpoet 5.34.0 Router::encodeRequestData() — json_encode() result immediately
+          # base64_encode()'d for a URL query parameter, never rendered as HTML.
+          - pattern-not: |
+              $ENCODED = json_encode(...);
+              ...
+              return <... base64_encode($ENCODED) ...>;
+          - pattern-not: |
+              $ENCODED = json_encode(...);
+              ...
+              return <... rawurlencode($ENCODED) ...>;
+          - pattern-not: |
+              $ENCODED = json_encode(...);
+              ...
+              return <... urlencode($ENCODED) ...>;
+          # Exclude: the SAME variable is reassigned through a safe transport/hash
+          # encoder (base64_encode, optionally further wrapped e.g. rtrim(...,'='),
+          # md5, rawurlencode, urlencode) before the return, rather than the
+          # encoder appearing inline in the return expression. These encoders map
+          # every byte to a fixed safe charset, so the variable can no longer carry
+          # HTML metacharacters by the time it reaches the return — even though the
+          # pattern's plain (non-taint) matching binds the same variable name at
+          # both the original assignment and the later, already-reassigned read.
+          # Confirmed FP: optimole-wp 4.2.10 Optml_Dam::build_iframe_url()
+          # (inc/dam.php:470) — $data = json_encode($data); $data = rtrim(
+          # base64_encode($data), '='); return add_query_arg(['data'=>$data], ...).
+          - pattern-not: |
+              $ENCODED = json_encode(...);
+              ...
+              $ENCODED = base64_encode($ENCODED);
+              ...
+              return <... $ENCODED ...>;
+          - pattern-not: |
+              $ENCODED = json_encode(...);
+              ...
+              $ENCODED = rtrim(base64_encode($ENCODED), ...);
+              ...
+              return <... $ENCODED ...>;
+          - pattern-not: |
+              $ENCODED = json_encode(...);
+              ...
+              $ENCODED = md5($ENCODED);
+              ...
+              return <... $ENCODED ...>;
+          - pattern-not: |
+              $ENCODED = json_encode(...);
+              ...
+              $ENCODED = rawurlencode($ENCODED);
+              ...
+              return <... $ENCODED ...>;
+          - pattern-not: |
+              $ENCODED = json_encode(...);
+              ...
+              $ENCODED = urlencode($ENCODED);
+              ...
+              return <... $ENCODED ...>;
+      # Form 1b: wp_json_encode result assigned to var, then embedded in return expression
+      - patterns:
+          - pattern: |
+              $ENCODED = wp_json_encode(...);
+              ...
+              return <... $ENCODED ...>;
+          - pattern-not: |
+              $ENCODED = wp_json_encode(...);
+              ...
+              return <... esc_attr($ENCODED) ...>;
+          - pattern-not: |
+              $ENCODED = wp_json_encode(...);
+              ...
+              return <... esc_html($ENCODED) ...>;
+          - pattern-not: |
+              $ENCODED = wp_json_encode(...);
+              ...
+              return $ENCODED;
+          # Exclude: wp_json_encode result passed to md5() as a cache key.
+          - pattern-not: |
+              $ENCODED = wp_json_encode(...);
+              ...
+              return <... md5($ENCODED) ...>;
+          # Exclude: wp_json_encode result passed to base64_encode()/rawurlencode()/urlencode()
+          # for URL/transport encoding — see Form 1a rationale above.
+          - pattern-not: |
+              $ENCODED = wp_json_encode(...);
+              ...
+              return <... base64_encode($ENCODED) ...>;
+          - pattern-not: |
+              $ENCODED = wp_json_encode(...);
+              ...
+              return <... rawurlencode($ENCODED) ...>;
+          - pattern-not: |
+              $ENCODED = wp_json_encode(...);
+              ...
+              return <... urlencode($ENCODED) ...>;
+          # Exclude: same reassign-through-safe-encoder-before-return idiom as the
+          # json_encode() Form 1a exclusion above, applied to wp_json_encode().
+          - pattern-not: |
+              $ENCODED = wp_json_encode(...);
+              ...
+              $ENCODED = base64_encode($ENCODED);
+              ...
+              return <... $ENCODED ...>;
+          - pattern-not: |
+              $ENCODED = wp_json_encode(...);
+              ...
+              $ENCODED = rtrim(base64_encode($ENCODED), ...);
+              ...
+              return <... $ENCODED ...>;
+          - pattern-not: |
+              $ENCODED = wp_json_encode(...);
+              ...
+              $ENCODED = md5($ENCODED);
+              ...
+              return <... $ENCODED ...>;
+          - pattern-not: |
+              $ENCODED = wp_json_encode(...);
+              ...
+              $ENCODED = rawurlencode($ENCODED);
+              ...
+              return <... $ENCODED ...>;
+          - pattern-not: |
+              $ENCODED = wp_json_encode(...);
+              ...
+              $ENCODED = urlencode($ENCODED);
+              ...
+              return <... $ENCODED ...>;
+      # Form 2a: json_encode called inline in string concatenation inside return
+      # Catches: return '<div data-settings=\'' . json_encode($data) . '\'></div>';
+      - patterns:
+          - pattern: return $PREFIX . json_encode($DATA, ...) . $SUFFIX;
+          - pattern-not: return <... esc_attr(json_encode($DATA, ...)) ...>;
+          - pattern-not: return <... esc_html(json_encode($DATA, ...)) ...>;
+      # Form 2b: wp_json_encode called inline in string concatenation inside return
+      - patterns:
+          - pattern: return $PREFIX . wp_json_encode($DATA, ...) . $SUFFIX;
+          - pattern-not: return <... esc_attr(wp_json_encode($DATA, ...)) ...>;
+          - pattern-not: return <... esc_html(wp_json_encode($DATA, ...)) ...>;

@@ -1,0 +1,47 @@
+rules:
+  - id: claude.php.wordpress.access-control.get-transient-loose-comparison-auth-bypass
+    languages: [php]
+    severity: HIGH
+    message: |
+      get_transient() result is compared using loose equality (==). When the transient is
+      absent, get_transient() returns false. If the other operand is null (e.g., from a
+      missing HTTP header or absent request parameter), PHP evaluates null == false as true,
+      bypassing authentication unconditionally. Use strict equality (===) and explicitly
+      handle the false return before comparing.
+    metadata:
+      category: security
+      cwe: "CWE-697: Incorrect Comparison"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://www.php.net/manual/en/language.operators.comparison.php
+        - https://developer.wordpress.org/reference/functions/get_transient/
+    patterns:
+      - pattern-either:
+          # get_transient() stored in variable, later compared — left operand
+          - pattern: |
+              $NONCE = get_transient($KEY);
+              ...
+              if ($X == $NONCE) { ... }
+          # get_transient() stored in variable, later compared — right operand
+          - pattern: |
+              $NONCE = get_transient($KEY);
+              ...
+              if ($NONCE == $X) { ... }
+          # Inline comparison — get_transient() on the right
+          - pattern: if ($X == get_transient(...)) { ... }
+          # Inline comparison — get_transient() on the left
+          - pattern: if (get_transient(...) == $X) { ... }
+      # The null-coercion bypass this rule targets requires the OTHER operand
+      # to be attacker-influenceable (e.g. null from a missing header/param).
+      # A hardcoded boolean literal can never be null — comparing against
+      # `true`/`false` directly is a plain cache-hit/cache-miss check, not an
+      # authentication decision, regardless of loose vs strict equality.
+      - metavariable-regex:
+          metavariable: $X
+          regex: (?i)^(?!\s*(true|false)\s*$).*$

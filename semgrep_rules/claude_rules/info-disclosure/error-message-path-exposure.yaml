@@ -1,0 +1,49 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.error-message-path-exposure
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      An exception message, database error string, or PHP magic path constant
+      (__FILE__, __DIR__) flows into wp_die(), wp_send_json_error(), or an echo
+      statement. This may expose internal file paths, database table names, SQL
+      query structure, or stack traces to users who can trigger the error
+      condition (CWE-209).
+
+      Use generic error messages for user-facing output:
+        wp_die(__('An error occurred. Please try again.'));
+      Log detailed errors server-side with error_log() instead.
+    metadata:
+      category: security
+      cwe: "CWE-209: Generation of Error Message Containing Sensitive Information"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Sensitive Data Exposure"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/209.html
+        - https://developer.wordpress.org/reference/functions/wp_die/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $EX->getMessage()
+          - pattern: $EX->getTraceAsString()
+          - pattern: $EX->getFile()
+          - pattern: $EX->getLine()
+          - pattern: $WPDB->last_error
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: wp_die($MSG, ...)
+              - pattern: wp_send_json_error($MSG, ...)
+              - pattern: echo $MSG;
+          # A same-function current_user_can() check means only a role that already
+          # passed a capability gate reaches the sensitive detail — not a public leak.
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                <... current_user_can(...) ...>;
+                ...
+              }

@@ -1,0 +1,78 @@
+rules:
+  - id: claude.php.wordpress.rce.dynamic-path-prefix-wp-bootstrap-include
+    languages: [php]
+    severity: HIGH
+    message: |
+      A WordPress bootstrap/config file (wp-load.php, wp-config.php,
+      wp-blog-header.php, or wp-settings.php) is required/included with a
+      path built by concatenating a runtime variable or array element as
+      the PREFIX, instead of the ABSPATH constant, __DIR__/dirname(__FILE__),
+      or another hardcoded path-resolution helper. This shape is typical of
+      a standalone companion script (a downloader, webhook, or cron
+      endpoint shipped alongside the plugin) that manually bootstraps
+      WordPress outside the normal request lifecycle and computes the
+      bootstrap path at runtime from external or decoded data (a request
+      parameter, a cookie, or a field pulled out of a JSON/serialized
+      payload) rather than from a fixed constant.
+      If that prefix is influenced by an attacker and only weakly
+      sanitized (e.g. filter_var(..., FILTER_SANITIZE_URL) or strip_tags(),
+      neither of which restrict a value to a real filesystem path or block
+      PHP stream wrappers such as php://, phar://, or data://), the
+      attacker fully controls what gets required/included: the fixed
+      suffix is appended verbatim to attacker-controlled data and executed
+      by the PHP interpreter, yielding Remote Code Execution (CWE-94).
+      Never build the path to a core bootstrap file from runtime/request
+      data — use the ABSPATH constant or a hardcoded relative path from
+      __DIR__/dirname(__FILE__). If a runtime prefix is unavoidable,
+      canonicalize it with realpath() and verify the result is still
+      inside the site's real installation root before the require/include.
+    metadata:
+      category: security
+      cwe: "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Code Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/94.html
+        - https://cwe.mitre.org/data/definitions/98.html
+    patterns:
+      - pattern-either:
+          - pattern: require $PREFIX . $SUFFIX;
+          - pattern: require($PREFIX . $SUFFIX);
+          - pattern: require_once $PREFIX . $SUFFIX;
+          - pattern: require_once($PREFIX . $SUFFIX);
+          - pattern: include $PREFIX . $SUFFIX;
+          - pattern: include($PREFIX . $SUFFIX);
+          - pattern: include_once $PREFIX . $SUFFIX;
+          - pattern: include_once($PREFIX . $SUFFIX);
+      # Anchor on a known, fixed core-bootstrap filename literal as the
+      # SUFFIX — this is what turns a generic dynamic-include finding into
+      # a "the whole WP environment gets bootstrapped from attacker data"
+      # finding specifically.
+      - metavariable-regex:
+          metavariable: $SUFFIX
+          regex: (?i)^['\"]/?wp-(load|config|blog-header|settings)\.php['\"]$
+      # The PREFIX must NOT be one of the standard hardcoded/safe forms
+      # (a bare ABSPATH-style constant, __DIR__, dirname(__FILE__), a
+      # path-resolution helper call, or a string literal) — those are how
+      # legitimate bootstrap code always builds this path. Only a
+      # runtime variable/array-element prefix (the vulnerable shape) is
+      # left after these exclusions.
+      - metavariable-regex:
+          metavariable: $PREFIX
+          regex: (?s)^(?!\s*['\"])(?!ABSPATH\b)(?!__DIR__\b)(?!dirname\s*\()(?!plugin_dir_path\s*\()(?!get_home_path\s*\()(?!untrailingslashit\s*\()(?![A-Z_][A-Z0-9_]*\s*$).*$
+      # Containment guard: if the enclosing function resolves the same
+      # prefix with realpath() (and, by extension, checks it) before the
+      # require/include, treat it as neutralized — per-statement pattern
+      # matching cannot see the follow-on containment check, only that a
+      # canonicalization step was applied to this exact variable.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $PREFIX = realpath($PREFIX);
+            ...
+          }

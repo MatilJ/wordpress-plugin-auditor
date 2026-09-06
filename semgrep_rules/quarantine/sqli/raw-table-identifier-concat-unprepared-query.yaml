@@ -1,0 +1,85 @@
+rules:
+  - id: claude.php.wordpress.sqli.raw-table-identifier-concat-unprepared-query
+    languages: [php]
+    severity: HIGH
+    message: |
+      A double-quoted SQL string builds a CREATE/DROP/ALTER/RENAME/TRUNCATE
+      TABLE statement with a variable interpolated directly into the
+      table-name (identifier) position, and is executed as-is via a raw wpdb
+      (or wpdb-wrapper) query method, with no $wpdb->prepare() call, %i
+      identifier placeholder, or allow-list validation of the identifier
+      anywhere in between. This is CWE-89 SQL Injection: $wpdb->prepare()'s
+      %s/%d placeholders quote a VALUE, not an identifier, so even an
+      otherwise-escaped value is still exploitable here — a single backtick,
+      space, or semicolon embedded in the interpolated value breaks out of
+      the table-name position and injects arbitrary SQL/DDL.
+
+      This shape recurs in staging/cloning/migration/multisite plugins that
+      let an operation supply a custom table prefix, alias, or destination
+      table name: the value is frequently stored via an options round-trip or
+      a class property set several calls (sometimes several files) earlier,
+      rather than read straight from a superglobal at the vulnerable line, so
+      first-order request-source taint tracking commonly misses it.
+
+      Fix: validate the identifier against a strict allow-list before use
+      (e.g. preg_match('/^[A-Za-z0-9_]+$/', $prefix)), or use WordPress
+      6.2+'s $wpdb->prepare() %i identifier placeholder.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+      # TRIAGE GUIDANCE
+      # TRUE POSITIVE: the interpolated variable (or the value assigned to it
+      # earlier) traces back to a request parameter, a stored option, or a
+      # staging/migration task's user-suppliable table prefix/alias/name,
+      # with no allow-list regex, sanitize_key(), or %i placeholder applied
+      # anywhere between source and this statement.
+      # FALSE POSITIVE: the only interpolated token is {$wpdb->prefix} or
+      # {$wpdb->base_prefix} immediately followed by a hardcoded literal
+      # suffix (the standard dbDelta-style table-creation idiom) — excluded
+      # below. Any OTHER variable in the identifier position still requires
+      # manual confirmation of an allow-list/regex validation earlier in the
+      # function, which this pattern cannot see across branches.
+      #
+      # KNOWN LIMITATION — reachability vs. code shape: this is a pattern-mode
+      # (non-taint) structural rule. It cannot tell whether the enclosing
+      # function is still reachable by an unauthenticated caller; some
+      # vendors remediate this exact class by de-registering a
+      # wp_ajax_nopriv_* hook (an authorization-boundary fix) rather than
+      # editing the sink itself, in which case the identical vulnerable line
+      # legitimately remains in the "fixed" release and this rule will still
+      # (correctly) match it. Confirm current reachability/auth level
+      # manually before treating a hit in a newer release as exploitable.
+    patterns:
+      - pattern-either:
+          - pattern: $WPDB->query($Q)
+          - pattern: $WPDB->query($Q, ...)
+          - pattern: $WPDB->get_results($Q)
+          - pattern: $WPDB->get_results($Q, ...)
+          - pattern: $WPDB->get_row($Q)
+          - pattern: $WPDB->get_row($Q, ...)
+          - pattern: $WPDB->get_var($Q)
+          - pattern: $WPDB->get_var($Q, ...)
+          - pattern: $WPDB->get_col($Q)
+          - pattern: $WPDB->get_col($Q, ...)
+      - metavariable-pattern:
+          metavariable: $Q
+          patterns:
+            - pattern-regex: '(?is).*\b(create|drop|alter|rename|truncate)\s+table\b.*\$[a-zA-Z_].*'
+            # Fix-derived FP guard: the seeding CVE's own vendor patch removed
+            # unauthenticated reachability rather than adding an in-code
+            # sanitizer, so the negative clause below encodes the standard,
+            # well-known safe idiom for this shape instead (dbDelta-style
+            # $wpdb->prefix/base_prefix + hardcoded literal suffix) — the
+            # one pattern that would otherwise dominate this rule's false
+            # positives across the corpus.
+            - pattern-not-regex: '(?is)^[^$]*\$wpdb->(prefix|base_prefix)\}?[^$]*$'

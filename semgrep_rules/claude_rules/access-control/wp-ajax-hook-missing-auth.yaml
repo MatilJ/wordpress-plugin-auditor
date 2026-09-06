@@ -1,0 +1,276 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+
+  # ── Rule 1: Unauthenticated AJAX hook without auth check (HIGH) ───────────────
+  # wp_ajax_nopriv_* fires for non-logged-in visitors. A callback here with no
+  # capability or nonce check is reachable by any unauthenticated visitor.
+
+  - id: claude.php.wordpress.access.wp-ajax-nopriv-hook-missing-auth
+    mode: join
+    languages: [php]
+    severity: HIGH
+    message: |
+      Callback registered on a wp_ajax_nopriv_ hook (unauthenticated AJAX) but
+      no capability check (current_user_can) or nonce check (wp_verify_nonce /
+      check_ajax_referer / check_admin_referer) was found in the callback body.
+      Any visitor can invoke this endpoint without authentication (CWE-862).
+      Add check_ajax_referer() for CSRF protection, or current_user_can() for
+      capability-gated operations.
+      IMPORTANT: acf_verify_ajax() / acf_verify_nonce() alone are NOT sufficient
+      on wp_ajax_nopriv_ endpoints. ACF embeds its nonce value (acf.data.nonce)
+      in the JavaScript output of every page that loads ACF scripts, making it
+      publicly readable by unauthenticated visitors. A nopriv callback protected
+      only by acf_verify_ajax() is functionally unauthenticated.
+      Confirmed TP: acf-extended 0.9.1.1 module-form-front.php:685 —
+      render_form_ajax() uses acf_verify_ajax() but is registered on
+      wp_ajax_nopriv_, allowing unauthenticated RCE via call_user_func_array().
+    join:
+      rules:
+        - id: nopriv-add-action-results
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_action('$ACTION', [..., '$CALLBACK'], ...);
+                - pattern: add_action('$ACTION', '$CALLBACK', ...);
+                # OOP instance-method callbacks via array($this, 'method')
+                - pattern: add_action('$ACTION', array($OBJ, '$CALLBACK'), ...);
+            - metavariable-regex:
+                metavariable: $ACTION
+                regex: wp_ajax_nopriv_.*
+
+        - id: nopriv-no-auth-functions-results
+          languages: [php]
+          patterns:
+            - pattern: |
+                function $CALLBACK(...) {
+                  ...
+                }
+            - pattern-not:
+                patterns:
+                  - pattern: |
+                      function $CALLBACK(...) {
+                        ...
+                        if (<... $WP_VERIFY(...) ...>)
+                        {
+                          ...
+                        }
+                        ...
+                      }
+                  - metavariable-regex:
+                      metavariable: $WP_VERIFY
+                      regex: (current_user_can|wp_verify_nonce|check_ajax_referer|check_admin_referer)
+            - pattern-not: function $CALLBACK(...) { ... check_ajax_referer(...); ... }
+            - pattern-not: function $CALLBACK(...) { ... check_admin_referer(...); ... }
+            # OOP wrappers that delegate to check_ajax_referer() — e.g. $plugin->admin->checkAjaxReferer().
+            # Confirmed FP: luckywp-table-of-contents 2.1.14 (EditorBlockController, ShortcodeController).
+            - pattern-not: function $CALLBACK(...) { ... $OBJ->checkAjaxReferer(...); ... }
+            # Self-scoped session-cart read: the callback consults the requester's
+            # own WooCommerce cart object and reads no request superglobal at all —
+            # nothing for a missing per-resource authorization check to gate. Scoped
+            # to functions with zero superglobal reads so a handler that ALSO
+            # accepts a request-supplied identifier is not suppressed.
+            - pattern-not:
+                patterns:
+                  - pattern: |
+                      function $CALLBACK(...) {
+                        ...
+                      }
+                  - pattern-not-regex: '(?s)\$_(GET|POST|REQUEST|COOKIE)\b'
+                  - pattern-either:
+                      - pattern-inside: |
+                          function $CALLBACK(...) {
+                            ...
+                            WC()->cart->get_cart();
+                            ...
+                          }
+                      - pattern-inside: |
+                          function $CALLBACK(...) {
+                            ...
+                            foreach (WC()->cart->get_cart() as $ITEM) {
+                              ...
+                            }
+                            ...
+                          }
+                      - pattern-inside: |
+                          function $CALLBACK(...) {
+                            ...
+                            foreach (WC()->cart->get_cart() as $KEY => $ITEM) {
+                              ...
+                            }
+                            ...
+                          }
+
+      on:
+        - 'nopriv-add-action-results.path == nopriv-no-auth-functions-results.path'
+        - 'nopriv-add-action-results.$CALLBACK == nopriv-no-auth-functions-results.$CALLBACK'
+
+    # Freemius SDK is always a bundled third-party library; OOS for Wordfence bounty.
+    # Confirmed FP: independent-analytics 2.14.9 (freemius/includes/managers/class-fs-clone-manager.php).
+    # crmperks-notices.php is a CRMPerks bundled review-notification library (notice dismissal only).
+    # Confirmed FP: contact-form-entries 1.5.1 wp/crmperks-notices.php:89 review_dismiss().
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/crmperks-notices.php"
+
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/
+
+  # ── Rule 2: Authenticated AJAX hook without auth check (MEDIUM) ───────────────
+  # wp_ajax_* / admin_post_* / admin_action_* fire only for logged-in users.
+  # Missing an explicit auth check is lower severity — session auth is a partial
+  # control. HIGH FP RATE: verify CIA impact before escalating each hit.
+
+  - id: claude.php.wordpress.access.wp-ajax-hook-missing-auth
+    mode: join
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      Callback registered on a wp_ajax_ / admin_post_ / admin_action_ hook but
+      no capability or nonce check was found in the callback body. If the callback
+      performs a write or exposes sensitive data, any logged-in user may trigger it
+      (CWE-285). HIGH FP RATE — verify CIA impact before reporting.
+      Add current_user_can() for privileged operations or check_ajax_referer()
+      as a minimum CSRF guard.
+    join:
+      rules:
+        - id: add-action-results
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_action('$ACTION', [..., '$CALLBACK'], ...);
+                - pattern: add_action('$ACTION', '$CALLBACK', ...);
+                # OOP instance-method callbacks via array($this, 'method')
+                - pattern: add_action('$ACTION', array($OBJ, '$CALLBACK'), ...);
+            - metavariable-regex:
+                metavariable: $ACTION
+                # admin_init excluded: fires for any authenticated user (PR:L, Subscriber+),
+                # not unauthenticated visitors. Nonce-only admin_init handlers are
+                # covered by admin-init-nonce-only-no-capability-write.
+                regex: (wp_ajax_.*|admin_post_.*|admin_action_.*)
+
+        - id: no-auth-functions-results
+          languages: [php]
+          patterns:
+            - pattern: |
+                function $CALLBACK(...) {
+                  ...
+                }
+            - pattern-not:
+                patterns:
+                  - pattern: |
+                      function $CALLBACK(...) {
+                        ...
+                        if (<... $WP_VERIFY(...) ...>)
+                        {
+                          ...
+                        }
+                        ...
+                      }
+                  - metavariable-regex:
+                      metavariable: $WP_VERIFY
+                      regex: (current_user_can|wp_verify_nonce|check_ajax_referer|check_admin_referer|acf_verify_ajax|acf_verify_nonce)
+            - pattern-not: function $CALLBACK(...) { ... check_ajax_referer(...); ... }
+            - pattern-not: function $CALLBACK(...) { ... check_admin_referer(...); ... }
+            # OOP wrappers that delegate to check_ajax_referer() — e.g. $plugin->admin->checkAjaxReferer().
+            # Confirmed FP: luckywp-table-of-contents 2.1.14 (EditorBlockController, ShortcodeController).
+            - pattern-not: function $CALLBACK(...) { ... $OBJ->checkAjaxReferer(...); ... }
+            # Static verify_access() wrappers — semantically unambiguous; always encapsulate
+            # wp_verify_nonce() + current_user_can() in plugins that use this naming convention.
+            # Confirmed FP: Brevo (mailin) 3.3.4 push-api.php — SIB_Push_API::verify_access()
+            # calls check_ajax_referer('ajax_sib_admin_nonce') and capability checks internally.
+            - pattern-not: function $CALLBACK(...) { ... self::verify_access(...); ... }
+            - pattern-not: function $CALLBACK(...) { ... static::verify_access(...); ... }
+            # ACF/ACFE nonce wrappers — on wp_ajax_ (authenticated) endpoints these provide
+            # genuine session-bound nonce protection. NOTE: do NOT add these to the nopriv rule
+            # (Rule 1 above) — on nopriv endpoints the ACF nonce is publicly visible in page
+            # HTML and does not constitute a real auth barrier.
+            # Confirmed FP: acf-extended 0.9.1.1 — 13+ authenticated ACF AJAX handlers all
+            # use acf_verify_ajax() as their sole protection; all are auth-gated because the
+            # wp_ajax_ hook requires a valid WordPress session.
+            - pattern-not: function $CALLBACK(...) { ... acf_verify_ajax(...); ... }
+            - pattern-not: function $CALLBACK(...) { ... acf_verify_nonce(...); ... }
+            # check_ajax_requirements() — plugin auth wrapper bundling nonce + capability check
+            - pattern-not: function $CALLBACK(...) { ... $this->check_ajax_requirements(...); ... }
+            # Generic hasCapability() static/instance wrapper — wraps current_user_can() with exit handling.
+            - pattern-not: function $CALLBACK(...) { ... $CLASS::hasCapability(...); ... }
+            - pattern-not: function $CALLBACK(...) { ... $OBJ->hasCapability(...); ... }
+            # $this->validate() — OOP delegation pattern where auth is in a private method.
+            # CANNOT be added as pattern-not (validate() is too generic — may be data-format
+            # validation, not auth). Manual triage required: read the validate() method body to
+            # confirm it calls current_user_can() or check_ajax_referer() before acting.
+            # Confirmed FP: ultimate-dashboard 3.8.16 — all 18 wp_ajax_ handlers use this pattern;
+            # validate() calls apply_filters('udb_modules_capability','manage_options') + current_user_can().
+            # Self-scoped session-cart read: the callback consults the requester's
+            # own WooCommerce cart object and reads no request superglobal at all —
+            # nothing for a missing per-resource authorization check to gate. Scoped
+            # to functions with zero superglobal reads so a handler that ALSO
+            # accepts a request-supplied identifier is not suppressed.
+            - pattern-not:
+                patterns:
+                  - pattern: |
+                      function $CALLBACK(...) {
+                        ...
+                      }
+                  - pattern-not-regex: '(?s)\$_(GET|POST|REQUEST|COOKIE)\b'
+                  - pattern-either:
+                      - pattern-inside: |
+                          function $CALLBACK(...) {
+                            ...
+                            WC()->cart->get_cart();
+                            ...
+                          }
+                      - pattern-inside: |
+                          function $CALLBACK(...) {
+                            ...
+                            foreach (WC()->cart->get_cart() as $ITEM) {
+                              ...
+                            }
+                            ...
+                          }
+                      - pattern-inside: |
+                          function $CALLBACK(...) {
+                            ...
+                            foreach (WC()->cart->get_cart() as $KEY => $ITEM) {
+                              ...
+                            }
+                            ...
+                          }
+
+      on:
+        - 'add-action-results.path == no-auth-functions-results.path'
+        - 'add-action-results.$CALLBACK == no-auth-functions-results.$CALLBACK'
+
+    # Freemius SDK is always a bundled third-party library; OOS for Wordfence bounty.
+    # crmperks-notices.php is a CRMPerks bundled review-notification library (notice dismissal only).
+    # Confirmed FP: contact-form-entries 1.5.1 wp/crmperks-notices.php:89 review_dismiss().
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/crmperks-notices.php"
+
+    metadata:
+      category: security
+      cwe: "CWE-285: Improper Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Improper Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/
+        - https://www.wordfence.com/wp-content/uploads/2021/07/Common-WordPress-Vulnerabilities-and-Prevention-Through-Secure-Coding-Best-Practices.pdf

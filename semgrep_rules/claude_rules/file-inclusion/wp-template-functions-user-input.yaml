@@ -1,0 +1,150 @@
+rules:
+  - id: claude.php.wordpress.lfi.template-function-user-input
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      User-controlled input flows into a WordPress template loading function
+      (get_template_part, locate_template, or load_template). These functions
+      resolve file paths and execute require/require_once. load_template()
+      performs NO path validation (WP Core template.php:782).
+      locate_template() searches theme directories but does NOT validate
+      for traversal sequences in the template name (CWE-98 / CWE-22).
+      Use an allowlist or sanitize_file_name() before passing user input
+      to template loading functions.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program ('PHP Remote File Inclusion')"
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - "CVE-2026-2448: SiteOrigin Page Builder locate_template user input LFI"
+        - "CVE-2025-2294: Kubio AI Page Builder template loading LFI"
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — user input to load_template():
+      #   $template = $_GET['template'];
+      #   load_template($template);
+      #   -> load_template does require with ZERO path validation.
+      #
+      # TRUE POSITIVE — REST param to get_template_part():
+      #   $slug = $request->get_param('slug');
+      #   get_template_part($slug);
+      #   -> slug controls both template filenames passed to locate_template.
+      #
+      # FALSE POSITIVE — hardcoded slug, user controls only name:
+      #   $name = sanitize_key($request->get_param('style'));
+      #   get_template_part('content', $name);
+      #   -> sanitize_key output is [a-z0-9_-], no traversal possible.
+      #
+      # FALSE POSITIVE — locate_template through WP template hierarchy:
+      #   When locate_template() is called indirectly through
+      #   get_query_template() -> get_{type}_template() -> locate_template(),
+      #   the $type is sanitized by preg_replace('|[^a-z0-9-]+|', '', $type)
+      #   in get_query_template() — safe. Only DIRECT calls to
+      #   locate_template() with user input in the template name are vulnerable.
+      #
+      # FALSE POSITIVE — allow-list validator gate before the sink:
+      #   if ( ! is_valid_template_id( $template_id ) ) { return $template; }
+      #   locate_template( array( $template_id ) );
+      #   -> a boolean helper (any name containing both a validity/allow
+      #   keyword and "template") is checked in an early-return `if (!...)`
+      #   guard ahead of the sink. The helper's result is never assigned
+      #   back into the tainted variable, so ordinary pattern-sanitizers
+      #   cannot model it — matched structurally via pattern-not-inside on
+      #   the enclosing function instead.
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: $REQUEST->get_body()
+    pattern-propagators:
+      - pattern: wp_parse_args($INPUT, ...)
+        from: $INPUT
+        to: return
+      - pattern: shortcode_atts($DEFAULTS, $INPUT, ...)
+        from: $INPUT
+        to: return
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: get_template_part($X, ...)
+              - pattern: locate_template($X, ...)
+              - pattern: load_template($X, ...)
+              # Static/method calls — Semgrep does not match self::func()
+              # or $this->func() with bare func() patterns.
+              - pattern: self::locate_template($X, ...)
+              - pattern: static::locate_template($X, ...)
+              - pattern: $OBJ->locate_template($X, ...)
+              - pattern: self::load_template($X, ...)
+              - pattern: static::load_template($X, ...)
+              - pattern: $OBJ->load_template($X, ...)
+              - pattern: self::get_template_part($X, ...)
+              - pattern: static::get_template_part($X, ...)
+              - pattern: $OBJ->get_template_part($X, ...)
+          # Allow-list validator gate (see FALSE POSITIVE note above): the
+          # enclosing function calls a boolean helper — free function or
+          # method — whose name contains both a validity/permission keyword
+          # and "template", either as a bare statement or inside an
+          # if-condition (covers the common `if ( ! is_valid_x() )` negated
+          # early-return shape).
+          - pattern-not-inside:
+              patterns:
+                - pattern-either:
+                    - pattern: |
+                        function $FUNC(...) {
+                          ...
+                          $METHOD(...);
+                          ...
+                        }
+                    - pattern: |
+                        function $FUNC(...) {
+                          ...
+                          if (<... $METHOD(...) ...>) { ... }
+                          ...
+                        }
+                    - pattern: |
+                        function $FUNC(...) {
+                          ...
+                          $OBJ->$METHOD(...);
+                          ...
+                        }
+                    - pattern: |
+                        function $FUNC(...) {
+                          ...
+                          if (<... $OBJ->$METHOD(...) ...>) { ... }
+                          ...
+                        }
+                - metavariable-regex:
+                    metavariable: $METHOD
+                    regex: (?i)^(?=.*(valid|allow|permit|whitelist))(?=.*template).*$
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_file_name(...)
+          - pattern: basename(...)
+          - pattern: sanitize_key(...)
+          - pattern: realpath(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          - pattern: sanitize_title(...)
+          - pattern: sanitize_html_class(...)
+          - pattern: validate_file(...)

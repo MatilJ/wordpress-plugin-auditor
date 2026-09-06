@@ -1,0 +1,111 @@
+rules:
+  - id: claude.php.wordpress.access-control.email-match-order-ownership-bypass
+    languages: [php]
+    severity: HIGH
+    message: |
+      An if/elseif chain grants the same resource-access outcome via two
+      alternative branches: one performs a genuine secret comparison (a
+      timing-safe hash_equals() check, or an order/subscription's own
+      key_is_valid()), while a SIBLING elseif branch grants identical access
+      based only on an equality match against a non-secret, externally-
+      knowable customer identifier (billing email, billing phone) read from
+      the same object. Unlike an order key (a long, randomly-generated,
+      per-order secret), a billing email/phone is not secret — it is
+      routinely known to marketers, prior correspondents, breach-sourced
+      contact lists, or simply guessable/enumerable — so this branch lets
+      any party who merely knows (or guesses) a customer's contact identifier
+      retrieve or act on that customer's order without ever possessing the
+      genuine per-order secret the sibling branch requires (CWE-639 /
+      CWE-287).
+
+      This shape typically exists to support guest ("no account needed")
+      order-confirmation-email links where a query parameter round-trips an
+      order ID and email so the customer doesn't need to be logged in. The
+      defect is structural: the fallback branch's equality check must itself
+      be bound to a value only the true recipient could have produced (a
+      signed/HMAC token, or the same per-order key already used in the
+      sibling branch) — comparing an externally-knowable field is not a
+      substitute authentication factor.
+
+      TRIAGE:
+      1. Confirm the elseif branch's own success path is reachable
+         independent of the hash_equals()/key_is_valid() branch (i.e. is a
+         genuine alternative grant, not a nested confirmation of it).
+      2. Confirm the compared identifier (email/phone) is not itself
+         additionally bound to a signed/expiring token elsewhere in the same
+         check (a signature covering the identifier would close this).
+      3. Confirm the resource reached on success has real CIA impact (order
+         PII, documents, payment/shipping data) — not a purely cosmetic
+         display difference.
+      4. Confirm a downstream ownership re-check does not independently gate
+         the same success path for every requester class (a re-check that
+         only runs for logged-in users, for example, leaves the anonymous
+         path exposed regardless).
+    metadata:
+      category: security
+      cwe:
+        - "CWE-639: Authorization Bypass Through User-Controlled Key"
+        - "CWE-287: Improper Authentication"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress, woocommerce]
+      references:
+        - https://cwe.mitre.org/data/definitions/639.html
+        - https://cwe.mitre.org/data/definitions/287.html
+    patterns:
+      - pattern-either:
+          - pattern: |
+              if (<... hash_equals(...) ...>) {
+                ...
+              } elseif (<... $INPUT === $ORDER->$GETTER(...) ...>) {
+                ...
+              }
+          - pattern: |
+              if (<... hash_equals(...) ...>) {
+                ...
+              } elseif (<... $ORDER->$GETTER(...) === $INPUT ...>) {
+                ...
+              }
+          - pattern: |
+              if (<... hash_equals(...) ...>) {
+                ...
+              } elseif (<... $INPUT == $ORDER->$GETTER(...) ...>) {
+                ...
+              }
+          - pattern: |
+              if (<... hash_equals(...) ...>) {
+                ...
+              } elseif (<... $ORDER->$GETTER(...) == $INPUT ...>) {
+                ...
+              }
+          - pattern: |
+              if (<... $ORDER->key_is_valid(...) ...>) {
+                ...
+              } elseif (<... $INPUT === $ORDER->$GETTER(...) ...>) {
+                ...
+              }
+          - pattern: |
+              if (<... $ORDER->key_is_valid(...) ...>) {
+                ...
+              } elseif (<... $ORDER->$GETTER(...) === $INPUT ...>) {
+                ...
+              }
+          - pattern: |
+              if (<... $ORDER->key_is_valid(...) ...>) {
+                ...
+              } elseif (<... $INPUT == $ORDER->$GETTER(...) ...>) {
+                ...
+              }
+          - pattern: |
+              if (<... $ORDER->key_is_valid(...) ...>) {
+                ...
+              } elseif (<... $ORDER->$GETTER(...) == $INPUT ...>) {
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $GETTER
+          regex: (?i)^get_billing_(email|phone)$

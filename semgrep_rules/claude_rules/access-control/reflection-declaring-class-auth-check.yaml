@@ -1,0 +1,102 @@
+rules:
+  - id: claude.php.wordpress.access-control.reflection-declaring-class-auth-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function uses Reflection to compare a class name against
+      ReflectionMethod::$class (or ->getDeclaringClass()->getName()) to decide
+      whether "this" class provides its own override of a method, then wires that
+      result into a security decision (e.g., whether to attach a capability-
+      checking permission_callback vs. a weaker fallback). PHP's manual documents
+      that ReflectionMethod::$class always returns the class where the method is
+      textually DECLARED, not the class used to obtain the reflection — so if the
+      security-relevant override is declared on an intermediate/abstract base class
+      and never redeclared in the leaf subclass, this comparison is always false,
+      and the framework silently falls back to the weaker default for every
+      subclass in that hierarchy (CWE-862/CWE-863).
+
+      Fix: do not use same-class reflection identity to gate security decisions
+      across an inheritance chain. Either require the security method to be
+      redeclared in every leaf class, walk the full ancestor chain up to (and
+      including) the class that legitimately provides the strict check, or use an
+      explicit allow-list/registration mechanism instead of reflection-based
+      "did this class override the method" detection.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://www.php.net/manual/en/class.reflectionmethod.php
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://cwe.mitre.org/data/definitions/863.html
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — security method lives on an intermediate base class:
+      #   The compared method (the one fetched via getMethod()) is a
+      #   capability-checking override (e.g., a permission_callback) that is
+      #   declared on an abstract/base class one or more levels above the
+      #   concrete class(es) that inherit it, and never redeclared in those
+      #   subclasses. The comparison is always false for those subclasses, and
+      #   whatever weaker fallback the surrounding code selects on "false"
+      #   becomes the effective behavior everywhere.
+      #
+      # FALSE POSITIVE — used only to detect direct/own overrides, no security
+      # decision downstream:
+      #   The result feeds documentation, debugging output, or a non-security
+      #   choice (e.g., which docblock to render). No capability/permission
+      #   fallback selection depends on the outcome.
+      #
+      # FALSE POSITIVE — security method is always redeclared in every leaf
+      # class that reaches this check (verify by reading every subclass):
+      #   If each concrete subclass redeclares the compared method itself, the
+      #   comparison correctly evaluates true for all of them and the intended
+      #   gate is always wired up.
+    # NOTE: ReflectionMethod::$class comparisons are detected via pattern-regex,
+    # not AST pattern matching. Semgrep's PHP AST matcher does not reliably match
+    # `->class` property access (`class` is a reserved word used elsewhere for
+    # class declarations and the `::class` constant) — empirically confirmed:
+    # `pattern: $Y->class` and `pattern: $Y->$PROP` + `metavariable-regex: ^class$`
+    # both silently produce zero matches against real `$obj->class` code, while
+    # `pattern-regex` over the same text matches correctly. Do not convert these
+    # back to AST `pattern:` clauses without re-verifying against real ->class code.
+    pattern-either:
+      - pattern-regex: '\$\w+\s*===?\s*\$\w+->class\b'
+      - pattern-regex: '\$\w+->class\s*===?\s*\$\w+\b'
+      - pattern: |
+          function $FUNC(...) {
+            ...
+            $METHOD_REF = $REFLECTION->getMethod(...);
+            ...
+            $RESULT = $CLASSVAR === $METHOD_REF->getDeclaringClass()->getName();
+            ...
+          }
+      - pattern: |
+          function $FUNC(...) {
+            ...
+            $METHOD_REF = $REFLECTION->getMethod(...);
+            ...
+            $RESULT = $METHOD_REF->getDeclaringClass()->getName() === $CLASSVAR;
+            ...
+          }
+      - pattern: |
+          function $FUNC(...) {
+            ...
+            $METHOD_REF = $REFLECTION->getMethod(...);
+            ...
+            if ( $CLASSVAR === $METHOD_REF->getDeclaringClass()->getName() ) { ... }
+            ...
+          }
+      - pattern: |
+          function $FUNC(...) {
+            ...
+            $METHOD_REF = $REFLECTION->getMethod(...);
+            ...
+            if ( $METHOD_REF->getDeclaringClass()->getName() === $CLASSVAR ) { ... }
+            ...
+          }

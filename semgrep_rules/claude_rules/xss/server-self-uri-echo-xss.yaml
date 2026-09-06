@@ -1,0 +1,50 @@
+rules:
+  - id: claude.php.wordpress.xss.server-self-uri-echo-xss
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      $_SERVER['REQUEST_URI'], $_SERVER['PHP_SELF'], or $_SERVER['SCRIPT_NAME']
+      flows into output without escaping. These values are user-controllable via
+      the URL path and query string. Escape with esc_url() for URL contexts,
+      esc_attr() for HTML attributes, or esc_html() for HTML body.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_SERVER['REQUEST_URI']
+          - pattern: $_SERVER['PHP_SELF']
+          - pattern: $_SERVER['SCRIPT_NAME']
+    pattern-sinks:
+      - pattern-either:
+          - pattern: echo $X;
+          - pattern: print $X;
+          - pattern: print($X);
+          - pattern: printf($F, ...);
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: esc_url(...)
+          - pattern: esc_url_raw(...)
+          - pattern: esc_attr(...)
+          - pattern: esc_html(...)
+          - pattern: esc_js(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: (int) $X
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"

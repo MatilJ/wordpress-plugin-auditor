@@ -1,0 +1,91 @@
+rules:
+  - id: claude.php.wordpress.access-control.rest-controller-inconsistent-permissions-cap-tier
+    languages: [php]
+    severity: HIGH
+    message: |
+      A permissions_check() method uses a CPT capability wrapper (has_cap()) with
+      an 'edit_*' capability (Contributor-level) as its sole authorization gate
+      (CWE-862). In WP REST controllers, permissions_check() is the fallback
+      capability check for any HTTP method that lacks a dedicated
+      create_item_permissions_check() / delete_item_permissions_check(). If this
+      controller also has update_item_permissions_check() gated at manage_options,
+      the asymmetry allows Contributors to reach POST and DELETE operations while
+      only PUT/PATCH is admin-restricted.
+
+      TRIAGE: (1) Verify whether the controller has dedicated
+      create_item_permissions_check() and delete_item_permissions_check() methods
+      that also require manage_options — if they exist, this hit is a false
+      positive (the generic check applies only to routes without a dedicated gate).
+      (2) If no dedicated create/delete checks exist, confirm the class performs
+      state-changing operations (option writes, attachment modifications) to assess
+      impact. (3) Confirm the same file has update_item_permissions_check() with
+      manage_options — that asymmetry proves the low-privilege floor is unintended.
+
+      Fix: add dedicated create_item_permissions_check() and
+      delete_item_permissions_check() methods that mirror the manage_options check
+      in update_item_permissions_check(), or raise permissions_check() to
+      manage_options for all state-changing routes.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      # Fires when permissions_check() uses has_cap('edit_*') — the CPT low-privilege
+      # fallback gate. Handles both parameterless and single-parameter function
+      # signatures, and both guard form (if (!has_cap)) and direct return form.
+      # False positive when: dedicated create/delete permission check methods exist
+      # with manage_options, or when manage_options is also checked in the same
+      # permissions_check() body (symmetric gate — pattern-not-inside excludes this).
+      references:
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/#permissions-callback
+        - https://cwe.mitre.org/data/definitions/862.html
+    patterns:
+      # Scope to permissions_check function bodies — handles both parameterless form
+      # (web-stories pattern) and single-parameter form (common WP REST convention).
+      - pattern-either:
+          - pattern-inside: |
+              function permissions_check() {
+                ...
+              }
+          - pattern-inside: |
+              function permissions_check($REQUEST) {
+                ...
+              }
+      # Matches either detection form:
+      # A — guard form: if (!$OBJ->has_cap('edit_*')) { return WP_Error; }
+      # B — direct return form: return $OBJ->has_cap('edit_*');
+      - pattern-either:
+          - pattern: |
+              if (!$OBJ->has_cap($CAP)) {
+                ...
+              }
+          - pattern: return $OBJ->has_cap($CAP);
+      # Narrow to capabilities that resolve to low-privilege roles (Contributor+).
+      - metavariable-regex:
+          metavariable: $CAP
+          regex: "^'edit_"
+      # Exclude: permissions_check (no-param) also contains a manage_options gate.
+      # PHP parse constraint: bare current_user_can() call without statement context
+      # fails PHP pattern parse; use the if (!current_user_can(...)) block form.
+      - pattern-not-inside: |
+          function permissions_check() {
+            ...
+            if (!current_user_can('manage_options')) {
+              ...
+            }
+            ...
+          }
+      # Exclude: permissions_check ($REQUEST param) also contains a manage_options gate.
+      - pattern-not-inside: |
+          function permissions_check($REQUEST) {
+            ...
+            if (!current_user_can('manage_options')) {
+              ...
+            }
+            ...
+          }

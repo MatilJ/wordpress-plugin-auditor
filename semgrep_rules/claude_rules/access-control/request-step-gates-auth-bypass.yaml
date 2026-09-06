@@ -1,0 +1,48 @@
+rules:
+  - id: claude.php.wordpress.access-control.request-step-gates-auth-bypass
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A privileged authentication/identity sink (wp_set_password / wp_set_auth_cookie /
+      wp_update_user / wp_insert_user) executes inside a branch whose condition is a
+      client-supplied workflow step/stage indicator ($_GET/$_POST/$_REQUEST with a key
+      like step, stage, phase, wizard). If the server does not independently verify that
+      prior workflow steps actually completed (re-reading state from get_user_meta /
+      get_transient / get_option), an attacker can jump directly to the privileged step
+      by sending the matching step value — a Sequential State Bypass (CWE-841) that
+      yields authentication bypass / account takeover.
+
+      TRIAGE: Confirm no capability check, nonce verification, or server-side state read
+      gates the sink in the same path. A step value that only selects which template to
+      render (no state change) is a false positive.
+    metadata:
+      category: security
+      cwe: "CWE-841: Improper Enforcement of Behavioral Workflow"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/841.html
+        - https://cwe.mitre.org/data/definitions/287.html
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              if (<... $_REQUEST[$S] ...>) { ... $SINK(...); ... }
+          - pattern: |
+              if (<... $_GET[$S] ...>) { ... $SINK(...); ... }
+          - pattern: |
+              if (<... $_POST[$S] ...>) { ... $SINK(...); ... }
+      - metavariable-regex:
+          metavariable: $S
+          regex: (?i)^['\"]?(step|stage|phase|wizard|current_step|next_step|sub_?step|screen)['\"]?$
+      - metavariable-regex:
+          metavariable: $SINK
+          regex: ^(wp_set_password|wp_set_auth_cookie|wp_update_user|wp_insert_user)$

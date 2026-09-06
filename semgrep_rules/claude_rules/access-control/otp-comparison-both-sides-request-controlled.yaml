@@ -1,0 +1,203 @@
+rules:
+  - id: claude.php.wordpress.access-control.otp-comparison-both-sides-request-controlled
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      An authentication/verification-code check compares two values that are
+      BOTH read directly from request-controlled input ($_GET/$_POST/
+      $_REQUEST/$_COOKIE) — optionally passed through a light formatting
+      wrapper (trim()/sanitize_text_field()/sanitize_key()/stripslashes())
+      first — either inline in the same condition or via two local variables
+      each assigned straight from a superglobal shortly before the
+      comparison. Neither operand is ever fetched from server-side storage
+      (a session value looked up fresh at comparison time, get_user_meta(),
+      get_transient(), a $wpdb row, or get_option()). The branch taken on a
+      match completes login (wp_set_auth_cookie()/wp_set_current_user()/
+      wp_signon()) (CWE-287: Improper Authentication / CWE-807: Reliance on
+      Untrusted Inputs in a Security Decision).
+
+      A verification-code check only proves anything when the "expected"
+      side is a secret the server generated and withheld from the client
+      until the caller demonstrates knowledge of it. If the value the
+      request is compared against is itself supplied by the SAME request —
+      most often because an earlier render step echoed the server's
+      originally-generated secret back into a hidden form field, and the
+      verification step re-reads that echoed copy from the request instead
+      of independently looking the secret up again server-side — an
+      attacker can submit any code alongside a matching value for the other
+      field, and the comparison becomes a tautology: no real code ever needs
+      to be known or guessed.
+
+      Fix: never source the "expected" side of a verification comparison
+      from request data. Store the generated code server-side only (a
+      transient, user meta, or a session value) and compare the submitted
+      code against that freshly-fetched stored value with hash_equals(),
+      not the request's own echo of it.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - Both comparison operands trace to $_GET/$_POST/$_REQUEST/$_COOKIE
+          (directly or via a same-scope local-variable assignment), with no
+          intervening server-side storage lookup for either side.
+        - The branch taken on match immediately establishes an authenticated
+          session or otherwise completes a privileged action, not just a
+          display change.
+        - A hidden form field elsewhere in the same file echoes a session/
+          transient/option value back to the client under a name matching
+          the "expected" operand, confirming the round-trip.
+
+      FALSE POSITIVE indicators:
+        - Either operand is a fresh server-side lookup performed AT
+          COMPARISON TIME (get_user_meta()/get_transient()/get_option()/a
+          $wpdb query, or a $_SESSION read that was not itself just set from
+          request data earlier in the same request) rather than a second
+          direct read of request/superglobal data.
+        - The comparison only gates a non-authentication decision (a
+          display toggle, an analytics flag) with no session/credential
+          sink reachable from the matching branch.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-287: Improper Authentication"
+        - "CWE-807: Reliance on Untrusted Inputs in a Security Decision"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: CRITICAL
+      subcategory: vuln
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/287.html
+        - https://cwe.mitre.org/data/definitions/807.html
+        - https://developer.wordpress.org/reference/functions/wp_set_auth_cookie/
+        - https://developer.wordpress.org/reference/functions/hash_equals/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          # Branch 1: inline direct comparison — both operands read straight
+          # from request superglobals in the SAME if-condition, whose true
+          # branch (anywhere nested) completes login. This is the literal
+          # shape of the seeding disclosure.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      if ($A == $B) {
+                        ...
+                        <... $SINK(...) ...>;
+                        ...
+                      }
+                  - pattern: |
+                      if ($A === $B) {
+                        ...
+                        <... $SINK(...) ...>;
+                        ...
+                      }
+              - metavariable-pattern:
+                  metavariable: $A
+                  patterns:
+                    - pattern-either:
+                        - pattern: $_GET[...]
+                        - pattern: $_POST[...]
+                        - pattern: $_REQUEST[...]
+                        - pattern: $_COOKIE[...]
+                        - pattern: trim($_GET[...])
+                        - pattern: trim($_POST[...])
+                        - pattern: trim($_REQUEST[...])
+                        - pattern: trim($_COOKIE[...])
+                        - pattern: sanitize_text_field($_GET[...])
+                        - pattern: sanitize_text_field($_POST[...])
+                        - pattern: sanitize_text_field($_REQUEST[...])
+                        - pattern: sanitize_key($_GET[...])
+                        - pattern: sanitize_key($_POST[...])
+                        - pattern: sanitize_key($_REQUEST[...])
+                        - pattern: stripslashes($_POST[...])
+                        - pattern: stripslashes($_GET[...])
+                        - pattern: stripslashes($_REQUEST[...])
+              - metavariable-pattern:
+                  metavariable: $B
+                  patterns:
+                    - pattern-either:
+                        - pattern: $_GET[...]
+                        - pattern: $_POST[...]
+                        - pattern: $_REQUEST[...]
+                        - pattern: $_COOKIE[...]
+                        - pattern: trim($_GET[...])
+                        - pattern: trim($_POST[...])
+                        - pattern: trim($_REQUEST[...])
+                        - pattern: trim($_COOKIE[...])
+                        - pattern: sanitize_text_field($_GET[...])
+                        - pattern: sanitize_text_field($_POST[...])
+                        - pattern: sanitize_text_field($_REQUEST[...])
+                        - pattern: sanitize_key($_GET[...])
+                        - pattern: sanitize_key($_POST[...])
+                        - pattern: sanitize_key($_REQUEST[...])
+                        - pattern: stripslashes($_POST[...])
+                        - pattern: stripslashes($_GET[...])
+                        - pattern: stripslashes($_REQUEST[...])
+              - metavariable-regex:
+                  metavariable: $SINK
+                  regex: ^(wp_set_auth_cookie|wp_set_current_user|wp_signon)$
+          # Branch 2: assign-then-compare — both operands are first captured
+          # into local variables directly from request superglobals, then
+          # compared shortly before the same login-completing sink.
+          - patterns:
+              - pattern: |
+                  $A = $ASRC;
+                  ...
+                  $B = $BSRC;
+                  ...
+                  if ($A == $B) {
+                    ...
+                    <... $SINK(...) ...>;
+                    ...
+                  }
+              - metavariable-pattern:
+                  metavariable: $ASRC
+                  patterns:
+                    - pattern-either:
+                        - pattern: $_GET[...]
+                        - pattern: $_POST[...]
+                        - pattern: $_REQUEST[...]
+                        - pattern: $_COOKIE[...]
+                        - pattern: trim($_GET[...])
+                        - pattern: trim($_POST[...])
+                        - pattern: trim($_REQUEST[...])
+                        - pattern: trim($_COOKIE[...])
+                        - pattern: sanitize_text_field($_GET[...])
+                        - pattern: sanitize_text_field($_POST[...])
+                        - pattern: sanitize_text_field($_REQUEST[...])
+                        - pattern: sanitize_key($_GET[...])
+                        - pattern: sanitize_key($_POST[...])
+                        - pattern: sanitize_key($_REQUEST[...])
+                        - pattern: stripslashes($_POST[...])
+                        - pattern: stripslashes($_GET[...])
+                        - pattern: stripslashes($_REQUEST[...])
+              - metavariable-pattern:
+                  metavariable: $BSRC
+                  patterns:
+                    - pattern-either:
+                        - pattern: $_GET[...]
+                        - pattern: $_POST[...]
+                        - pattern: $_REQUEST[...]
+                        - pattern: $_COOKIE[...]
+                        - pattern: trim($_GET[...])
+                        - pattern: trim($_POST[...])
+                        - pattern: trim($_REQUEST[...])
+                        - pattern: trim($_COOKIE[...])
+                        - pattern: sanitize_text_field($_GET[...])
+                        - pattern: sanitize_text_field($_POST[...])
+                        - pattern: sanitize_text_field($_REQUEST[...])
+                        - pattern: sanitize_key($_GET[...])
+                        - pattern: sanitize_key($_POST[...])
+                        - pattern: sanitize_key($_REQUEST[...])
+                        - pattern: stripslashes($_POST[...])
+                        - pattern: stripslashes($_GET[...])
+                        - pattern: stripslashes($_REQUEST[...])
+              - metavariable-regex:
+                  metavariable: $SINK
+                  regex: ^(wp_set_auth_cookie|wp_set_current_user|wp_signon)$

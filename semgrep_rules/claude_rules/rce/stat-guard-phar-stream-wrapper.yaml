@@ -1,0 +1,312 @@
+rules:
+  - id: claude.php.wordpress.rce.stat-guard-phar-stream-wrapper
+    languages: [php]
+    severity: HIGH
+    message: |
+      file_exists()/is_file() is used as the guard deciding whether to act on a
+      path that is a bare variable (or array/property access on one), not a
+      hardcoded/constant-prefixed string. PHP resolves stream wrappers before
+      checking existence, so if the FULL path string is attacker-influenced —
+      not merely a suffix appended to a safe base — an attacker can supply a
+      phar:// URI. Any of these stat-family functions triggers deserialization
+      of that PHAR archive's metadata the moment they are called, independent
+      of what the guarded action does afterward (CWE-502). If the guarded
+      action is itself a delete/read/copy, a successful bypass additionally
+      yields arbitrary file deletion or disclosure (CWE-22/CWE-73).
+
+      TRIAGE:
+        1. Trace $PATH to its origin. A stored field value (post/entry/user
+           meta, a serialized option) populated by an earlier, less-trusted
+           request (e.g. an unauthenticated form submission processed later by
+           an admin action) is a TP; a path built by the current function from
+           a hardcoded prefix plus only a short suffix is much lower risk.
+        2. Confirm the attacker controls the FULL path string, including
+           where a scheme prefix like phar:// would sit — if a hardcoded
+           directory is unconditionally prepended before this guard runs,
+           the scheme cannot be attacker-supplied and this class does not
+           apply (though CWE-22 concatenation-traversal rules may still).
+        3. Confirm no realpath() or validate_file() call sits between the
+           source and this guard anywhere in the function — realpath()
+           resolves stream-wrapper paths to false, and validate_file()
+           rejects any path containing "://" outright.
+        4. For actual PHP Object Injection impact (not just a stat-timing
+           observation), inventory magic methods (__wakeup/__destruct/
+           __unserialize/__toString/__call) across the plugin AND its
+           vendored libraries for a usable POP chain gadget.
+        5. Second shape (naive scheme-strip): a request-derived path is
+           "sanitized" only by str_replace()/preg_replace() removing scheme
+           substrings like phar://, zip://, ftp:// from an array of needles,
+           then handed straight to a stat/read function used as an if-guard.
+           This blacklist is bypassable — str_replace() runs one non-recursive
+           pass, so a nested needle (e.g. "phaphar://r://") reassembles the
+           forbidden scheme after the single match is stripped, and PHP
+           resolves stream-wrapper scheme names case-insensitively while the
+           blacklist match is exact-case (e.g. "PHAR://" survives untouched).
+           A path-containment check (strpos()/substr() against a resolved
+           upload/base directory) is only a real fix if it runs BEFORE this
+           guard call — the same check appearing later in the function does
+           not help, since the wrapper has already fired.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-502: Deserialization of Untrusted Data"
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+        - "CWE-73: External Control of File Name or Path"
+      owasp: "A08:2021 - Software and Data Integrity Failures"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "PHP Object Injection (PHAR Deserialization)"
+      technology: [php, wordpress]
+      references:
+        - "https://cwe.mitre.org/data/definitions/502.html"
+        - "https://cwe.mitre.org/data/definitions/22.html"
+        - "https://owasp.org/www-community/vulnerabilities/PHP_Object_Injection"
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          # Shape 1: file_exists()/is_file() used as an if-guard, with a
+          # SECOND, later sink call acting on the same path once the guard
+          # passes (delete/read/copy). The guard call itself is already the
+          # PHP Object Injection trigger; the later sink adds a second,
+          # independent impact (arbitrary file delete/read) on bypass.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      if (<... file_exists($PATH) ...>) {
+                        ...
+                        wp_delete_file($PATH);
+                        ...
+                      }
+                  - pattern: |
+                      if (<... file_exists($PATH) ...>) {
+                        ...
+                        unlink($PATH);
+                        ...
+                      }
+                  - pattern: |
+                      if (<... file_exists($PATH) ...>) {
+                        ...
+                        @unlink($PATH);
+                        ...
+                      }
+                  - pattern: |
+                      if (<... file_exists($PATH) ...>) {
+                        ...
+                        copy($PATH, ...);
+                        ...
+                      }
+                  - pattern: |
+                      if (<... file_exists($PATH) ...>) {
+                        ...
+                        readfile($PATH);
+                        ...
+                      }
+                  - pattern: |
+                      if (<... file_exists($PATH) ...>) {
+                        ...
+                        getimagesize($PATH);
+                        ...
+                      }
+                  - pattern: |
+                      if (<... file_exists($PATH) ...>) {
+                        ...
+                        file_get_contents($PATH);
+                        ...
+                      }
+                  - pattern: |
+                      if (<... is_file($PATH) ...>) {
+                        ...
+                        wp_delete_file($PATH);
+                        ...
+                      }
+                  - pattern: |
+                      if (<... is_file($PATH) ...>) {
+                        ...
+                        unlink($PATH);
+                        ...
+                      }
+                  - pattern: |
+                      if (<... is_file($PATH) ...>) {
+                        ...
+                        @unlink($PATH);
+                        ...
+                      }
+                  - pattern: |
+                      if (<... is_file($PATH) ...>) {
+                        ...
+                        copy($PATH, ...);
+                        ...
+                      }
+                  - pattern: |
+                      if (<... is_file($PATH) ...>) {
+                        ...
+                        readfile($PATH);
+                        ...
+                      }
+                  - pattern: |
+                      if (<... is_file($PATH) ...>) {
+                        ...
+                        getimagesize($PATH);
+                        ...
+                      }
+                  - pattern: |
+                      if (<... is_file($PATH) ...>) {
+                        ...
+                        file_get_contents($PATH);
+                        ...
+                      }
+              # $PATH must be variable-rooted (a bare variable, or array/property
+              # access on one) — excludes string literals and constant/ABSPATH-style
+              # prefixed expressions, which cannot carry an attacker-chosen scheme.
+              - metavariable-regex:
+                  metavariable: $PATH
+                  regex: '^\$[A-Za-z_]'
+              # Bare superglobal reads on the full path are already covered by the
+              # dedicated direct-superglobal-to-sink rules; excluding them here keeps
+              # this rule scoped to the stored/second-order-taint class it targets.
+              - metavariable-regex:
+                  metavariable: $PATH
+                  regex: '^\$(?!_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER)\b)'
+              # realpath() resolves phar:// (and other stream-wrapper) paths to
+              # false rather than a real filesystem path; validate_file() rejects
+              # any path containing "://" outright. Either present anywhere in the
+              # enclosing function is the real-world fix for this class.
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    realpath(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    validate_file(...);
+                    ...
+                  }
+              # Fix-derived FP guard: $PATH is itself built by concatenating a
+              # base expression with a FIXED STRING LITERAL suffix (no second
+              # variable/request-derived remainder) — the entire path is
+              # developer-authored, not attacker-influenced, regardless of
+              # $PATH's own variable-rooted shape (e.g. "$this->cachedir .
+              # '_cached.json'" or "TWO_CACHE_DIR . '_cached.json'").
+              - pattern-not-inside:
+                  patterns:
+                    - pattern: |
+                        function $F(...) {
+                          ...
+                          $PATH = $BASE2 . $SUFFIX;
+                          ...
+                        }
+                    - metavariable-regex:
+                        metavariable: $SUFFIX
+                        regex: "^['\"][^'\"]*['\"]$"
+              # Same fixed-literal-suffix reasoning, class-property variant: $PATH
+              # is a property assigned once, elsewhere in the same class (typically
+              # the constructor), from a base expression concatenated with one or
+              # more fixed literal / class-constant components — a compile-time-
+              # constant path is unaffected by which method later reads the
+              # property. $SUFFIX (and $MID, for the two-concatenation chain
+              # shape below) is restricted to a quoted string literal, a bare
+              # UPPERCASE constant, or a self::/static::/Class:: constant
+              # reference — never a variable or function call.
+              - pattern-not-inside:
+                  patterns:
+                    - pattern: |
+                        class $CLASS {
+                          ...
+                          function $CTOR(...) {
+                            ...
+                            $PATH = $BASE2 . $SUFFIX;
+                            ...
+                          }
+                          ...
+                        }
+                    - metavariable-regex:
+                        metavariable: $SUFFIX
+                        regex: "^(['\"][^'\"]*['\"]|self::[A-Za-z_][A-Za-z0-9_]*|static::[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*::[A-Za-z_][A-Za-z0-9_]*|[A-Z_][A-Z0-9_]*)$"
+              # Same, two-concatenation chain shape (e.g. "CONST . '/' . self::FILE"):
+              # both trailing components must independently be literal/constant-like.
+              - pattern-not-inside:
+                  patterns:
+                    - pattern: |
+                        class $CLASS {
+                          ...
+                          function $CTOR(...) {
+                            ...
+                            $PATH = $BASE2 . $MID . $SUFFIX;
+                            ...
+                          }
+                          ...
+                        }
+                    - metavariable-regex:
+                        metavariable: $MID
+                        regex: "^(['\"][^'\"]*['\"]|self::[A-Za-z_][A-Za-z0-9_]*|static::[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*::[A-Za-z_][A-Za-z0-9_]*|[A-Z_][A-Z0-9_]*)$"
+                    - metavariable-regex:
+                        metavariable: $SUFFIX
+                        regex: "^(['\"][^'\"]*['\"]|self::[A-Za-z_][A-Za-z0-9_]*|static::[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*::[A-Za-z_][A-Za-z0-9_]*|[A-Z_][A-Z0-9_]*)$"
+          # Shape 2: the path is assigned from a str_replace()/preg_replace()
+          # call whose needles are an attempted stream-wrapper scheme
+          # blacklist (phar://, zip://, ftp://, ...), then immediately used
+          # as a bare stat/read guard condition — no downstream sink needed,
+          # since the guard call itself is the deserialization trigger. This
+          # is the naive-blacklist variant: the removed-scheme substring
+          # check is bypassable (non-recursive str_replace + case-sensitive
+          # match against a case-insensitive wrapper lookup), so the "sanitized"
+          # value can still carry a live phar:// URI into the guard.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      $PATH = str_replace($NEEDLES, '', $SRC);
+                      ...
+                      if (<... $STATFUNC($PATH) ...>) {
+                        ...
+                      }
+                  - pattern: |
+                      $PATH = preg_replace($NEEDLES, '', $SRC);
+                      ...
+                      if (<... $STATFUNC($PATH) ...>) {
+                        ...
+                      }
+              # $NEEDLES must textually contain a dangerous stream-wrapper
+              # scheme — keeps this scoped to the scheme-blacklist idiom
+              # rather than any unrelated str_replace()/preg_replace() call.
+              - metavariable-regex:
+                  metavariable: $NEEDLES
+                  regex: '(?is).*(phar|zip|ftp|zlib|glob|expect|compress\.[a-z]+)://.*'
+              # $STATFUNC restricted to stream-wrapper-resolving stat/read
+              # functions — the same class the guard-then-act shape above
+              # targets, just used as the bare trigger with no later sink.
+              - metavariable-regex:
+                  metavariable: $STATFUNC
+                  regex: '^(file_exists|is_file|is_readable|is_writable|realpath|getimagesize|filemtime|filesize|md5_file|stat|lstat|filetype|hash_file)$'
+              # A real fix moves a path-containment check (strpos()/substr()
+              # against a resolved base directory) BEFORE the guard call —
+              # the same check appearing later in the function (as in the
+              # real pre-fix code this shape is modeled on) does not help,
+              # since the wrapper has already resolved by then. Only exclude
+              # when the containment check is sequenced first.
+              - pattern-not: |
+                  $PATH = str_replace($NEEDLES, '', $SRC);
+                  ...
+                  if (<... strpos(...) ...>) {
+                    ...
+                  }
+                  ...
+                  if (<... $STATFUNC($PATH) ...>) {
+                    ...
+                  }
+              - pattern-not: |
+                  $PATH = preg_replace($NEEDLES, '', $SRC);
+                  ...
+                  if (<... strpos(...) ...>) {
+                    ...
+                  }
+                  ...
+                  if (<... $STATFUNC($PATH) ...>) {
+                    ...
+                  }

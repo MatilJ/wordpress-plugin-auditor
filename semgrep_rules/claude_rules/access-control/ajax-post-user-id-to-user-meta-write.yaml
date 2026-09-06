@@ -1,0 +1,85 @@
+rules:
+  - id: claude.php.wordpress.access-control.ajax-post-user-id-to-user-meta-write
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      An attacker-controlled user_id from an HTTP request parameter flows into a
+      user account write function (update_user_meta, delete_user_meta, add_user_meta)
+      without a current_user_can('edit_user', $user_id) ownership check. A
+      low-privilege subscriber can modify any user's account data, including
+      administrator accounts (CWE-862 Missing Authorization / IDOR).
+
+      Real-world confirmed pattern (WP Ghost / hide-my-wp 7.0.01):
+        controllers/Twofactor.php action() checks only userCan('read') (Subscriber+),
+        then reads $user_id from $_POST and calls update_user_meta($user_id, ...) via
+        HMWP_Classes_Tools::saveUserMeta() — no ownership verification anywhere.
+        Subscriber can generate plaintext backup codes for the admin (CVSS 8.1).
+
+      Fix: verify ownership before writing:
+        if ( ! current_user_can( 'edit_user', (int) $user_id )
+             && get_current_user_id() !== (int) $user_id ) {
+            wp_send_json_error( 'Unauthorized', 403 );
+        }
+
+      TRIAGE GUIDANCE — Common patterns requiring manual review:
+
+      TRUE POSITIVE indicators:
+        • Only read/subscriber-level capability checked (current_user_can('read'),
+          is_user_logged_in(), check_ajax_referer() only) before the write.
+        • No current_user_can('edit_user', ...) or current_user_can('edit_users')
+          check anywhere in the call chain.
+        • user_id reaches update_user_meta as first argument from POST/GET.
+
+      FALSE POSITIVE indicators:
+        • Handler has current_user_can('manage_options') / current_user_can('edit_users')
+          / current_user_can('administrator') check — admin-level gate makes this PR:H
+          (out of scope for bounty).
+        • Handler has current_user_can('edit_user', $user_id) — correct ownership check.
+        • The user_id is always get_current_user_id() in practice (the POST param is the
+          current user's own ID, validated before use).
+        • The AJAX action is only registered via wp_ajax_ (no wp_ajax_nopriv_) and
+          has a manage_options capability check before the meta write.
+
+      NOTE: This rule does NOT fire when current_user_can('edit_user', $user_id) is
+      called with the tainted $user_id as argument — that pattern is the correct fix.
+      It WILL fire when only current_user_can('manage_options') is used without passing
+      $user_id, which is a common FP from admin-gated handlers. Verify the exact
+      capability level before escalating.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+        - https://developer.wordpress.org/reference/functions/update_user_meta/
+        - https://developer.wordpress.org/reference/functions/get_current_user_id/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+    pattern-sinks:
+      # Focus on the first argument (the user_id being written to).
+      # A tainted second or third argument (meta key or value) is a different
+      # bug class (XSS or meta key injection) — not caught here.
+      - patterns:
+          - pattern: update_user_meta($USER_ID, ...)
+          - focus-metavariable: $USER_ID
+      - patterns:
+          - pattern: delete_user_meta($USER_ID, ...)
+          - focus-metavariable: $USER_ID
+      - patterns:
+          - pattern: add_user_meta($USER_ID, ...)
+          - focus-metavariable: $USER_ID
+    # No pattern-sanitizers: integer casts ((int), intval, absint) would suppress
+    # TP cases — an attacker can pass any integer user_id including 1 (admin).
+    # current_user_can() is a guard, not a data transformer, so it cannot clear
+    # taint in Semgrep's model. All POST → user_meta flows fire; use the triage
+    # guidance in the message to distinguish TPs from FPs.

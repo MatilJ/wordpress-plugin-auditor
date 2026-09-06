@@ -1,0 +1,69 @@
+rules:
+  - id: claude.php.wordpress.idor.cookie-ownership-comparison
+    languages: [php]
+    severity: HIGH
+    message: |
+      A $_COOKIE value is used as the sole ownership proof for unauthenticated users
+      in the else-branch of an is_user_logged_in() guard (CWE-639). Because cookies
+      are fully client-controlled, any attacker who knows the target key (e.g., obtained
+      from a publicly shared URL or page source) can set their cookie to that value and
+      bypass this check, gaining unauthorized read or write access to another user's data.
+      For authenticated users, bind ownership to server-side user meta (get_user_meta).
+      For unauthenticated users, either require login for write operations or use an
+      HMAC-signed token that an attacker cannot forge without the server secret.
+    metadata:
+      category: security
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Insecure Direct Object Reference (IDOR)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/is_user_logged_in/
+        - https://developer.wordpress.org/reference/functions/get_user_meta/
+      # TRIAGE — confirm ALL of the following before reporting:
+      #
+      # 1. UNAUTHENTICATED PATH ONLY: The cookie comparison fires inside the ELSE
+      #    branch (unauthenticated path). The authenticated path (true branch) must
+      #    use a server-side check (get_user_meta, DB lookup). If the authenticated
+      #    path is also cookie-based, severity is higher — check both branches.
+      #
+      # 2. KEY EXPOSURE: The cookie key must be accessible to an attacker without
+      #    requiring authentication or an existing session:
+      #    - Exposed in sharing URLs (e.g., /wishlist/ABCDE1/)
+      #    - Present in page source or AJAX responses visible to the public
+      #    - Predictable or enumerable (short alphanumeric strings)
+      #    If the key is a server-generated secret never sent to the client,
+      #    this is a FALSE POSITIVE — the attacker cannot forge it.
+      #
+      # 3. DATA IMPACT: The function that returns true must gate meaningful write
+      #    or read access to data belonging to other users. A cookie check that
+      #    only affects the current user's own preferences is not exploitable.
+      #    Trace the callers of the flagged function to confirm CIA impact.
+      #
+      # 4. WRITE SURFACE: Confirm at least one caller allows modification
+      #    (not just viewing). Read-only exposure may be OOS if the data is
+      #    already publicly accessible via the sharing URL.
+      #
+      # FALSE POSITIVE patterns:
+      # - Cookie compared to a server-set HMAC or signed value (attacker cannot
+      #   forge the expected value even if they see it in a URL).
+      # - Cookie used only for non-sensitive preference/display settings.
+      # - Cookie value validated against a DB record that requires prior server
+      #   authentication to create (binding exists server-side).
+      #
+      # Confirmed TP: woo-smart-wishlist 6.0.0 — can_edit() in class-helper.php:73-76.
+      # Key ('woosw_key') exposed in sharing URLs (/wishlist/KEY/). CVSS 5.3 Medium.
+      # ajax_add/ajax_remove/ajax_empty all call can_edit() — three write surfaces.
+    patterns:
+      - pattern: |
+          if (is_user_logged_in()) {
+            ...
+          } else {
+            if (<... $_COOKIE[$COOKIE_KEY] ...>) {
+              return true;
+            }
+          }

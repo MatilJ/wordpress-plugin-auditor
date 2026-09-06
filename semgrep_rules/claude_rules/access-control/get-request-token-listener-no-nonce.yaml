@@ -1,0 +1,111 @@
+rules:
+  - id: claude.php.wordpress.access-control.get-request-token-listener-no-nonce
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function reads a credential/token-style value directly from $_GET and
+      stores it under an access-token-style key of a data array, with no nonce
+      verification anywhere in the function (CWE-352). This is the shape of an
+      OAuth-style "connection callback" listener that many WordPress plugins
+      invoke on an ordinary authenticated page load — not behind a dedicated
+      POST-only wp_ajax_ action — so a nonce is the only realistic CSRF defense
+      available. Its total absence lets an attacker overwrite a stored
+      credential/access token by tricking a logged-in privileged user into
+      visiting a crafted link, even when the actual persistence
+      (update_option/add_option/set_transient/etc.) happens in a different
+      function that later consumes this one's return value.
+
+      TRIAGE:
+      1. Confirm the returned/assigned value is actually persisted somewhere
+         reachable from the same request (update_option, add_option,
+         set_transient, update_user_meta, update_post_meta) rather than only
+         displayed back to the same user.
+      2. Confirm the function runs on a normal authenticated page load (an
+         admin_enqueue_scripts/admin_init/admin_head callback, or unconditional
+         code in an admin-page render path) rather than behind a POST-only
+         wp_ajax_ action that already gets a nonce check at the AJAX-dispatch
+         layer before this code is ever reached.
+      3. A capability check alone does not fix this — the victim already has
+         the capability; the missing control is CSRF (nonce), not authorization.
+
+      Fix: verify a dedicated connection nonce (wp_verify_nonce($_GET[...],
+      '<action>')) at the top of the listener function, issued when the
+      outbound connection/authorization URL was generated, before trusting any
+      of its GET parameters.
+    metadata:
+      category: security
+      cwe: "CWE-352: Cross-Site Request Forgery (CSRF)"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Request Forgery (CSRF)"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/352.html
+        - https://developer.wordpress.org/apis/security/nonces/
+    patterns:
+      - pattern: |
+          function $FUNC(...) {
+            ...
+            if (<... $_GET[$KEY] ...>) {
+              ...
+            }
+            ...
+            $ARR[$AKEY] = $VAL;
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i)^['"][A-Za-z0-9_]*(access_token|oauth_token|auth_token|api_token|refresh_token)[A-Za-z0-9_]*['"]$
+      - metavariable-regex:
+          metavariable: $AKEY
+          regex: (?i)^['"](access_token|token|refresh_token)['"]$
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            wp_verify_nonce(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... wp_verify_nonce(...) ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            check_admin_referer(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... check_admin_referer(...) ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            check_ajax_referer(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... check_ajax_referer(...) ...>) {
+              ...
+            }
+            ...
+          }
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"

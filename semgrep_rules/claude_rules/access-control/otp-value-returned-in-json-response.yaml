@@ -1,0 +1,120 @@
+rules:
+  - id: claude.php.wordpress.access-control.otp-value-returned-in-json-response
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      A one-time verification code (OTP/passcode/2FA code) that the server
+      generated for delivery over an out-of-band channel (SMS/email) is also
+      placed directly into the JSON body of the SAME synchronous AJAX/REST
+      response that triggered its generation — either a variable holding the
+      freshly-generated code is assigned to a like-named array key passed to
+      a JSON-response sink, or the code-generating call is made inline as the
+      value of that key (CWE-200: Exposure of Sensitive Information / CWE-287:
+      Improper Authentication).
+
+      An OTP-based login/verification step only proves anything when the code
+      is withheld from the requester until they demonstrate receipt through
+      the out-of-band channel (their phone/inbox). If the code is echoed back
+      in the HTTP response body that generated it, the requester never needs
+      channel access at all — they can read the code directly from the
+      response and immediately submit it back to complete verification/login
+      for any identifier they supply, for any account, with no possession of
+      the phone/email ever demonstrated.
+
+      Fix: never include the generated code (or any value derived one-to-one
+      from it) in the response returned to the client. Send only a
+      non-predictive status flag (e.g. `sent => true`) and keep the code
+      server-side only (a transient, user meta, or session value) for later
+      comparison with hash_equals() against the value the caller submits.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - The array key name and the variable/call supplying its value both
+          denote a one-time code (otp/passcode/verification code/one-time
+          code), and the array is the argument to a JSON-response sink
+          (wp_send_json()/wp_send_json_success()/wp_send_json_error()).
+        - The code is generated moments earlier in the same request (a
+          send/generate-style call, or a random-number/string generator) —
+          this is a fresh secret, not a non-secret reference/order number that
+          happens to share the "code" name.
+        - No masking/redaction transform (e.g. substr() truncation with a
+          mask, a hash) is applied between generation and the response value.
+
+      FALSE POSITIVE indicators:
+        - The emitted value is a static/non-secret identifier (an order
+          number, a coupon code, a locale code) with no bearing on
+          authentication, not a value the server just generated as a login
+          credential.
+        - The value passed to the sink is a boolean/int status flag or a
+          masked/hashed transform of the code, not the raw generated value
+          itself.
+        - The JSON response is only reachable by an already-authenticated
+          administrator inspecting their own account's data, with no
+          unauthenticated or cross-account path to trigger the same code
+          path for another identifier.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+        - "CWE-287: Improper Authentication"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: CRITICAL
+      subcategory: vuln
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/200.html
+        - https://cwe.mitre.org/data/definitions/287.html
+        - https://developer.wordpress.org/reference/functions/wp_send_json/
+        - https://developer.wordpress.org/reference/functions/hash_equals/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          # Branch 1: the code is generated into a variable, then that same
+          # variable is placed under a like-named key in a JSON-response sink
+          # somewhere later in the same function. This is the literal shape
+          # of the seeding disclosure (SMS-OTP generated, then echoed back
+          # verbatim in the AJAX response used to poll for delivery status).
+          - patterns:
+              - pattern: |
+                  $OTP = $VAL;
+                  ...
+                  $SINK(array(
+                    ...,
+                    $KEY => $OTP,
+                    ...
+                  ));
+              - metavariable-regex:
+                  metavariable: $OTP
+                  regex: "(?i).*(otp|passcode|one.?time.?(code|pass)|verif(y|ication).?code|auth.?code|security.?code).*"
+              - metavariable-regex:
+                  metavariable: $KEY
+                  regex: "(?i).*(otp|passcode|one.?time.?(code|pass)|verif(y|ication).?code|auth.?code|security.?code).*"
+              - metavariable-regex:
+                  metavariable: $SINK
+                  regex: "^(wp_send_json|wp_send_json_success|wp_send_json_error)$"
+          # Branch 2: the code-generating call is made inline as the value of
+          # a like-named key, with no intermediate variable to inspect — the
+          # generator's own name is the only available signal.
+          - patterns:
+              - pattern: |
+                  $SINK(array(
+                    ...,
+                    $KEY => $GENCALL(...),
+                    ...
+                  ));
+              - metavariable-regex:
+                  metavariable: $KEY
+                  regex: "(?i).*(otp|passcode|one.?time.?(code|pass)|verif(y|ication).?code|auth.?code|security.?code).*"
+              - metavariable-regex:
+                  metavariable: $GENCALL
+                  regex: "(?i).*(otp|passcode|sms|totp|one.?time).*(gen|send|create|make).*|.*(gen|send|create|make).*(otp|passcode|sms|totp|one.?time).*"
+              - metavariable-regex:
+                  metavariable: $SINK
+                  regex: "^(wp_send_json|wp_send_json_success|wp_send_json_error)$"

@@ -1,0 +1,85 @@
+rules:
+  - id: claude.php.wordpress.file.custom-template-wrapper
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A function with a template/view/render-related name contains an
+      include/require statement. This is a custom template loading wrapper
+      that becomes a sink for LFI if any caller passes user-controlled
+      input to its parameters (CWE-98).
+      Audit all callers of this function to determine if user input reaches
+      the include path. If so, apply sanitize_file_name() or an allowlist
+      before calling the wrapper.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program ('PHP Remote File Inclusion')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      # TRIAGE GUIDANCE:
+      #
+      # This rule identifies CUSTOM SINKS — functions that wrap include/require.
+      # The function itself is not vulnerable; it becomes vulnerable when
+      # called with user-controlled input.
+      #
+      # NEXT STEP — trace callers:
+      #   1. grep for all calls to this function name
+      #   2. For each caller, trace the argument to its source
+      #   3. If source is user input (superglobal, REST param, shortcode attr,
+      #      DB value writable by lower-privilege user) -> report as LFI
+      #
+      # TRUE POSITIVE — wrapper called with user input:
+      #   function render_template($name) {
+      #       include PLUGIN_DIR . '/templates/' . $name . '.php';
+      #   }
+      #   // Caller:
+      #   render_template($_GET['template']);
+      #
+      # FALSE POSITIVE — wrapper only called with hardcoded values:
+      #   function load_view($view) {
+      #       include PLUGIN_DIR . '/views/' . $view . '.php';
+      #   }
+      #   // Only callers: load_view('header'); load_view('footer');
+      #   -> All arguments are string literals. No user input reaches $view.
+      #
+      # FALSE POSITIVE — wrapper has internal allowlist:
+      #   function render_partial($name) {
+      #       $allowed = ['sidebar', 'footer', 'header'];
+      #       if (!in_array($name, $allowed, true)) return;
+      #       include PLUGIN_DIR . '/partials/' . $name . '.php';
+      #   }
+      #   -> Internal strict allowlist prevents arbitrary inclusion.
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                include ...;
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                include_once ...;
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                require ...;
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                require_once ...;
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $FUNC
+          regex: '(?i)(?:get_|load_|include_|render_|locate_)(?:template|view|partial|layout)\w*|(?:template|view|partial|layout)(?:_file|_path)?$|\w+_get_template\w*'

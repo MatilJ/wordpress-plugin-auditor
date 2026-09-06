@@ -1,0 +1,98 @@
+rules:
+  - id: claude.php.wordpress.access-control.rest-items-permission-check-on-write-route
+    languages: [php]
+    severity: HIGH
+    message: |
+      A register_rest_route() entry for a state-changing HTTP method (POST/PUT/
+      PATCH/DELETE) wires its permission_callback to a method following the
+      WP_REST_Controller "list" naming convention (get_items_permissions_check,
+      or an *_items_permissions_check variant) instead of a dedicated create/
+      update/delete-tier check (CWE-862).
+
+      get_items_permissions_check() is designed by convention to gate a
+      read-only collection listing. In many plugins it accepts weaker proof of
+      access than a mutating action warrants — a site-wide API token, a public
+      nonce meant only for a front-end read widget, or a lower capability —
+      because that bar is appropriate for browsing, not for triggering a write
+      or delete. Wiring it to a POST/PUT/PATCH/DELETE route silently inherits
+      that weaker bar for the mutating action.
+
+      Confirmed source: simply-schedule-appointments 1.6.12.4 (CVE-2026-57812)
+      wired POST .../groups/{id}/cancel and .../groups/{id}/delete (plus a
+      destructive GET .../purge route) to get_items_permissions_check(), whose
+      fallback branches accepted a static site-wide token as sufficient proof —
+      letting unauthenticated callers cancel or delete arbitrary appointment
+      groups. The fix gave each route its own dedicated permission_callback
+      that dropped the token fallback entirely.
+
+      Fix: give the mutating route its own permission_callback (or a
+      create_item_permissions_check() / update_item_permissions_check() /
+      delete_item_permissions_check() override) that requires a real capability
+      or verified per-resource ownership, with no site-wide token/nonce fallback.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      # TRIAGE GUIDANCE:
+      #
+      # This rule fires purely on the call-site naming mismatch (a plural/list-
+      # style permission method wired to a mutating HTTP verb) — it does not
+      # (and structurally cannot, without cross-function taint) inspect what
+      # the named method actually requires.
+      #
+      # TRUE POSITIVE — the named *_items_permissions_check() method contains
+      # any branch that returns true based on: a static/global token or API key
+      # compared via hash_equals()/==, a bare nonce check with no
+      # current_user_can(), or a capability lower than what sibling
+      # create/update/delete checks in the same class require. Read the method
+      # body to confirm.
+      #
+      # FALSE POSITIVE — the named method requires only a real capability check
+      # (current_user_can()) with no token/nonce/public fallback, OR requires a
+      # capability equal to or stricter than the class's other mutating-route
+      # checks. Reuse is then merely unconventional naming, not exploitable.
+      #
+      # FALSE POSITIVE — the flagged route, despite using a mutating HTTP verb,
+      # is an intentionally-public creation endpoint where anyone should be able
+      # to create the resource (e.g. a public booking/submission/contact-form
+      # REST route). Confirm what the route's callback actually does before
+      # treating "created by strangers" as a bug.
+      references:
+        - https://developer.wordpress.org/reference/classes/wp_rest_controller/get_items_permissions_check/
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/#permissions-callback
+        - https://cwe.mitre.org/data/definitions/862.html
+    patterns:
+      - pattern-either:
+          # WP_REST_Server verb constants — the common convention.
+          - pattern: |
+              register_rest_route(..., ..., array(..., array(..., 'methods' => WP_REST_Server::CREATABLE, ..., 'permission_callback' => array($OBJ, '$PERM'), ...), ...), ...);
+          - pattern: |
+              register_rest_route(..., ..., array(..., array(..., 'methods' => WP_REST_Server::EDITABLE, ..., 'permission_callback' => array($OBJ, '$PERM'), ...), ...), ...);
+          - pattern: |
+              register_rest_route(..., ..., array(..., array(..., 'methods' => WP_REST_Server::DELETABLE, ..., 'permission_callback' => array($OBJ, '$PERM'), ...), ...), ...);
+          # Raw HTTP-verb strings — plugins that skip the WP_REST_Server aliases.
+          - pattern: |
+              register_rest_route(..., ..., array(..., array(..., 'methods' => 'POST', ..., 'permission_callback' => array($OBJ, '$PERM'), ...), ...), ...);
+          - pattern: |
+              register_rest_route(..., ..., array(..., array(..., 'methods' => 'PUT', ..., 'permission_callback' => array($OBJ, '$PERM'), ...), ...), ...);
+          - pattern: |
+              register_rest_route(..., ..., array(..., array(..., 'methods' => 'PATCH', ..., 'permission_callback' => array($OBJ, '$PERM'), ...), ...), ...);
+          - pattern: |
+              register_rest_route(..., ..., array(..., array(..., 'methods' => 'DELETE', ..., 'permission_callback' => array($OBJ, '$PERM'), ...), ...), ...);
+      # The wired callback name follows the WP_REST_Controller plural/list
+      # convention: get_items_permissions_check, or a prefixed variant that
+      # still contains the "get_items_permissions_check" name in full (e.g. a
+      # class/module prefix). Anchored on "get_" specifically — NOT any
+      # "*_items_permissions_check" name — because plugins commonly author
+      # their own dedicated bulk-tier checks with names like
+      # update_items_permissions_check that are purpose-built for the mutating
+      # route and are not the generic list-tier fallback this rule targets.
+      - metavariable-regex:
+          metavariable: $PERM
+          regex: (?i)^\w*get_items_permissions_check$

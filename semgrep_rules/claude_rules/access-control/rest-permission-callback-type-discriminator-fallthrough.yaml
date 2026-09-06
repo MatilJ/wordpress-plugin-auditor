@@ -1,0 +1,77 @@
+rules:
+  - id: claude.php.wordpress.access-control.rest-permission-callback-type-discriminator-fallthrough
+    languages: [php]
+    severity: HIGH
+    message: |
+      A resource-ID extraction helper (return type `?int`) branches on a
+      request-supplied "type"/context discriminator via a match or switch
+      expression, but the default/unmatched arm resolves to null instead of
+      denying access (CWE-862). When a caller only enforces its authorization
+      check for a truthy resource ID ("if ($id && !can_access($id)) { deny }"),
+      any discriminator value the match/switch does not explicitly handle
+      silently produces null, the guard never fires, and the request is
+      allowed through with no ownership/capability check at all.
+
+      This is the "authorization only covers the types I thought of" gap: a
+      developer adds per-resource checks for known context types (e.g.
+      'post'/'comment') but forgets that other legitimate discriminator
+      values (e.g. 'user', 'term') route through the same shared gate with
+      no check whatsoever.
+
+      Fix: make the default arm fail closed (return a sentinel the caller
+      treats as "deny", or throw) unless the type is provably scope-free, and
+      enumerate every value the discriminator can legitimately take against
+      an explicit allow-list of checked types.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/#permissions-callback
+        - https://cwe.mitre.org/data/definitions/862.html
+      # NOTE: detection uses pattern + pattern-regex, not an AST pattern on the
+      # match/switch body itself — Semgrep's PHP pattern parser cannot
+      # parse PHP 8 `match` expressions as pattern text (though it parses them
+      # fine in scanned target files), so the type-discriminator/null-default
+      # shape is matched via regex scoped to the already-AST-matched function.
+      #
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — nullable-int helper with a type-keyed match/switch whose
+      # default arm is null, feeding a caller that only checks a truthy result:
+      #   private function extract_post_id_from_context($context): ?int {
+      #     return match ($context['type']) {
+      #       'post'    => absint($context['id']),
+      #       'comment' => absint($context['post_id']),
+      #       default   => null,
+      #     };
+      #   }
+      #   // caller: if ($post_id && !$this->can_user_read_post($post_id)) { deny }
+      # Any type other than 'post'/'comment' (e.g. 'user', 'term') returns null,
+      # the guard never fires, and the request passes with zero authorization.
+      #
+      # FALSE POSITIVE — default arm fails closed (throws, or the caller treats
+      # a null/falsy result as "deny" rather than "nothing to check" — verify by
+      # reading the call site, not just this helper in isolation).
+      #
+      # FALSE POSITIVE — the discriminator's value set is closed and every
+      # legitimate value is handled explicitly (no case can realistically reach
+      # the default arm) — confirm by checking where the discriminator value
+      # itself originates and whether it is validated against an allow-list
+      # before this function is called.
+    patterns:
+      # Anchor: a function/method whose return type is nullable int — the
+      # distinctive shape of a "resource ID, or null if not applicable" helper.
+      - pattern: |
+          function $FUNC(...): ?int {
+            ...
+          }
+      # Filter: the body contains a match/switch keyed on a ['type']-style
+      # discriminator whose default arm resolves to null.
+      - pattern-regex: '(?s)(match|switch)\s*\(\s*\$\w+(\[[''"]type[''"]\]|->type)\s*\).*?default\s*(=>|:)\s*(null|return\s+null)'

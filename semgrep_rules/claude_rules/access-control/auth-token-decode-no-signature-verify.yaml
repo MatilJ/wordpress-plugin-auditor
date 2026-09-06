@@ -1,0 +1,82 @@
+rules:
+  - id: claude.php.wordpress.access-control.auth-token-decode-no-signature-verify
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      A client-supplied authentication token is base64-decoded and an account
+      identifier is pulled directly out of the decoded value (e.g. via a
+      regex/string match) — that identifier is then trusted as the
+      authenticated user's identity, with no cryptographic signature
+      (hash_hmac()/hash_equals()/wp_hash()/openssl_verify()) verifying that the
+      server actually issued this token for that account (CWE-345:
+      Insufficient Verification of Data Authenticity).
+
+      base64 is a reversible, unkeyed encoding, not a MAC. Because the decoded
+      identifier is trusted on its own, an attacker can forge a token
+      embedding ANY account ID (e.g. a low, guessable administrator ID)
+      without ever knowing that account's real credential or a previously
+      issued secret — an unauthenticated privilege escalation / account
+      takeover (CWE-269: Improper Privilege Management) once that identifier
+      reaches a login/authorization decision.
+
+      Fix: never derive an authorization decision from an identifier parsed
+      out of client-supplied data. Authenticate the token ITSELF — generate a
+      per-user cryptographically random secret (wp_generate_password() /
+      random_bytes()), store it server-side, and resolve the acting user via
+      an exact, prepared-statement match against that stored secret (or verify
+      an HMAC/signature over the token) instead of decoding and trusting a
+      parsed value.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-345: Insufficient Verification of Data Authenticity"
+        - "CWE-269: Improper Privilege Management"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/345.html
+        - https://cwe.mitre.org/data/definitions/269.html
+        - https://developer.wordpress.org/reference/functions/hash_equals/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $DATA = base64_decode($TOKEN);
+              ...
+              if (preg_match($RE, $DATA, $M)) {
+                ...
+              }
+          - pattern: |
+              $DATA = @base64_decode($TOKEN);
+              ...
+              if (preg_match($RE, $DATA, $M)) {
+                ...
+              }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            hash_hmac(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            hash_equals(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            openssl_verify(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            wp_hash(...);
+            ...
+          }

@@ -1,0 +1,119 @@
+rules:
+  - id: claude.php.wordpress.access-control.blocklist-only-key-guard-no-allowlist
+    languages: [php]
+    severity: HIGH
+    message: |
+      A "banned key" / "blocked field" guard function decides whether a
+      request-controlled meta/option/field key may be written by looping
+      over a hardcoded denylist and testing the candidate key against each
+      entry with a substring or pattern match (stripos/strpos/preg_match/
+      strcasecmp) — with no accompanying positive allow-list branch. Any
+      key that does not literally match one of the enumerated banned
+      substrings passes the guard, including a variant spelling of a banned
+      substring itself (different case, accents/homoglyphs, or simply a
+      sensitive key the list's author never enumerated). When callers use
+      this function as the sole gate before update_user_meta()/
+      update_post_meta()/update_option() on an attacker-supplied key, a
+      caller-chosen key the denylist never anticipated is written straight
+      through — enabling privilege escalation or arbitrary state tampering
+      (CWE-266 / CWE-184: Incomplete Blacklist).
+
+      A denylist is inherently incomplete — it can only reject keys its
+      author thought to enumerate. The durable fix is a positive allow-list:
+      a server-computed set of the specific keys legitimately expected in
+      this context, checked with in_array($key, $allowed, true) (or
+      isset()/array_key_exists() against that set) — not an ever-growing
+      list of "forbidden" substrings.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - The guard function's only logic is a loop over a denylist array
+          testing the candidate key with stripos/strpos/preg_match/
+          strcasecmp, with no companion allow-list check anywhere in the
+          same function.
+        - A caller uses this function's return value as the sole gate
+          before writing the same key to usermeta/postmeta/an option with
+          an attacker-controlled value, and the handler is reachable by an
+          unauthenticated or low-privileged (Subscriber/Customer) request.
+
+      FALSE POSITIVE indicators:
+        - The function also checks the key against a positive allow-list
+          (in_array($key, $allowed, true), isset($allowed[$key]),
+          array_key_exists($key, $allowed)) anywhere in its body — even if
+          that check only applies in certain contexts.
+        - The denylist guard is used only for cosmetic/display filtering,
+          not to gate a persistence write.
+        - The candidate key argument is a fixed, hardcoded literal at every
+          call site (not derived from request/form-submitted data).
+    metadata:
+      category: security
+      cwe:
+        - "CWE-266: Incorrect Privilege Assignment"
+        - "CWE-184: Incomplete Blacklist"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/266.html
+        - https://cwe.mitre.org/data/definitions/184.html
+    patterns:
+      - pattern-either:
+          - pattern: |
+              foreach ($BANNED as $B) {
+                if (<... $CHECK($KEY, $B) ...>) { ... }
+                ...
+              }
+          - pattern: |
+              foreach ($BANNED as $B) {
+                if (<... $CHECK($B, $KEY) ...>) { ... }
+                ...
+              }
+      - pattern-inside: |
+          function $FUNC($KEY, ...) {
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $CHECK
+          regex: ^(stripos|strpos|preg_match|strcasecmp|strcmp)$
+      - metavariable-regex:
+          metavariable: $FUNC
+          regex: (?i).*(banned|blocked|blacklist|denylist|disallow|forbidden|restrict).*
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... in_array($KEY, $ALLOWED, true) ...>;
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... isset($ALLOWED[$KEY]) ...>;
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... array_key_exists($KEY, $ALLOWED) ...>;
+            ...
+          }
+      # Path/directory-containment loops (e.g. "is this path inside one of
+      # my trusted base directories?") share this exact
+      # foreach+strpos/preg_match AST shape and can coincidentally have a
+      # $FUNC name matching the "restrict" token (e.g. isRestricted()), but
+      # they are a different security domain entirely (filesystem
+      # containment, not a meta/option/field KEY allow/deny decision) — the
+      # candidate variable in that domain is conventionally named after a
+      # path, not a key.
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i)^\$?(?!.*(path|dir|file|folder)).*$
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"

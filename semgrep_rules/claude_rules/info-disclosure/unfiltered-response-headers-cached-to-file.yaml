@@ -1,0 +1,117 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.unfiltered-response-headers-cached-to-file
+    languages: [php]
+    severity: HIGH
+    message: |
+      The full result of headers_list() -- every response header PHP has
+      queued for the current request, including any Set-Cookie header a
+      plugin, theme, or WordPress core emitted for THIS specific visitor --
+      is written to a file with no filtering, allow-listing, or
+      Set-Cookie-specific exclusion applied first. If this file is a
+      page-cache artifact later replayed to OTHER visitors of the same
+      cached URL (a header() call in a loop reading the same file, the
+      standard "serve from cache" shape in a full-page-cache subsystem), any
+      session, cart, or tracking cookie issued to the visitor whose request
+      populated the cache entry is disclosed to, and silently fixed onto,
+      every subsequent visitor of that URL until the cache entry is
+      invalidated (CWE-524: cache-based information exposure, chaining to
+      CWE-384: session fixation).
+
+      TRIAGE REQUIRED:
+      1. Confirm this write path is reachable for anonymous/GET requests to
+         cacheable, non-personalized URLs -- a full-page-cache subsystem's
+         "populate cache entry" function is the textbook case; a
+         debug/diagnostic dump gated to an admin-only page is lower priority.
+      2. Confirm the persisted content is later replayed to a DIFFERENT
+         request via header($X) -- typically iterating the stored header
+         list back out of the same file in a sibling "serve cached page"
+         function -- rather than only ever read back by the same
+         visitor/session (e.g. a debug export feature). Cross-visitor replay
+         is what turns this into a disclosure/fixation primitive rather than
+         a self-contained quirk.
+      3. Check whether the WordPress authentication cookie specifically
+         (wordpress_logged_in_*) is excluded elsewhere in the caching
+         subsystem's own request-side filtering -- even when it is, cookies
+         set by OTHER plugins/themes (e-commerce cart/session cookies,
+         A/B-test buckets, consent flags) are not covered by that
+         WP-specific exclusion and remain exposed by this write path.
+
+      Fix: build an explicit allow-list of headers that are safe to
+      cache/replay (Content-Type, Cache-Control, ETag, etc.), or at minimum
+      strip every Set-Cookie header from the captured list before persisting
+      it -- never persist headers_list()'s return value verbatim.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-524: Information Exposure Through Caching"
+        - "CWE-384: Session Fixation"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Information Disclosure"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/524.html
+        - https://cwe.mitre.org/data/definitions/384.html
+        - https://developer.wordpress.org/reference/functions/headers_list/
+    patterns:
+      - pattern-either:
+          # Inline: headers_list() (optionally wrapped in an encoder) passed
+          # directly as the write call's argument, no intermediate variable.
+          - pattern: file_put_contents($FILE, <... headers_list() ...>)
+          - pattern: fwrite($FH, <... headers_list() ...>)
+          - pattern: fputs($FH, <... headers_list() ...>)
+          # Assign-then-write: headers_list() captured to a variable first,
+          # written later in the same function.
+          - pattern: |
+              $HEADERS = headers_list();
+              ...
+              file_put_contents($FILE, <... $HEADERS ...>);
+          - pattern: |
+              $HEADERS = headers_list();
+              ...
+              fwrite($FH, <... $HEADERS ...>);
+          - pattern: |
+              $HEADERS = headers_list();
+              ...
+              fputs($FH, <... $HEADERS ...>);
+      # Fix-derived FP guards: any array-filtering call, or an explicit
+      # "Set-Cookie"/"cookie" string check, anywhere in the enclosing
+      # function is treated as evidence the captured header list is being
+      # screened before persistence.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            array_filter(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            preg_grep(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... stripos($X, "Set-Cookie") ...>;
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... strpos($X, "Set-Cookie") ...>;
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... stripos($X, "cookie") ...>;
+            ...
+          }
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"

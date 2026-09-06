@@ -1,0 +1,33 @@
+rules:
+  - id: claude.php.wordpress.sqli.esc-attr-as-sql-sanitizer
+    languages: [php]
+    severity: HIGH
+    message: |
+      esc_attr() is used to sanitize a value inside a $wpdb query method.
+      esc_attr() encodes HTML entities (&, <, >, ", ') only — parentheses,
+      semicolons, SQL functions (SLEEP, CASE, BENCHMARK), and boolean
+      operators (OR, AND) pass through UNCHANGED. This provides ZERO SQL
+      injection protection (CWE-89).
+      Use $wpdb->prepare() with %s/%d/%f placeholders instead.
+      Reference: AdRotate plugin FG-VD-19-092 — esc_attr() used on GET
+      parameter in SQL WHERE clause allowed arbitrary SQL execution.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://www.fortinet.com/blog/threat-research/wordpress-plugin-sql-injection-vulnerability
+    patterns:
+      - pattern-either:
+          - pattern: $wpdb->query(<... esc_attr($X) ...>)
+          - pattern: $wpdb->get_results(<... esc_attr($X) ...>)
+          - pattern: $wpdb->get_row(<... esc_attr($X) ...>)
+          - pattern: $wpdb->get_var(<... esc_attr($X) ...>)
+          - pattern: $wpdb->get_col(<... esc_attr($X) ...>)
+      - pattern-not-inside: $wpdb->prepare(...)

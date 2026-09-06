@@ -1,0 +1,173 @@
+rules:
+  - id: claude.php.wordpress.file.directory-archive-no-containment-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function builds a filesystem directory path by concatenating a
+      WordPress root/base-directory helper (get_theme_root(),
+      get_stylesheet_directory(), plugin_dir_path(), WP_PLUGIN_DIR,
+      WP_CONTENT_DIR, ABSPATH, or an uploads-dir array/basedir) with its own
+      parameter, then hands the resulting path — unchanged — to another
+      function call, typically a directory-archiving (zip-creation) or
+      recursive-copy helper, with no basename()/sanitize_file_name()/
+      realpath()-containment/validate_file() check on the parameter and no
+      capability check gating the function (CWE-22). A caller that passes
+      request-derived data (a theme/plugin slug, a POSTed array value, a
+      REST route param) through this parameter can substitute
+      "../../../../etc" (or any other relative/absolute path) so the callee
+      operates on an arbitrary directory elsewhere on the host — commonly
+      resulting in its full recursive contents being archived into a
+      downloadable ZIP and disclosed.
+      Reject any parameter value that is not a bare directory name
+      (wp_basename($PARAM) !== $PARAM) or canonicalize with realpath() and
+      verify the result still starts within the intended base directory
+      before use; also gate the function with a capability check
+      appropriate to the operation.
+    metadata:
+      category: security
+      cwe: "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/22.html
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — unsanitized param concatenated into a root dir, handed to a helper:
+      #   function zip_theme($stylesheet) {
+      #       $dir = get_theme_root() . '/' . $stylesheet;
+      #       zip_directory($dir, $uploads);
+      #   }
+      #   -> No basename()/realpath() containment check on $stylesheet, no
+      #      capability check; a "../../../../etc" value zips an arbitrary
+      #      directory into a downloadable archive.
+      #
+      # FALSE POSITIVE — parameter reduced to a bare name first:
+      #   function zip_theme($stylesheet) {
+      #       $stylesheet = basename($stylesheet);
+      #       $dir = get_theme_root() . '/' . $stylesheet;
+      #       zip_directory($dir, $uploads);
+      #   }
+      #
+      # FALSE POSITIVE — function requires a capability check:
+      #   function zip_theme($stylesheet) {
+      #       if (!current_user_can('manage_options')) { return; }
+      #       $dir = get_theme_root() . '/' . $stylesheet;
+      #       zip_directory($dir, $uploads);
+      #   }
+      #
+      # CONTEXT CHECK:
+      #   1. Is $PARAM traceable to request data (POST/GET array value,
+      #      REST route param) at any caller in the plugin?
+      #   2. Does the callee recurse/archive the WHOLE directory rather than
+      #      operate on a single already-validated file?
+      #   3. Is the resulting archive later downloadable (predictable
+      #      uploads path, REST/AJAX handler)?
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $FUNC($PARAM, $...REST) {
+                ...
+                $DIR = $BASE . $SEP . $PARAM;
+                ...
+                if ($CALLEE($DIR, $...ARGS)) {
+                  ...
+                }
+                ...
+              }
+          - pattern: |
+              function $FUNC($PARAM, $...REST) {
+                ...
+                $DIR = $BASE . $SEP . $PARAM;
+                ...
+                $CALLEE($DIR, $...ARGS);
+                ...
+              }
+          - pattern: |
+              function $FUNC($PARAM, $...REST) {
+                ...
+                $DIR = $BASE . $PARAM;
+                ...
+                if ($CALLEE($DIR, $...ARGS)) {
+                  ...
+                }
+                ...
+              }
+          - pattern: |
+              function $FUNC($PARAM, $...REST) {
+                ...
+                $DIR = $BASE . $PARAM;
+                ...
+                $CALLEE($DIR, $...ARGS);
+                ...
+              }
+      - metavariable-pattern:
+          metavariable: $BASE
+          patterns:
+            - pattern-either:
+                - pattern: get_theme_root(...)
+                - pattern: get_stylesheet_directory(...)
+                - pattern: get_template_directory(...)
+                - pattern: WP_PLUGIN_DIR
+                - pattern: WP_CONTENT_DIR
+                - pattern: ABSPATH
+                - pattern: plugin_dir_path(...)
+                - pattern: dirname(plugin_dir_path(...))
+                - pattern: trailingslashit(plugin_dir_path(...))
+                - pattern: trailingslashit(dirname(plugin_dir_path(...)))
+                - pattern: trailingslashit(get_theme_root(...))
+                - pattern: $X['basedir']
+                - pattern: $X['uploads']
+                - pattern: wp_upload_dir()['basedir']
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (!current_user_can(...)) { ... }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $PARAM = basename($PARAM);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $PARAM = sanitize_file_name($PARAM);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $PARAM = sanitize_key($PARAM);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $PARAM = sanitize_title($PARAM);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $PARAM = preg_replace(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            realpath(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            validate_file(...);
+            ...
+          }

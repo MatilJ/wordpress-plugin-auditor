@@ -1,0 +1,81 @@
+rules:
+  - id: claude.php.wordpress.sqli.is-numeric-ternary-unescaped-quote-wrap
+    languages: [php]
+    severity: HIGH
+    message: |
+      A hand-rolled WHERE/HAVING-clause value builder decides how to quote a
+      value using only an is_numeric()-style ternary: when the value is
+      numeric it is spliced in bare, otherwise it is wrapped between a
+      literal pair of single quotes built by string concatenation
+      ("'" . $value . "'") — with NO escaping function (esc_sql(),
+      addslashes(), $wpdb->prepare()) ever applied to that same value
+      anywhere in the expression. A single quote character embedded in the
+      value breaks straight out of the manually built literal and injects
+      arbitrary SQL (CWE-89) once this fragment reaches a $wpdb execution
+      call.
+
+      This remains exploitable even when the resulting fragment is later
+      embedded as literal text inside the FORMAT-STRING (first) argument of
+      $wpdb->prepare() — prepare() only escapes its own %s/%d/%i placeholder
+      arguments, never text already baked into the template it receives.
+
+      This shape is a recurring anti-pattern in custom "array of conditions
+      -> WHERE clause string" query-builder helpers that many WordPress
+      plugins ship as an in-house micro-ORM: the numeric/non-numeric branch
+      is meant to look like it "handles quoting safely" but the non-numeric
+      branch never actually escapes the value's content, only wraps it.
+
+      Fix: replace the manual quote-wrap with $wpdb->prepare('%s', $value)
+      for the string branch (and '%d' for the numeric branch) rather than a
+      literal-quote concatenation or interpolation.
+
+      TRIAGE GUIDANCE
+      ───────────────────────────────────────────────────────────────────
+      TRUE POSITIVE indicators:
+        - The quoted result is later concatenated/interpolated into a WHERE/
+          HAVING clause string handed to $wpdb->query()/get_row()/
+          get_results()/get_var()/get_col() — directly, through a custom
+          query-builder wrapper, or as literal text inside the format-string
+          argument of $wpdb->prepare().
+        - The value passed to is_numeric() (or the ternary condition)
+          originates from request-controlled input somewhere upstream — this
+          is commonly several function calls and files away from the
+          ternary itself (an array of filter conditions assembled in a
+          controller, consumed by a query-builder class elsewhere), not
+          usually visible to intraprocedural taint tracking.
+
+      FALSE POSITIVE indicators:
+        - The condition and both ternary branches do not all reference the
+          exact same value expression (e.g. the quoted branch wraps
+          esc_sql($value)/$wpdb->prepare(...)/absint($value) instead of the
+          bare value) — already escaped before the quote-wrap.
+        - The value is a plugin-defined constant or enum, never request- or
+          storage-influenced.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+      # Reusing the SAME metavariable ($V) in the condition, the bare
+      # true-branch, and the quoted false-branch forces all three occurrences
+      # to be textually identical — this alone excludes the fixed shape
+      # (where the quoted branch wraps a prepare()/esc_sql() call instead of
+      # the bare value) without needing extra pattern-not clauses.
+    patterns:
+      - pattern-either:
+          - pattern: |
+              is_numeric($V) ? $V : "'" . $V . "'"
+          - pattern: |
+              !is_numeric($V) ? "'" . $V . "'" : $V
+      - pattern-not: |
+          is_numeric($V) ? $V : "'" . esc_sql($V) . "'"
+      - pattern-not: |
+          !is_numeric($V) ? "'" . esc_sql($V) . "'" : $V

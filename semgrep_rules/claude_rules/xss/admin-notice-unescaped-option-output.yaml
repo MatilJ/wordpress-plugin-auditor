@@ -1,0 +1,136 @@
+rules:
+  - id: claude.php.wordpress.xss.admin-notice-unescaped-option-output
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A stored option value or request parameter flows into an HTML output
+      sink (echo/print/printf) without output escaping. This rule does not
+      itself verify the containing function is registered on admin_notices —
+      that hook context (if present) is the highest-severity case, since
+      admin notices render on EVERY wp-admin page load for ALL admin users,
+      but the same unescaped-echo pattern is flagged regardless of hook.
+      Manually confirm the render context and reachable auth floor before
+      framing severity.
+
+      If the stored value is writable by a lower-privilege user (e.g., via
+      a settings page with insufficient capability check, or via a form
+      submission), this is Stored XSS (CWE-79).
+
+      Common patterns:
+        - printf('<div class="notice"><p>%s</p></div>', get_option('x'))
+        - <input value="<?php echo get_option('field'); ?>">
+        - echo $_GET['message'] in an admin notice after form submission
+        - echo 'Label: '.$service->getOption('last_error') where a wrapper/
+          service-class method (get_option/getOption/get_setting/etc. — a
+          thin accessor over the underlying option storage) stands in for
+          the bare get_option() call
+
+      Real-world CVE: CVE-2026-3362 (Short Comment Filter) — settings field
+      stored via update_option(), rendered unescaped in admin notice input
+      value attribute.
+
+      Fix: escape with esc_html() for text content, esc_attr() for
+      attribute values.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+    pattern-sources:
+      - pattern-either:
+          - pattern: get_option(...)
+          - pattern: get_post_meta(...)
+          - pattern: get_user_meta(...)
+          - pattern: get_term_meta(...)
+          - pattern: get_transient(...)
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+      # Wrapper/service-class accessor over option/setting storage. Many
+      # larger plugins wrap get_option()/update_option() behind a Context,
+      # Container, or Settings service object for testability — the intrinsic
+      # source is unchanged (a persisted, potentially attacker-influenced
+      # value), only the call surface differs from the bare WP function.
+      - patterns:
+          - pattern: $OBJ->$METHOD(...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: "(?i)^(get_option|getoption|option_get|optionget|get_opt|getopt|get_setting|getsetting|setting_get)$"
+    pattern-sinks:
+      - pattern-either:
+          - pattern: echo $X;
+          - pattern: print $X;
+          - pattern: print($X);
+          - pattern: printf($F, ...)
+          - patterns:
+              - pattern: echo "...$X...";
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: esc_html(...)
+          - pattern: esc_attr(...)
+          - pattern: esc_url(...)
+          - pattern: esc_js(...)
+          - pattern: esc_textarea(...)
+          - pattern: esc_html__(...)
+          - pattern: esc_attr__(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          - pattern: sanitize_text_field(...)
+          - pattern: sanitize_textarea_field(...)
+          - pattern: strip_tags(...)
+          - pattern: wp_strip_all_tags(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          - pattern: wp_json_encode(...)
+          - pattern: json_encode(...)
+          - pattern: wp_send_json(...)
+          - pattern: wp_send_json_success(...)
+          - pattern: wp_send_json_error(...)
+          # wp_text_diff() internally routes every line through htmlspecialchars()
+          # (WP_Text_Diff_Renderer_Table::_lines()) before assembling the returned
+          # diff table markup — the return value cannot carry raw HTML metacharacters.
+          - pattern: wp_text_diff(...)
+          # human_time_diff() (wp-includes/formatting.php) computes its return
+          # value purely from abs()/round()/(int) arithmetic on the two
+          # timestamp arguments, formatted into a fixed set of translated unit
+          # words ("N second(s)"/"N hour(s)"/...) — the tainted argument can
+          # never re-appear verbatim in the output, so it cannot carry markup.
+          - pattern: human_time_diff(...)
+          # Fully-qualified (leading-backslash) call forms of the same sanitizers.
+          # Namespaced plugins commonly invoke global WP functions as \esc_html(...)
+          # etc.; Semgrep does not match a bare pattern against a FQN call, so each
+          # output escaper needs an explicit backslash-prefixed counterpart.
+          - pattern: \esc_html(...)
+          - pattern: \esc_attr(...)
+          - pattern: \esc_url(...)
+          - pattern: \esc_js(...)
+          - pattern: \esc_textarea(...)
+          - pattern: \esc_html__(...)
+          - pattern: \esc_attr__(...)
+          - pattern: \wp_kses(...)
+          - pattern: \wp_kses_post(...)
+          - pattern: \sanitize_text_field(...)
+          - pattern: \sanitize_textarea_field(...)
+          - pattern: \strip_tags(...)
+          - pattern: \wp_strip_all_tags(...)
+          - pattern: \wp_json_encode(...)
+          - pattern: \wp_text_diff(...)
+          - pattern: \human_time_diff(...)

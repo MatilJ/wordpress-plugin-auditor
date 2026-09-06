@@ -1,0 +1,71 @@
+rules:
+  - id: claude.php.wordpress.file-upload.multi-file-index-zero-only-validation
+    languages: [php]
+    severity: HIGH
+    message: |
+      A file-type/extension/MIME validation check reads only literal index
+      [0] of a $_FILES upload field ($_FILES[...]['name'][0], ['tmp_name'][0],
+      or ['type'][0]) — either directly, or via a local variable assigned
+      from $_FILES[...] earlier in the same function. In PHP, a $_FILES field
+      only takes this array shape when the HTML input uses array-style naming
+      (e.g. name="files[]"), so the field natively accepts MULTIPLE files in
+      one request. Gating the type/extension check on index 0 alone means
+      every additional file submitted in the same request (index 1, 2, ...)
+      never passes through the check at all. If later processing operates on
+      the full field instead of being hard-restricted to index 0 — a loop
+      over the same tmp_name/name array, or hand-off to a generic multi-file
+      upload/save routine or bundled upload library — an attacker can submit
+      one benign file first (satisfying the check) and a dangerous file
+      (e.g. a .php script) at a later index that is written to disk
+      unchecked (CWE-434).
+
+      TRIAGE:
+        1. Confirm the base is really $_FILES-derived (directly, or copied
+           into a local variable earlier in the same function).
+        2. Confirm downstream processing is NOT itself hard-restricted to
+           index 0 only — look for a foreach/for loop over the same field's
+           tmp_name/name array, or a constructor/function call handed the
+           raw multi-file $_FILES data (an upload-handler class/library,
+           wp_handle_upload() invoked per array element, etc.). If every
+           code path downstream only ever touches index 0, this is a false
+           positive.
+        3. Confirm there is no earlier guard rejecting requests where more
+           than one file was submitted for this field (e.g.
+           count($_FILES[...]['name']) > 1 -> die()). Such a guard makes the
+           single-index check safe -> FP.
+        4. Fix: validate every index up to count($_FILES[...]['name']) (a
+           bounded loop) before any file at any index is saved/moved, not
+           just index 0.
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/434.html
+        - https://www.php.net/manual/en/features.file-upload.multiple.php
+    patterns:
+      - pattern-either:
+          - pattern: $_FILES[$KEY]['name'][0]
+          - pattern: $_FILES[$KEY]['tmp_name'][0]
+          - pattern: $_FILES[$KEY]['type'][0]
+          - patterns:
+              - pattern-inside: |
+                  function $FUNC(...) {
+                    ...
+                    $VAR = <... $_FILES[$KEY] ...>;
+                    ...
+                  }
+              - pattern-either:
+                  - pattern: $VAR['name'][0]
+                  - pattern: $VAR['tmp_name'][0]
+                  - pattern: $VAR['type'][0]
+      - pattern-not-inside: |
+          for ($INIT; $COND; $STEP) { ... }
+      - pattern-not-inside: |
+          foreach ($ITER as $ITEM) { ... }

@@ -1,0 +1,75 @@
+rules:
+  - id: claude.php.wordpress.file-upload.request-controlled-extension-allowlist
+    languages: [php]
+    severity: HIGH
+    message: |
+      The list of file extensions/types accepted by an upload handler is
+      taken directly from request data ($_POST/$_REQUEST/$_GET) — typically
+      with a hardcoded default used only when the parameter is empty — and
+      that attacker-suppliable value is then used as the allow-list in an
+      in_array() extension check (CWE-434). Because the client controls
+      which extensions are "allowed", an attacker can submit their own list
+      to accept file types the form was never configured to permit. A
+      separate hardcoded blacklist elsewhere does not fix this: the allowed
+      set itself must come from a fixed, non-request-derived array.
+
+      TRIAGE:
+        1. Confirm the variable checked by in_array() is the SAME one
+           assigned from $_POST/$_REQUEST/$_GET earlier in the function
+           (reassignment via explode()/array_map()/trim() in between is
+           still the tainted value, not a fix).
+        2. Check whether the extension is ALSO required to be a member of
+           a separate hardcoded array literal (e.g. `in_array($ext,
+           $whitelist) && `) in the same boolean check — if so, dismiss.
+        3. Confirm the uploaded file is actually saved (move_uploaded_file,
+           wp_handle_upload) rather than just previewed/validated with no
+           persistence.
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/434.html
+        - https://owasp.org/Top10/A04_2021-Insecure_Design/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-inside: |
+                  function $FN(...) {
+                    ...
+                    $ALLOWED = $_POST[$K];
+                    ...
+                  }
+              - pattern: in_array($EXT, $ALLOWED, ...)
+          - patterns:
+              - pattern-inside: |
+                  function $FN(...) {
+                    ...
+                    $ALLOWED = $_REQUEST[$K];
+                    ...
+                  }
+              - pattern: in_array($EXT, $ALLOWED, ...)
+          - patterns:
+              - pattern-inside: |
+                  function $FN(...) {
+                    ...
+                    $ALLOWED = $_GET[$K];
+                    ...
+                  }
+              - pattern: in_array($EXT, $ALLOWED, ...)
+      # The official fix intersects the request-derived list with a
+      # hardcoded array literal in the same boolean check — dismiss when
+      # that guard is present, regardless of argument order.
+      - pattern-not-inside: in_array($EXT, $ALLOWED, ...) && in_array($EXT, $HARDLIST, ...)
+      - pattern-not-inside: in_array($EXT, $HARDLIST, ...) && in_array($EXT, $ALLOWED, ...)

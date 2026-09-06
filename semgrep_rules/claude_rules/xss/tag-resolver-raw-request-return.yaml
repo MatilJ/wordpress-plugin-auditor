@@ -1,0 +1,136 @@
+rules:
+  - id: claude.php.wordpress.xss.tag-resolver-raw-request-return
+    languages: [php]
+    severity: HIGH
+    message: |
+      A dynamic-tag / merge-tag / template-tag resolver callback returns a
+      raw request superglobal value ($_REQUEST/$_GET/$_SERVER/$_COOKIE) with
+      no output escaping (CWE-79). Plugins that let a site owner reference
+      these tags inside admin-authored templates, success messages, or
+      other rendered HTML (a common feature in form builders and page
+      builders) typically echo the resolved value at render time without
+      re-escaping it, because the tag-parsing engine's own responsibility
+      is usually limited to preventing re-parsing of its own delimiter
+      characters — not HTML-encoding output. This will not surface via a
+      simple superglobal-to-echo taint rule: the tainted value is returned
+      from this resolver, then spliced back into a larger template string
+      by the tag engine before the eventual echo, several call frames away.
+      Trace forward from this resolver to every template/content field the
+      engine populates and confirm whether it is echoed unescaped.
+
+      A second variant of this same engine shape reassigns the template
+      string in place via str_replace(), wrapping the superglobal value in
+      sanitize_text_field() before substitution. sanitize_text_field() strips
+      HTML tags but does NOT encode quotes/backslashes — adequate for a plain
+      HTML text node, but not for a <script> body or an unquoted/single-quoted
+      HTML attribute the engine's own downstream sink may use. Confirmed TP:
+      a page-builder's {{GET:name}}/{{COOKIE:name}} dynamic-placeholder token
+      handler substituting into a Custom-JS <script> echo sink several call
+      frames away — same "trace forward to the real sink" caveat applies.
+
+      A third variant stores the resolved value into an array slot instead
+      of returning it or splicing it via str_replace() — a shape used by
+      shortcode/gallery merge-tag engines that resolve one placeholder per
+      array key before handing the whole array to a template substitution
+      pass. Here the superglobal is wrapped in wp_kses($X, 'post') (a tag-
+      syntax filter, not an attribute-safe encoder — it does not touch a
+      literal quote) and optionally re-wrapped in sanitize_text_field().
+      Confirmed TP: a gallery shortcode's request-echoing merge tag resolved
+      this way, later substituted into an href attribute built by a URL
+      escaper called in the wrong context (esc_url_raw()/sanitize_url()
+      instead of esc_url() — see the sibling esc-url-raw-html-attribute-
+      misuse rule for that half of the chain).
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function (...) {
+                return $SUPER[$KEY];
+              }
+          - pattern: |
+              function (...) {
+                return $OBJ->$METHOD($SUPER, $KEY);
+              }
+          # str_replace-based in-place substitution variant: the superglobal
+          # value is wrapped in sanitize_text_field() (an HTML-text-node-only
+          # sanitizer) then spliced into the template string via str_replace(),
+          # rather than returned directly.
+          - pattern: |
+              $VALUE = str_replace($TOKEN, sanitize_text_field($SUPER[$KEY]), $VALUE);
+          - pattern: |
+              $VALUE = str_replace($TOKEN, sanitize_text_field(wp_unslash($SUPER[$KEY])), $VALUE);
+          # Two-step form: the sanitized value is assigned to an intermediate
+          # variable on a prior line before the str_replace() call, rather
+          # than inlined as a direct argument.
+          - pattern: |
+              $SANITIZED = sanitize_text_field($SUPER[$KEY]);
+              ...
+              $VALUE = str_replace($TOKEN, $SANITIZED, $VALUE);
+          - pattern: |
+              $SANITIZED = sanitize_text_field(wp_unslash($SUPER[$KEY]));
+              ...
+              $VALUE = str_replace($TOKEN, $SANITIZED, $VALUE);
+          # wp_kses()-based assignment variant: the superglobal value is
+          # wrapped in wp_kses($X, $CTX) — an HTML-tag-syntax filter that
+          # leaves quote/backslash characters untouched, not an attribute-
+          # safe encoder — and assigned to an intermediate variable. This is
+          # an earlier point in the same "resolver assigns/returns a
+          # superglobal-derived value with only a tag-stripping/text-field
+          # sanitizer applied" engine shape; a nested-conditional chain
+          # commonly separates this assignment from the eventual downstream
+          # sink (array-element write, further sanitize_text_field() call,
+          # template substitution) by enough control flow that a single
+          # linear ellipsis pattern cannot reliably span it — trace forward
+          # manually per the guidance above.
+          - pattern: $RECORD = wp_kses(wp_unslash($SUPER[$KEY]), $CTX);
+          - pattern: $RECORD = wp_kses($SUPER[$KEY], $CTX);
+      - metavariable-pattern:
+          metavariable: $SUPER
+          patterns:
+            - pattern-either:
+                - pattern: $_REQUEST
+                - pattern: $_GET
+                - pattern: $_SERVER
+                - pattern: $_COOKIE
+      # Direct-index shape wrapped in a known escaper at the return site.
+      - pattern-not: |
+          function (...) {
+            return esc_html($SUPER[$KEY]);
+          }
+      - pattern-not: |
+          function (...) {
+            return esc_attr($SUPER[$KEY]);
+          }
+      - pattern-not: |
+          function (...) {
+            return sanitize_text_field($SUPER[$KEY]);
+          }
+      # Method-call shape wrapped in a known escaper at the return site.
+      - pattern-not: |
+          function (...) {
+            return esc_html($OBJ->$METHOD($SUPER, $KEY));
+          }
+      - pattern-not: |
+          function (...) {
+            return esc_attr($OBJ->$METHOD($SUPER, $KEY));
+          }
+      - pattern-not: |
+          function (...) {
+            return sanitize_text_field($OBJ->$METHOD($SUPER, $KEY));
+          }
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"

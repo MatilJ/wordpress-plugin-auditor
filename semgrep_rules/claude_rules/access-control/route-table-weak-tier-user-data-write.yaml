@@ -1,0 +1,93 @@
+rules:
+  # Some WordPress plugins build their own lightweight REST route table
+  # instead of calling register_rest_route() directly: an array literal per
+  # endpoint holding 'callback' (an [$object, 'method'] pair) and
+  # 'permission_callback' set to a short symbolic string (e.g. 'user',
+  # 'admin', '') that a separate dispatcher resolves to a real permission
+  # function. Because the tier value is a bare string rather than an actual
+  # callable, it is easy to under-scope: a bare "any authenticated user" tier
+  # (commonly named 'user'/'subscriber'/'member'/etc., resolving to nothing
+  # stronger than is_user_logged_in()) can end up gating an endpoint whose
+  # callback method performs a user-data/meta mutation. Wordfence CVE class:
+  # a Subscriber+ reaching a "update account data" style handler that writes
+  # attacker-named meta keys — including the capabilities/role meta key —
+  # because the route table entry used the weak tier instead of an
+  # admin/capability-gated one.
+  - id: claude.php.wordpress.access-control.route-table-weak-tier-user-data-write
+    languages: [php]
+    severity: HIGH
+    message: |
+      A custom route-table array entry gates a user-data-mutation-named
+      callback ($CALLBACK) behind a bare, symbolic permission-tier string
+      ($PERM) rather than an admin/capability-checked tier (CWE-862). In
+      plugins that implement their own lightweight REST route registry (an
+      array of endpoint definitions resolved by a separate dispatcher instead
+      of calling register_rest_route() directly), a short tier token like
+      'user'/'subscriber'/'member' commonly resolves to nothing more than
+      is_user_logged_in() — any authenticated user, including Subscribers,
+      passes it. When the gated callback writes user data or meta (its name
+      contains an update/save/set/edit/change verb together with a
+      user/profile/account/meta/data/role/capability noun), this is
+      functionally Missing Authorization: a low-privileged user reaches a
+      handler that can write meta keys the caller chooses, up to and
+      including the WordPress capabilities/role meta key, yielding
+      privilege escalation to Administrator (CWE-266).
+
+      TRIAGE:
+      1. Find the dispatcher that resolves $PERM (usually a switch/match on
+         the same string in a router base class) and read what the tier
+         actually checks. If it calls current_user_can()/user_can() with a
+         real capability, this is a false positive.
+      2. Read $CALLBACK's body. Confirm it writes meta/options/user data
+         using a caller-supplied key or value with no allow-list — that is
+         the impactful combination. A callback that only reads/returns data
+         is lower severity (still audit-worthy if it discloses PII).
+      3. Compare against sibling route-table entries for the same plugin —
+         if state-changing endpoints elsewhere use an 'admin'/capability tier
+         and this one alone uses the weak tier, that asymmetry is a strong
+         signal the weak tier here is unintended.
+
+      Fix: gate the entry with the same admin/capability-checked tier used
+      by other state-changing endpoints in the table (e.g. 'admin', or a
+      tier whose dispatcher calls current_user_can('manage_options') or a
+      narrower capability appropriate to the action).
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-266: Incorrect Privilege Assignment"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/#permissions-callback
+        - https://developer.wordpress.org/reference/functions/is_user_logged_in/
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://cwe.mitre.org/data/definitions/266.html
+    patterns:
+      - pattern-either:
+          - pattern: |
+              [..., 'callback' => [$OBJ, '$CALLBACK'], ..., 'permission_callback' => '$PERM', ...]
+          - pattern: |
+              [..., "callback" => [$OBJ, "$CALLBACK"], ..., "permission_callback" => "$PERM", ...]
+          - pattern: |
+              array(..., 'callback' => array($OBJ, '$CALLBACK'), ..., 'permission_callback' => '$PERM', ...)
+          - pattern: |
+              array(..., "callback" => array($OBJ, "$CALLBACK"), ..., "permission_callback" => "$PERM", ...)
+      # The callback method name must denote a mutation (action verb) ...
+      - metavariable-regex:
+          metavariable: $CALLBACK
+          regex: (?i).*(update|save|set|edit|change|modify).*
+      # ... of user-data-shaped state (target noun).
+      - metavariable-regex:
+          metavariable: $CALLBACK
+          regex: (?i).*(user|profile|account|meta|data|role|capabilit).*
+      # The permission tier must be a bare weak/any-authenticated-user token,
+      # not an admin/capability-implying tier name.
+      - metavariable-regex:
+          metavariable: $PERM
+          regex: (?i)^(user|subscriber|member|customer|authenticated|logged_?in|any|guest|public)$

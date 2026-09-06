@@ -1,0 +1,45 @@
+rules:
+  - id: claude.php.wordpress.sqli.raw-query-key-unprepared-wpdb-execution
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      A value read from an array key literally named query/sql (e.g.
+      $options['query'], $params['sql']) is passed directly and unwrapped as
+      the argument to a $wpdb execution method, with no $wpdb->prepare()
+      anywhere in between. This is not injection into a query — the array
+      element IS the complete SQL statement, sourced from a request
+      parameter, settings array, or similar externally-named input. Any
+      caller able to set this key controls the entire executed SQL
+      statement, including non-SELECT statements (CWE-89).
+
+      Fix: never accept a raw SQL string as an API/settings parameter. If a
+      dynamic query is genuinely required, build it from an allowlist of
+      column/table names and bind all values via $wpdb->prepare().
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/classes/wpdb/#protect-queries-against-sql-injection-attacks
+        - https://cwe.mitre.org/data/definitions/89.html
+    patterns:
+      - pattern-either:
+          - pattern: $WPDB->query($ARR[$KEY])
+          - pattern: $WPDB->get_results($ARR[$KEY])
+          - pattern: $WPDB->get_row($ARR[$KEY])
+          - pattern: $WPDB->get_var($ARR[$KEY])
+          - pattern: $WPDB->get_col($ARR[$KEY])
+          - pattern: $WPDB->query($ARR[$KEY], ...)
+          - pattern: $WPDB->get_results($ARR[$KEY], ...)
+          - pattern: $WPDB->get_row($ARR[$KEY], ...)
+          - pattern: $WPDB->get_var($ARR[$KEY], ...)
+          - pattern: $WPDB->get_col($ARR[$KEY], ...)
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i)^(['"])(raw_)?(sql|query)(_string)?\1$

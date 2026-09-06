@@ -1,0 +1,107 @@
+rules:
+  - id: claude.php.wordpress.access-control.foreach-user-input-to-update-option
+    languages: [php]
+    severity: HIGH
+    message: |
+      A foreach loop iterates over user-controlled input and calls
+      update_option() or add_option() with the loop key as the option name.
+      This allows an attacker to write to arbitrary wp_options rows —
+      including users_can_register, default_role, siteurl, and home —
+      enabling full site takeover (CWE-862 / CWE-915).
+
+      This pattern is functionally equivalent to a user-controlled option key
+      but spread across multiple update_option() calls (one per iteration),
+      making it harder to detect with simple taint tracking.
+
+      TRIAGE:
+      1. Trace $ARRAY to its source — is it directly from $_POST/$_REQUEST
+         or an intermediate variable assigned from user input (json_decode,
+         wp_unslash, etc.)?
+      2. Check for an allowlist filter before or inside the loop
+         (in_array, array_intersect_key, isset against hardcoded keys).
+      3. Verify capability and nonce checks exist before the loop.
+      4. Even if the VALUE is sanitized, attacker-controlled KEYS = critical.
+
+      Fix: validate keys against a strict allowlist before writing:
+        $allowed = ['setting_a', 'setting_b'];
+        foreach ($data as $key => $value) {
+            if (in_array($key, $allowed, true)) {
+                update_option($prefix . $key, sanitize_text_field($value));
+            }
+        }
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-915: Improperly Controlled Modification of Dynamically-Determined Object Attributes"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Arbitrary Options Update"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/update_option/
+        - https://owasp.org/www-community/vulnerabilities/Mass_Assignment
+    patterns:
+      - pattern-either:
+          - pattern: |
+              foreach ($_POST as $KEY => $VALUE) {
+                ...
+                update_option($KEY, ...);
+                ...
+              }
+          - pattern: |
+              foreach ($_REQUEST as $KEY => $VALUE) {
+                ...
+                update_option($KEY, ...);
+                ...
+              }
+          - pattern: |
+              foreach ($_GET as $KEY => $VALUE) {
+                ...
+                update_option($KEY, ...);
+                ...
+              }
+          - pattern: |
+              foreach ($_POST as $KEY => $VALUE) {
+                ...
+                add_option($KEY, ...);
+                ...
+              }
+          - pattern: |
+              foreach ($_REQUEST as $KEY => $VALUE) {
+                ...
+                add_option($KEY, ...);
+                ...
+              }
+          - pattern: |
+              foreach ($_POST[$INDEX] as $KEY => $VALUE) {
+                ...
+                update_option($KEY, ...);
+                ...
+              }
+          - pattern: |
+              foreach ($_REQUEST[$INDEX] as $KEY => $VALUE) {
+                ...
+                update_option($KEY, ...);
+                ...
+              }
+          - pattern: |
+              foreach ($_POST as $KEY => $VALUE) {
+                ...
+                update_site_option($KEY, ...);
+                ...
+              }
+          - pattern: |
+              foreach ($_REQUEST as $KEY => $VALUE) {
+                ...
+                update_site_option($KEY, ...);
+                ...
+              }
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"

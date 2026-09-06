@@ -1,0 +1,176 @@
+rules:
+  - id: claude.php.wordpress.file-write-delete.weak-sanitizer-request-param-to-write-call
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A $_GET/$_POST/$_REQUEST value — or a value read via a framework
+      Request-wrapper convenience accessor such as $request->all() (common
+      in plugins that bundle a lightweight routing/request library) —
+      flows directly, or through a weak text-only sanitizer
+      (sanitize_text_field()/sanitize_textarea_field(), wc_clean(),
+      optionally wp_unslash()-wrapped, or a plain string concatenation
+      onto a base directory such as "$BASE . '/' . $tainted") into a
+      filesystem write/create/move operation: mkdir(), wp_mkdir_p(), fopen()
+      opened in a write/append/create mode ('w', 'wb', 'a', 'ab', 'x',
+      'xb', or any '+' variant of those), file_put_contents(),
+      move_uploaded_file(), or rename(). None of the wrapper sanitizers
+      listed strip '/', '\\', or '..' sequences, so a value such as
+      "../../../../wp-content/some-target" survives them unchanged and
+      lets the attacker choose the directory that gets created, the file
+      that gets written, or (for rename()) the source/destination of an
+      arbitrary file MOVE, entirely outside the plugin's intended
+      upload/export directory. This is a request-controlled path-traversal
+      arbitrary directory-creation / file-write / file-move primitive
+      (CWE-22/CWE-73). CVE-2025-2941 (Drag and Drop Multiple File Upload
+      for WooCommerce <= 1.1.4): a POST array of "already uploaded"
+      filenames (wc-upload-file[]) is weakly sanitized per-element with
+      wc_clean(wp_unslash($file)), concatenated onto the plugin's upload
+      directory with no realpath()/containment check, and handed straight
+      to rename() as the SOURCE path on an unauthenticated request --
+      "../../../../wp-config.php" traverses out of the upload directory
+      and the file is relocated into it.
+
+      Tracked with taint (dataflow) analysis because the number of
+      intermediate hops (ternary fallback to a stored option, an
+      intermediate directory-join variable reused across a mkdir() call
+      and a later fopen()/file_put_contents() call) is plugin-specific
+      and unbounded — the source and the write call are frequently several
+      statements and one conditional branch apart rather than adjacent.
+
+      TRIAGE:
+        1. Confirm the flagged value is actually used to build the
+           directory/file *path* argument of the write call, not an
+           unrelated value that merely happens to reach the same
+           statement (e.g. file content/data being written, not the
+           destination path).
+        2. Confirm no sanitize_file_name(), basename(), wp_basename(),
+           sanitize_key(), realpath()+prefix-containment check, or a
+           same-function call whose name reads as a path/key/filename
+           validator applies to the value anywhere between the request
+           read and the write call — any of these neutralizes the
+           traversal.
+        3. Confirm the write call is reachable without a capability check
+           that would exclude ordinary/unauthenticated users (a nonce
+           alone does not count if the form/AJAX action embedding it is
+           reachable by unauthenticated or low-privilege requests).
+        4. A hardcoded literal directory name (no variable/concatenation
+           in the path argument) is not a match for this class — the fix
+           for this bug class is typically to remove the user-influenced
+           path segment entirely and hardcode the destination directory.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+        - "CWE-73: External Control of File Name or Path"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Arbitrary File/Directory Write"
+      technology: [php, wordpress]
+      references:
+        - "https://cwe.mitre.org/data/definitions/22.html"
+        - "https://cwe.mitre.org/data/definitions/73.html"
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_POST
+          - pattern: $_GET
+          - pattern: $_REQUEST
+          # Framework Request-wrapper "read everything" convenience
+          # accessor (CVE-2025-30834, bit-assist): many plugins bundle a
+          # lightweight routing/request library (Laravel-style naming
+          # convention) whose Request::all() method returns the raw
+          # $_POST/$_GET payload with no path/traversal validation
+          # applied, yet the superglobal itself never appears in the
+          # vulnerable file — only the wrapper call does.
+          - pattern: $REQ->all()
+    pattern-sinks:
+      - pattern: mkdir(...)
+      - pattern: wp_mkdir_p(...)
+      - pattern: file_put_contents(...)
+      - pattern: move_uploaded_file(...)
+      - pattern: rename(...)
+      - patterns:
+          - pattern: fopen($PATH, $MODE)
+          - metavariable-regex:
+              metavariable: $MODE
+              regex: (?i)^['\"](?:[wax]\+?b?)['\"]$
+      # Widened for the common two-method split: an AJAX/request handler
+      # reads and weakly-sanitizes the value, then hands it to a sibling
+      # method/function (same instance, a static helper, or a bare
+      # function) whose name reads as "build/write/save/generate/store/
+      # move an export, report, or uploaded file" — the actual
+      # mkdir()/wp_mkdir_p()/fopen()/move_uploaded_file() call lives
+      # inside that callee, one function-call hop away from the source,
+      # which plain intraprocedural taint tracking does not see through.
+      # Naming-heuristic sink, mirroring the sibling delete-call rule's
+      # approach: a name combining a file/export/report/path noun with a
+      # write/save/generate/build/export/store/move verb. "store"/"move"
+      # added for CVE-2025-30834 (bit-assist): storeFiles()/
+      # moveUploadedFiles()-style delegate names for an upload handler.
+      - patterns:
+          - pattern-either:
+              - pattern: $OBJ->$METHOD(...)
+              - pattern: $CLASS::$METHOD(...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              # A get_/is_/has_/fetch_ prefix is a strong, near-universal PHP/WP
+              # accessor-naming convention signaling a pure read/retrieval method,
+              # which cannot simultaneously be the write-delegate this heuristic
+              # is trying to name -- without the exclusion, a single noun token
+              # (e.g. "export" in "get_export_json") can satisfy both lookaheads
+              # at once on a method that only returns data and never touches disk.
+              regex: (?i)^(?!get_|is_|has_|fetch_)(?=.*(file|export|report|dir|folder|upload|invoice|attachment|path))(?=.*(write|save|generate|create|build|export|store|move)).*$
+    # No pattern-propagators needed: string concatenation and ordinary
+    # assignment already propagate taint by default, which is exactly what
+    # models "$dir = $BASE . '/' . $segment;" reaching mkdir()/fopen() one
+    # or more statements and a conditional branch away from the source, or
+    # the tainted value being passed as one argument of a many-argument
+    # delegate-method call.
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_file_name(...)
+          - pattern: basename(...)
+          - pattern: wp_basename(...)
+          - pattern: realpath(...)
+          # A value returned by a WP-core DB/option/meta read breaks the taint
+          # chain for this rule's purposes: the row/option content is stored
+          # data selected BY the tainted argument (e.g. a lookup ID), not a
+          # transformation OF it, so it is a different value than the request
+          # parameter itself reaching the write-path argument.
+          - pattern: $wpdb->get_results(...)
+          - pattern: $wpdb->get_row(...)
+          - pattern: $wpdb->get_var(...)
+          - pattern: $wpdb->get_col(...)
+          - pattern: get_option(...)
+          - pattern: get_post_meta(...)
+          - pattern: get_user_meta(...)
+          - pattern: get_transient(...)
+          - pattern: get_comment_meta(...)
+          - pattern: get_site_option(...)
+          # sanitize_key() output is [a-z0-9_-] only — no dots or slashes,
+          # so path traversal is impossible.
+          - pattern: sanitize_key(...)
+          # Integer/float coercion — a numeric value cannot contain '/' or
+          # '..'.
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          # Naming-heuristic sanitizer for a same-plugin, custom, strict
+          # allow-list validator: a function whose name combines a
+          # sanitize/validate/clean/safe verb with a key/name/slug/path
+          # noun is, by WordPress-plugin-ecosystem convention, the kind of
+          # helper introduced to close this bug class.
+          - patterns:
+              - pattern: $SANFUNC(...)
+              - metavariable-regex:
+                  metavariable: $SANFUNC
+                  regex: (?i)^(?=.*(saniti[sz]e|valid|clean|safe))(?=.*(key|name|slug|folder|dir|file|path)).*$

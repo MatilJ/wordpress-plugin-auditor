@@ -1,0 +1,142 @@
+rules:
+  - id: claude.php.wordpress.access.rest-user-id-param-override-in-permission-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      An authorization decision is derived from a request-controlled user-ID
+      parameter instead of the authenticated session, granting access based on
+      someone else's identity/capability rather than the caller's (CWE-639 —
+      IDOR / Authorization Bypass).
+
+      Variant A — bind-then-override: a REST permission-check function
+      initialises a user-ID variable from the authenticated session
+      (get_current_user_id / bp_loggedin_user_id), then unconditionally
+      overrides it with an attacker-supplied request parameter. The downstream
+      access check evaluates whether the *victim* has permission (not the
+      attacker), granting the attacker access whenever the victim does.
+
+      Confirmed instance: BuddyPress 14.4.0
+        class-bp-rest-messages-endpoint.php get_item_permissions_check() —
+        $user_id = bp_loggedin_user_id(); overridden by get_param('user_id'),
+        then messages_check_thread_access($id, $user_id) passes because the
+        victim is in the thread, not because the attacker is.
+
+      Variant B — capability check on the wrong subject: a user ID taken
+      directly from a request parameter is used to look up a *target* user
+      object, and that target object's own capability/role method (can_* /
+      is_* / has_*) is then evaluated as part of the authorization gate —
+      instead of checking the capability of the currently authenticated
+      caller. A typical inverted-logic form:
+        if ( ! $target->can_X() && get_current_user_id() !== $user_id ) { deny(); }
+      only denies when the target lacks the capability AND the caller isn't
+      the target — so any caller is let through whenever the *target* (not
+      the caller) happens to have the capability, e.g. whenever the request
+      parameter points at a privileged account.
+
+      Fix (both variants): never let a request parameter supply the subject of
+      an authorization decision. Always resolve the acting user from
+      get_current_user_id() / wp_get_current_user() / bp_loggedin_user_id(),
+      and evaluate capability methods on that resolved caller, not on an
+      object looked up via attacker-controlled input. If acting-as another
+      user is a legitimate feature, gate the override with an explicit
+      capability check on the *caller* (current_user_can('manage_options') /
+      bp_current_user_can('bp_moderate')) *before* applying it, and return a
+      WP_Error / deny on failure.
+    metadata:
+      category: security
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Insecure Direct Object Reference (IDOR)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/
+        - https://cwe.mitre.org/data/definitions/639.html
+    patterns:
+      - pattern-either:
+          # Variant A: bind to logged-in user, then unconditionally replace with
+          # a request parameter inside a REST permission-check function.
+          - patterns:
+              - pattern-inside:
+                  pattern: |
+                    function $FUNC(...) {
+                      ...
+                    }
+              - metavariable-regex:
+                  metavariable: $FUNC
+                  # Matches WP REST API permission callback naming conventions:
+                  # get_item_permissions_check, create_item_permissions_check,
+                  # update_item_permissions_check, delete_item_permissions_check,
+                  # update_starred_permissions_check, etc.
+                  regex: .*permission[s]?_check.*
+              # The two-statement override sequence: the ellipsis allows any code between them.
+              - pattern: |
+                  $USERID = $LOGGEDIN_FUNC();
+                  ...
+                  $USERID = $REQUEST->get_param(...);
+              - metavariable-regex:
+                  metavariable: $LOGGEDIN_FUNC
+                  regex: (get_current_user_id|bp_loggedin_user_id|wp_get_current_user)
+          # Variant B: a request-controlled user id is used to look up a target
+          # object, and the target's OWN capability method gates access —
+          # combined with an inequality against the current user — instead of
+          # checking the caller's own capability. All three steps (source
+          # assignment, lookup call, guard check) must be ONE multi-line
+          # pattern string sharing $USERID/$TARGET across ellipses: separate
+          # sibling `pattern:` entries under the same `patterns:` AND-list do
+          # NOT co-match across different statements in Semgrep (confirmed
+          # empirically, recent Semgrep — each sibling pattern must match the
+          # same node, so cross-statement correlation requires one pattern
+          # string). The ellipsis DOES cross into a nested try{}/if{} block
+          # within a single pattern string, which is what lets this match code
+          # where the id is assigned outside a try{} and consumed inside it.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      $USERID = $SOURCE;
+                      ...
+                      $TARGET = $LOOKUP($USERID, ...);
+                      ...
+                      if (! $TARGET->$METHOD(...) && $CURRENT_FUNC() !== $USERID) { ... }
+                  - pattern: |
+                      $USERID = $SOURCE;
+                      ...
+                      $TARGET = $LOOKUP($USERID, ...);
+                      ...
+                      if (! $TARGET->$METHOD(...) && $CURRENT_FUNC() != $USERID) { ... }
+                  - pattern: |
+                      $USERID = $SOURCE;
+                      ...
+                      $TARGET = $CLASS::$LOOKUP($USERID, ...);
+                      ...
+                      if (! $TARGET->$METHOD(...) && $CURRENT_FUNC() !== $USERID) { ... }
+                  - pattern: |
+                      $USERID = $SOURCE;
+                      ...
+                      $TARGET = $CLASS::$LOOKUP($USERID, ...);
+                      ...
+                      if (! $TARGET->$METHOD(...) && $CURRENT_FUNC() != $USERID) { ... }
+              - metavariable-regex:
+                  metavariable: $SOURCE
+                  regex: '.*(\$_GET|\$_POST|\$_REQUEST|get_param|params\[|get_params\(\)).*'
+              - metavariable-regex:
+                  metavariable: $CURRENT_FUNC
+                  regex: ^(get_current_user_id|wp_get_current_user)$
+              - metavariable-regex:
+                  metavariable: $METHOD
+                  regex: "(?i)^(can|is|has)"
+              # A common WP soft-deprecation idiom: the vulnerable body is left
+              # in place below an unconditional early return for git-blame /
+              # reference purposes, so it is unreachable dead code. Exclude it
+              # so the rule stays silent on functions deprecated this way.
+              - pattern-not-inside: |
+                  function $DEADFUNC(...) {
+                    _deprecated_function(...);
+                    ...
+                    return ...;
+                    ...
+                  }

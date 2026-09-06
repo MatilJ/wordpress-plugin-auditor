@@ -1,0 +1,109 @@
+rules:
+  - id: claude.js.wordpress.xss.eval-wrapped-jquery-html-concat
+    languages: [js, typescript]
+    severity: MEDIUM
+    message: |
+      A jQuery DOM-insertion sink (.html(), .append(), .prepend(), .after(),
+      .before(), .replaceWith()) is called with string concatenation, and
+      this call is embedded inside a string literal passed to eval() —
+      the pattern webpack's `devtool: eval` (and `eval-cheap-module-source-map`)
+      build mode produces, where an entire bundled module is wrapped as
+      `eval("...module source with \n and \" escapes...")`.
+
+      This matters because the sibling rules jquery-html-unsafe-variable and
+      jquery-dom-insertion-ajax-response CANNOT see this: semgrep's JS parser
+      treats the eval() argument as one opaque string token, not as nested
+      JS structure, so `.html($A + $B)`-style AST patterns never match code
+      that lives inside it. This rule closes that blind spot with a
+      metavariable-regex scan of the eval() argument's raw source text —
+      it does not re-parse the string as JS, so it is intentionally coarser
+      than the AST-based sibling rules (CWE-79).
+
+      Confirmed real-world instance: essential-addons-for-elementor-lite
+      6.6.2 Event Calendar widget shipped this exact shape —
+      `.html('<img ... alt="' + event.title + '">' + rest)` — inside an
+      eval()-wrapped bundle, where `event.title` (a WP post title) was
+      DOMPurify.sanitize()'d in every other call site in the same file
+      except this one. 6.6.3 fixed it by switching to
+      `.attr('alt', event.title)` (CVE-2026-6459-class bug).
+
+      TRIAGE:
+        - First check whether jquery-html-unsafe-variable or
+          jquery-dom-insertion-ajax-response already flags the same file —
+          if the file isn't eval-wrapped, this rule is redundant with those
+          and any hit here alongside a hit there is not a second bug.
+        - Manually decode: copy the eval() string argument out, replace
+          `\n` with newlines and `\"` with `"`, then read the surrounding
+          function to identify the concatenated variable's source.
+        - STRONGEST SIGNAL — inconsistent sanitization: if the same object
+          property (e.g. `event.title`, `item.name`) is wrapped in
+          DOMPurify.sanitize(), esc_html-equivalent, or .text() at OTHER
+          call sites in the same decoded module, but is bare string
+          concatenation at THIS site, treat as high-confidence — this is
+          the pattern the fix above corrected.
+        - The regex requires a property-access expression (obj.prop) right
+          after the `+`, not a bare identifier — this already filters out
+          the most common benign shapes seen in real plugin code (formatted
+          date-library results, CSS classes read back via `.attr('class')`,
+          self-referential DOM content re-read via `$(...).html()`). A hit
+          is therefore already past that filter; still confirm the object
+          the property is read from is a request/DB/API-derived object, not
+          a local computed object (e.g. `moment(x)._d`, a jQuery event
+          object's own built-in fields).
+        - Likely FP: DOMPurify.sanitize() (or another sanitizer) wraps the
+          SAME concatenated expression later in the argument, just not
+          immediately after the `+` this regex anchors on — re-read the
+          full call before confirming.
+        - Confirm the variable ultimately traces to WP user/post/meta data
+          (title, name, description, comment, display_name, bio) reachable
+          by an in-scope role (unauthenticated/Subscriber/Customer) before
+          treating this as a submittable finding, not just a plugin editor
+          or admin-set value.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: LOW
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [javascript, jquery, webpack, wordpress]
+      references:
+        - https://api.jquery.com/html/
+        - https://cheatsheetseries.owasp.org/cheatsheets/DOM_based_XSS_Prevention_Cheat_Sheet.html
+        - https://webpack.js.org/configuration/devtool/
+    # Same rationale as jquery-html-unsafe-variable's path exclusions: minified
+    # single-line files are not reliably matchable and vendor/library code is
+    # not plugin-authored. eval-wrapped bundles are specifically the *.js
+    # (non-min) webpack output, so this exclusion list mirrors the sibling rule.
+    paths:
+      exclude:
+        - "jquery.*.js"
+        - "*.min.js"
+        - "*-min.js"
+        - "**/inc/**"
+        - "**/min/**"
+        - "**/select2/**"
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern: eval($CODE)
+      - metavariable-regex:
+          metavariable: $CODE
+          # Sink call opens with a string literal (a static HTML-tag fragment,
+          # the common real-world shape), followed within a bounded window by
+          # a `+` concatenation operator, not immediately followed by a
+          # sanitizer call, and immediately followed by a PROPERTY ACCESS
+          # (obj.prop) rather than a bare identifier. This last constraint is
+          # the key precision lever: validated against the real-world corpus,
+          # locally-computed/benign concat operands in this codebase are bare
+          # identifiers (formatted date strings, DOM class readbacks, icon
+          # markup vars), while attacker-reachable content (post/event titles,
+          # item names, API response fields) is consistently accessed via a
+          # property path. Dropping this constraint raised false positives
+          # from 1-in-4 to file-wide noise with no change in true-positive
+          # recall on the confirmed instance. The window is capped at 200
+          # chars to bound regex cost on multi-KB/MB bundle strings.
+          regex: '(?s).*\.(html|append|prepend|after|before|replaceWith)\(\s*[\x27"][^)]{0,200}?\s\+\s(?!DOMPurify\.sanitize|escapeHtml|wp\.escapeHtml|_\.escape|he\.encode)\w+\.\w+.*'

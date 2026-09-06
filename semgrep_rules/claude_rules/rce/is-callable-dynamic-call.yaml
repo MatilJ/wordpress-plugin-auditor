@@ -1,0 +1,104 @@
+rules:
+  - id: claude.php.wordpress.rce.is-callable-dynamic-call
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A dynamic callable (not a static array($obj, 'method') or a string literal)
+      is guarded with is_callable() and then invoked via call_user_func() or
+      call_user_func_array(). If the callable value originates from user-controlled
+      input — such as a POST/GET parameter, a decrypted form hidden field, or a
+      deserialized payload — an attacker can invoke arbitrary PHP functions (CWE-94 / CWE-470).
+
+      Confirmed TP: acf-extended 0.9.1.1 module-form-front-render.php:148-151.
+      $form['render'] was accepted through render_form_ajax() — a wp_ajax_nopriv_
+      endpoint whose ACF nonce (acf.data.nonce) is publicly embedded in page HTML.
+      is_callable($form['render']) passed it to call_user_func_array() with no
+      allowlist validation, enabling unauthenticated RCE.
+
+      Fix: validate the callable against a strict developer-defined allowlist before
+      invoking it, and ensure the surrounding AJAX/REST endpoint enforces capability-based
+      authentication (current_user_can()), not nonce-only protection.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+        - "CWE-470: Use of Externally-Controlled Input to Select Classes or Code ('Unsafe Reflection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Code Injection"
+      technology: [php, wordpress]
+      references:
+        - https://www.php.net/manual/en/function.call-user-func-array.php
+        - https://owasp.org/www-community/attacks/Code_Injection
+    # Exclude bundled third-party library directories. The is_callable+call_user_func
+    # pattern appears in WP HTTP API's Requests library FilteredIterator (razorpay-sdk,
+    # other bundled copies) as a legitimate internal iterator dispatch — not user-controlled.
+    paths:
+      exclude:
+        - "**/libs/**"
+        - "**/Libs/**"
+        - "**/vendor/**"
+        # Bundled phpseclib (SSH/SFTP/SCP/crypto library): its is_callable-guarded
+        # progress-callback dispatch is internal iterator/transfer plumbing, not
+        # a user-controlled callable selector.
+        - "**/PHPSecLib/**"
+        - "**/phpseclib/**"
+    pattern-either:
+      # Direct if(is_callable) guard wrapping call_user_func_array / call_user_func.
+      # $CALLABLE is unified across the condition and the call body, so both the guard
+      # and the invocation must reference the same dynamic value.
+      - patterns:
+          - pattern-inside: |
+              if (is_callable($CALLABLE)) {
+                ...
+              }
+          - pattern: call_user_func_array($CALLABLE, ...)
+          # Static developer-controlled callables are safe by definition.
+          - pattern-not: call_user_func_array(array($OBJ, "..."), ...)
+          - pattern-not: call_user_func_array(array($OBJ, $METHOD), ...)
+          - pattern-not: call_user_func_array("...", ...)
+          # Registry-dispatch: user controls only the lookup key, not the callable value.
+          - pattern-not: call_user_func_array($OBJ->$REG[$KEY]['callback'], ...)
+          # Same registry-dispatch shape reached through an intermediate
+          # local variable instead of an inline expression (a plugin-owned
+          # $this->model/$this->registry-style field definition array
+          # indexed by a fixed field name, assigned to a local before the
+          # guard) — the lookup key may vary, but the stored callable value
+          # is still a developer-defined field/model definition, not
+          # request-influenced. Function-scoped (not a bare sequence) so the
+          # assignment-then-guard relationship is found regardless of
+          # intervening nesting (e.g. an is_array($CALLABLE) wrapper) between
+          # the two statements.
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $CALLABLE = $OBJ->$REG[$KEY][$FIELD];
+                ...
+                if (is_callable($CALLABLE)) {
+                  ...
+                }
+                ...
+              }
+      - patterns:
+          - pattern-inside: |
+              if (is_callable($CALLABLE)) {
+                ...
+              }
+          - pattern: call_user_func($CALLABLE, ...)
+          - pattern-not: call_user_func(array($OBJ, "..."), ...)
+          - pattern-not: call_user_func(array($OBJ, $METHOD), ...)
+          - pattern-not: call_user_func("...", ...)
+          - pattern-not: call_user_func($OBJ->$REG[$KEY]['callback'], ...)
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $CALLABLE = $OBJ->$REG[$KEY][$FIELD];
+                ...
+                if (is_callable($CALLABLE)) {
+                  ...
+                }
+                ...
+              }

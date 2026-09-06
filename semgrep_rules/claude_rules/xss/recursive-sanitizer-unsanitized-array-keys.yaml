@@ -1,0 +1,105 @@
+rules:
+  - id: claude.php.wordpress.xss.recursive-sanitizer-unsanitized-array-keys
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A recursive input-sanitization helper walks a nested array with
+      foreach ($ARR as $KEY => $VALUE), sanitizes/recurses on each $VALUE, and
+      rebuilds or mutates the array using the original, unsanitized $KEY. PHP
+      populates array keys directly from request field-name syntax
+      (field[attacker_controlled_key]=x), so an attacker fully controls $KEY
+      independent of whatever sanitizer is applied to $VALUE. If the
+      surviving raw key later reaches an HTML/JS output context (a table
+      header, an iterated label, an admin_label lookup, a rendered field
+      identifier) without independent escaping, this is Stored XSS (CWE-79).
+      Apply a sanitizer (e.g. sanitize_text_field()/sanitize_key()) to $KEY
+      before using it to build the returned/stored structure.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      # This is a write-side structural gap only — Semgrep cannot see whether
+      # a render path later echoes the surviving key without escaping, nor
+      # whether the enclosing function is reachable from unauthenticated
+      # input. Every hit requires two manual checks before confirming: (1)
+      # trace the enclosing function back to its caller/hook registration to
+      # confirm attacker-reachable input populates $ARR's keys (not just its
+      # values), and (2) find a render path that uses an array/object key
+      # (not just a leaf value) as HTML/JS output without esc_html()/
+      # esc_attr()/sanitize_key() at render time.
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/79.html
+        - https://developer.wordpress.org/apis/security/data-validation/
+    patterns:
+      - pattern-inside: |
+          function $FUNC(...) {
+            ...
+          }
+      - pattern-either:
+          # By-reference mutation: only the leaf value is reassigned through
+          # the sanitizer; the array's own keys are never touched, so the
+          # mutated array (returned as $ARR) keeps the raw attacker key.
+          - pattern: |
+              foreach ($ARR as $KEY => &$VALUE) {
+                ...
+                $VALUE = $SANFUNC($VALUE, ...);
+                ...
+              }
+          # Rebuilt-array style: the new array is indexed by the raw loop
+          # key while only the value passes through a sanitizer/recursive call.
+          - pattern: |
+              foreach ($ARR as $KEY => $VALUE) {
+                ...
+                $OUT[$KEY] = $SANFUNC($VALUE, ...);
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $SANFUNC
+          regex: "(?i).*(saniti[sz]e|esc_html|esc_attr|esc_textarea|wp_kses|kses|strip_tags|htmlspecialchars|htmlentities|clean_|purify|escape).*"
+      # Remediated shape: the same enclosing function ALSO sanitizes $KEY
+      # itself (in place, or into a new variable) before it is used to index
+      # the returned/stored structure — these are the fix idioms this rule
+      # must stay silent on.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $KEY = sanitize_text_field($KEY);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $KEY = sanitize_key($KEY);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $SANEKEY = sanitize_text_field($KEY);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $SANEKEY = sanitize_key($KEY);
+            ...
+          }
+      # Schema-constrained shape: the array being iterated was itself already
+      # produced by rest_sanitize_value_from_schema() earlier in the same
+      # function. WP's REST schema sanitizer enforces the declared schema's
+      # `additionalProperties: false` constraint, so the resulting object's
+      # keys are limited to the schema's own enumerated property names, not
+      # attacker-suppliable field-name syntax — the raw-key-injection premise
+      # this rule targets does not apply to a schema-bounded array.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $CLEAN = rest_sanitize_value_from_schema(...);
+            ...
+          }

@@ -1,0 +1,124 @@
+rules:
+  - id: claude.php.wordpress.upload.media-sideload-no-upload-cap
+    languages: [php]
+    severity: HIGH
+    message: |
+      media_sideload_image(), wp_upload_bits(), or wp_insert_attachment() is
+      called in a function that does not check current_user_can('upload_files')
+      (CWE-862 / CWE-434).
+
+      WordPress requires the 'upload_files' capability to add items to the
+      Media Library. In the default role model: Subscriber and Contributor do
+      NOT have 'upload_files'. Authors and higher do.
+
+      If the calling function is reachable by a Contributor (e.g. any AJAX
+      handler gated on 'edit_posts' or a nonce localized to the post editor),
+      the 'upload_files' cap requirement is bypassed.
+
+      NOTE: checking 'edit_posts' (present on Contributors) is NOT sufficient
+      to restrict Media Library writes — 'upload_files' must be checked
+      explicitly in or before the Media Library write.
+
+      TRIAGE:
+        1. Check what capability or nonce gates the calling function.
+           If gated on 'upload_files' or a capability implying it (Author+),
+           this is not exploitable by Contributor — dismiss.
+           If gated on 'edit_posts' only → Contributor can reach → TRUE POSITIVE.
+        2. If gated on 'manage_options' or 'administrator' → PR:H → OOS for bounty.
+        3. Confirm the uploaded file types. media_sideload_image() is limited
+           to image MIME types. wp_upload_bits() + wp_insert_attachment() may
+           accept broader MIME types (PDFs, ZIPs, docs) depending on mime checks
+           before the call. Document the actual file types in the report.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/media_sideload_image/
+        - https://developer.wordpress.org/reference/functions/wp_upload_bits/
+        - https://developer.wordpress.org/reference/functions/wp_insert_attachment/
+        - https://cwe.mitre.org/data/definitions/862.html
+        # Confirmed TP: post-and-page-builder 1.27.10
+        # class-boldgrid-editor-ajax.php:354 upload_url() — media_sideload_image()
+        # class-boldgrid-editor-ajax.php:380 upload_encoded() — wp_upload_bits() +
+        # wp_insert_attachment(), neither checks current_user_can('upload_files').
+        # AJAX handler upload_image_ajax() checks 'edit_posts' (Contributor has this)
+        # but not 'upload_files' (Contributor lacks this). Contributor-level bypass.
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+    pattern-either:
+      # media_sideload_image() — downloads a remote URL to Media Library
+      - patterns:
+          - pattern: |
+              function $FN(...) {
+                ...
+                media_sideload_image(...);
+                ...
+              }
+          - pattern-not: |
+              function $FN(...) {
+                ...
+                if (<... current_user_can('upload_files') ...>) { ... }
+                ...
+              }
+          - pattern-not: |
+              function $FN(...) {
+                ...
+                current_user_can('upload_files');
+                ...
+              }
+          - pattern-not: |
+              function $FN(...) {
+                ...
+                if (<... current_user_can('manage_options') ...>) { ... }
+                ...
+              }
+          - pattern-not: |
+              function $FN(...) {
+                ...
+                current_user_can('manage_options');
+                ...
+              }
+      # wp_insert_attachment() — registers a file in the Media Library
+      # Most significant when paired with wp_upload_bits() writing the file.
+      - patterns:
+          - pattern: |
+              function $FN(...) {
+                ...
+                wp_insert_attachment(...);
+                ...
+              }
+          - pattern-not: |
+              function $FN(...) {
+                ...
+                if (<... current_user_can('upload_files') ...>) { ... }
+                ...
+              }
+          - pattern-not: |
+              function $FN(...) {
+                ...
+                current_user_can('upload_files');
+                ...
+              }
+          - pattern-not: |
+              function $FN(...) {
+                ...
+                if (<... current_user_can('manage_options') ...>) { ... }
+                ...
+              }
+          - pattern-not: |
+              function $FN(...) {
+                ...
+                current_user_can('manage_options');
+                ...
+              }

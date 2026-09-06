@@ -1,0 +1,100 @@
+rules:
+  - id: claude.php.wordpress.upload.unbounded-bulk-file-upload-loop
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A function iterates a multi-file array (e.g. a $_FILES-shaped structure
+      with one entry per uploaded file) in a loop and calls
+      media_handle_upload() / wp_handle_upload() / wp_handle_sideload() for
+      each entry, with no count()-based limit anywhere in the function on how
+      many files may be processed in a single request (CWE-434 / CWE-770).
+
+      Client-side "select N files" limits and php.ini's max_file_uploads are
+      not a substitute for a server-side cap: an attacker can submit an
+      arbitrarily large multi-file array directly to the endpoint. Each
+      accepted file still passes through WordPress's normal MIME-type
+      allow-list, so this does not by itself enable arbitrary code execution
+      ("limited" file upload) — but with no per-request ceiling, an attacker
+      can create unbounded numbers of Media Library attachments per request,
+      exhausting disk space and the database. Risk is highest when this
+      function is reachable from a wp_ajax_nopriv_ hook (unauthenticated).
+
+      Add a check such as `if ( count( $files['name'] ) > $max ) { ... return/
+      error; }` before the loop, using a small fixed or filterable maximum.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-434: Unrestricted Upload of File with Dangerous Type"
+        - "CWE-770: Allocation of Resources Without Limits or Throttling"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/media_handle_upload/
+        - https://cwe.mitre.org/data/definitions/434.html
+        - https://cwe.mitre.org/data/definitions/770.html
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $FN(...) {
+                ...
+                foreach ($ARR as $K => $V) {
+                  ...
+                  $SINK(...);
+                  ...
+                }
+                ...
+              }
+          - pattern: |
+              function $FN(...) {
+                ...
+                foreach ($ARR as $V) {
+                  ...
+                  $SINK(...);
+                  ...
+                }
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $SINK
+          regex: ^(media_handle_upload|wp_handle_upload|wp_handle_sideload)$
+      # Fix shape: a count()-based ceiling checked before/around the loop,
+      # in either comparison direction.
+      - pattern-not: |
+          function $FN(...) {
+            ...
+            if (<... count($ANY) > $N ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not: |
+          function $FN(...) {
+            ...
+            if (<... count($ANY) >= $N ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not: |
+          function $FN(...) {
+            ...
+            if (<... $N < count($ANY) ...>) {
+              ...
+            }
+            ...
+          }
+      # Defensive alternative: bounding the array itself before iterating.
+      - pattern-not: |
+          function $FN(...) {
+            ...
+            array_slice($ANY, $START, $N);
+            ...
+          }
+    paths:
+      exclude:
+        - "**/freemius/**"

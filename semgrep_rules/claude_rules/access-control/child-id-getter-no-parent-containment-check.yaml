@@ -1,0 +1,160 @@
+rules:
+  - id: claude.php.wordpress.access-control.child-id-getter-no-parent-containment-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function reads two related identifiers from the request — a "parent"
+      resource ID and a "child" resource ID — then loads an object using only
+      the child ID and discloses data from it (a method call whose result
+      flows into a response), without any call in the function that combines
+      the child ID together with another identifier to verify the child
+      actually belongs to the parent (CWE-862 / CWE-639).
+
+      This is the nested-resource variant of IDOR: the handler correctly
+      accepts a scoping parent ID (e.g. a container, order, or quiz ID) but
+      never uses it to constrain which child ID (e.g. a line item, message,
+      or question ID) it will load. An attacker who satisfies whatever access
+      check applies to the parent resource (including an intentionally-public
+      one) can supply an unrelated child ID belonging to a different, more
+      sensitive parent and have its data returned anyway.
+
+      Required fix — before loading/using the child object, add a call that
+      resolves or verifies the child ID in the scope of the parent ID, e.g.:
+        $item = ParentModel::find( $parent_id )->get_child( $child_id );
+        if ( ! $item ) { return new WP_Error( 'invalid_id', '', [ 'status' => 400 ] ); }
+      or an explicit containment lookup:
+        $link = ChildOfParentModel::find( $parent_id, $child_id );
+        if ( ! $link ) { return new WP_Error( 'invalid_id', '', [ 'status' => 400 ] ); }
+
+      HIGH FP RATE — this pattern also fires when the "child" and "parent"
+      values are unrelated identifiers that happen to both be read from the
+      request (no real nesting relationship intended), or when the
+      containment check lives in a helper function this rule cannot trace
+      interprocedurally. Confirm the two IDs are documented/used elsewhere as
+      a real parent-child pair before reporting.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Insecure Direct Object Reference (IDOR)"
+      technology: [php, wordpress]
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — no call anywhere in the function combines the parent
+      # and child IDs (directly or via an object derived from the parent ID
+      # having a method called with the child ID). Confirm the two IDs are a
+      # real nesting relationship (e.g. item-in-container, question-in-quiz,
+      # comment-in-thread) and that the getter's disclosed fields are
+      # sensitive relative to the parent scope (answer keys, PII, protected
+      # content) rather than already-public data.
+      #
+      # FALSE POSITIVE — combining call uses different variable names than
+      # this rule bound: the containment check may reference a THIRD id (an
+      # intermediate level in a >2-level hierarchy) rather than the exact
+      # parent variable this rule captured. Search the function body for ANY
+      # call passing the child ID alongside another identifier before
+      # treating this as unpatched.
+      #
+      # FALSE POSITIVE — single-level resource, no real parent scoping:
+      # some handlers read two IDs from the request that are not actually
+      # nested (e.g. an optional filter param unrelated to authorization).
+      # If the "parent" ID is never used to scope access anywhere in the
+      # codebase, this is not the nested-IDOR class.
+      #
+      # FALSE POSITIVE — capability check on the child resource directly
+      # (e.g. current_user_can('read_post', $child_id)) is an equally valid
+      # fix this rule does not special-case; search for it before reporting.
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://cwe.mitre.org/data/definitions/639.html
+        - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+    patterns:
+      - pattern-either:
+          # WP_REST_Request array-access, child ID read before parent ID
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $CHILD_ID = $REQUEST[$CHILD_KEY] ?? $DEF1;
+                ...
+                $PARENT_ID = $REQUEST[$PARENT_KEY] ?? $DEF2;
+                ...
+                $OBJ = $GETTER($CHILD_ID);
+                ...
+                <... $OBJ->$METHOD(...) ...>;
+                ...
+              }
+          # WP_REST_Request array-access, parent ID read before child ID
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $PARENT_ID = $REQUEST[$PARENT_KEY] ?? $DEF2;
+                ...
+                $CHILD_ID = $REQUEST[$CHILD_KEY] ?? $DEF1;
+                ...
+                $OBJ = $GETTER($CHILD_ID);
+                ...
+                <... $OBJ->$METHOD(...) ...>;
+                ...
+              }
+          # $_REQUEST/$_POST superglobal, child ID read before parent ID
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $CHILD_ID = $_REQUEST[$CHILD_KEY];
+                ...
+                $PARENT_ID = $_REQUEST[$PARENT_KEY];
+                ...
+                $OBJ = $GETTER($CHILD_ID);
+                ...
+                <... $OBJ->$METHOD(...) ...>;
+                ...
+              }
+          # $_REQUEST/$_POST superglobal, parent ID read before child ID
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $PARENT_ID = $_REQUEST[$PARENT_KEY];
+                ...
+                $CHILD_ID = $_REQUEST[$CHILD_KEY];
+                ...
+                $OBJ = $GETTER($CHILD_ID);
+                ...
+                <... $OBJ->$METHOD(...) ...>;
+                ...
+              }
+      # Neutralizer (the fix's actual shape): some call anywhere in the
+      # function passes the child ID together with another identifier —
+      # deliberately decoupled from $PARENT_ID so it also matches when the
+      # real containment check runs through a different, intermediate-level
+      # id in a >2-level hierarchy (e.g. quiz_id rather than the outer
+      # course_id) rather than the exact variable this rule captured above.
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            $ANYFUNC($OTHER_ID, $CHILD_ID);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            $ANYFUNC($CHILD_ID, $OTHER_ID);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            $VERIFIED = $ANYFUNC($OTHER_ID, $CHILD_ID);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            $VERIFIED = $ANYFUNC($CHILD_ID, $OTHER_ID);
+            ...
+          }

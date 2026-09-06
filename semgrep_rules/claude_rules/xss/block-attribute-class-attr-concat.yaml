@@ -1,0 +1,71 @@
+rules:
+  - id: claude.php.wordpress.xss.block-attribute-class-attr-concat
+    languages: [php]
+    severity: HIGH
+    message: >
+      A Gutenberg block render callback reads an attribute from $attributes and
+      concatenates it into a double-quoted HTML attribute value (e.g., class="..." or
+      id="...") without esc_attr(). Block attributes are Contributor-controlled via the
+      Code Editor. A payload like '" onfocus=alert(1) autofocus x="' contains no < or >
+      characters, so wp_kses() passes it unchanged at save time. The " character breaks
+      out of the attribute boundary, injecting arbitrary event handler attributes.
+      Fix: escape with esc_attr() before concatenation into any HTML attribute context.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Stored Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: $attributes[$KEY]
+          - pattern: $atts[$KEY]
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: esc_attr(...)
+          - pattern: esc_html(...)
+          - pattern: esc_url(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: sanitize_html_class(...)
+          - pattern: sanitize_key(...)
+          - pattern: (int) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: in_array(...)
+    pattern-sinks:
+      - patterns:
+          # Match string concat where the left-side string contains an HTML attribute pattern
+          - pattern: $PREFIX . $SINK . $SUFFIX
+          - metavariable-regex:
+              metavariable: $PREFIX
+              regex: ".*(?:class|id|style|data-|aria-|name|value|title|alt|href|src|action|for)\\s*=\\s*[\"'].*"
+          # $PREFIX's captured source text must contain no '>' character at
+          # all — i.e. no HTML tag has already closed anywhere in the
+          # chain leading up to $SINK. Without this, the attr=" check above
+          # also fires when the attribute pattern appears earlier in a
+          # longer concat chain whose tag has already closed ('">') before
+          # $SINK is reached, misattributing a text-node position as an
+          # attribute-value position.
+          - metavariable-regex:
+              metavariable: $PREFIX
+              regex: "^[^>]*$"
+          # Structural backstop for a confirmed Semgrep taint-engine gap:
+          # in concat chains of 5+ operands, a $SINK position that is
+          # itself an exact declared-sanitizer call (e.g. esc_url($url))
+          # can still be reported even though pattern-sanitizers should
+          # have cleared it — verified by minimal repro (a 3-operand chain
+          # respects the sanitizer; an otherwise-identical 7-operand chain
+          # does not). Reject directly whenever $SINK's own captured text
+          # is exactly one of the declared sanitizer calls.
+          - metavariable-regex:
+              metavariable: $SINK
+              regex: "(?s)^(?!\\s*(?:esc_attr|esc_html|esc_url|wp_kses_post|wp_kses|sanitize_html_class|sanitize_key)\\s*\\().*"

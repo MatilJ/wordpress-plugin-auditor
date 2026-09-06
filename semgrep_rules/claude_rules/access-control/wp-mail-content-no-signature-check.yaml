@@ -1,0 +1,203 @@
+rules:
+  - id: claude.php.wordpress.access-control.wp-mail-content-no-signature-check
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      Request-controlled data ($_GET/$_POST/$_REQUEST, a REST request body, or
+      php://input) flows into the SUBJECT or MESSAGE argument of wp_mail() (or
+      PHP's mail()), and the enclosing function contains no hash_equals()-based
+      integrity check anywhere that would verify the submitted content matches
+      a server-authorized value (CWE-862: Missing Authorization).
+
+      This differs from arbitrary-recipient abuse (attacker controls $to) or
+      CRLF header injection (attacker controls $headers): here the attacker
+      controls the literal CONTENT of an email the site will send — its
+      subject line and/or HTML body — and nothing verifies that content
+      actually originated from the site owner's own configuration rather than
+      the request. Impact is highest when the same function also generates a
+      genuine, sensitive, server-side value elsewhere (a password-reset
+      key/link via get_password_reset_key(), an autologin/magic-link token, an
+      OTP, an account-recovery code) that gets merged into the attacker-
+      supplied subject/body: an unauthenticated attacker can then wrap
+      arbitrary phishing HTML/text (fake branding, urgency language, altered
+      instructions, a substituted link) around the genuine security-sensitive
+      value and have the site's own mailer deliver it to a real target
+      account — a highly convincing phishing vector because the embedded
+      credential/link is completely legitimate.
+
+      Escaping the value (wp_kses/esc_html/sanitize_text_field) only removes
+      the HTML-injection component — it does not restore authorization,
+      because the attacker can still supply arbitrary plain-text content. The
+      correct fix verifies, via a constant-time hash_equals() comparison of a
+      signature (typically an HMAC computed over the subject+body at the time
+      the template was rendered from the site's own saved configuration),
+      that the submitted content was not attacker-chosen. A bare CSRF nonce
+      check (wp_verify_nonce()/check_ajax_referer()) does NOT provide this —
+      a nonce proves request intent, not content authenticity, and is
+      routinely present in the vulnerable code alongside this bug.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - Request data reaches wp_mail()'s $subject or $message argument
+          (directly, or after json_decode()/string concatenation of request
+          array values) with no hash_equals() call anywhere in the function.
+        - A password-reset key, login token, or other sensitive per-user
+          secret is composed in the same function and merged into that
+          request-supplied content.
+
+      LOWER SEVERITY — still worth noting:
+        - The message is only ever sent to a fixed, server-controlled
+          recipient (e.g. get_option('admin_email')) rather than a
+          user-supplied/looked-up target — reduces impact from third-party
+          phishing to admin-notification content spoofing.
+
+      FALSE POSITIVE indicators:
+        - The function contains a hash_equals()-based signature/HMAC
+          verification covering the tainted subject/body before use.
+        - The subject/message is built entirely from server-stored
+          configuration (get_option()/get_post_meta()) rather than the live
+          request, with request data limited to filling admin-designated
+          merge-tag slots (a value, not the template itself).
+
+      Remediation: do not trust a client-submitted email template. Either (a)
+      read the subject/body only from server-stored (admin-configured)
+      settings, or (b) if the template must round-trip through the client
+      (e.g. rendered once, submitted later), bind it with a signature —
+      `hash_equals(hash_hmac('sha256', $subject.'|'.$body, $server_secret), $submitted_signature)`
+      — before using the submitted value.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Missing Authorization / Email Content Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/functions/wp_mail/
+        - https://developer.wordpress.org/reference/functions/hash_equals/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: file_get_contents("php://input")
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: get_option(...)
+          - pattern: get_post_meta(...)
+          - pattern: get_user_meta(...)
+    # Signature/HMAC verification is commonly refactored into a shared helper
+    # method (so both a "forgot password" and a "retrieve username" handler can
+    # reuse it), and its boolean result is checked in an `if (!$verified) {...}`
+    # gate rather than the callee returning a cleaned value — a shape taint-mode
+    # pattern-sanitizers (incl. by-side-effect) cannot model. Anchoring on
+    # pattern-not-inside at the sink instead: if the enclosing function calls
+    # ANY method/function whose name reads as a verify/validate/check of a
+    # signature/template/hmac — as a bare statement or as an if-condition, on
+    # $this or standalone — treat that as the CVE's real fix and suppress.
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: wp_mail($TO, $SUBJ, $MSG, ...)
+              - pattern: mail($TO, $SUBJ, $MSG, ...)
+          - focus-metavariable: $SUBJ
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                hash_equals(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... hash_equals(...) ...>) { ... }
+                ...
+              }
+          - pattern-not-inside:
+              patterns:
+                - pattern-either:
+                    - pattern: |
+                        function $FUNC(...) {
+                          ...
+                          $METHOD($A, $B, ...);
+                          ...
+                        }
+                    - pattern: |
+                        function $FUNC(...) {
+                          ...
+                          if (<... $METHOD($A, $B, ...) ...>) { ... }
+                          ...
+                        }
+                    - pattern: |
+                        function $FUNC(...) {
+                          ...
+                          $OBJ->$METHOD($A, $B, ...);
+                          ...
+                        }
+                    - pattern: |
+                        function $FUNC(...) {
+                          ...
+                          if (<... $OBJ->$METHOD($A, $B, ...) ...>) { ... }
+                          ...
+                        }
+                - metavariable-regex:
+                    metavariable: $METHOD
+                    regex: (?i).*(verify|validate|check).*(signature|template|hmac).*
+      - patterns:
+          - pattern-either:
+              - pattern: wp_mail($TO, $SUBJ, $MSG, ...)
+              - pattern: mail($TO, $SUBJ, $MSG, ...)
+          - focus-metavariable: $MSG
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                hash_equals(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... hash_equals(...) ...>) { ... }
+                ...
+              }
+          - pattern-not-inside:
+              patterns:
+                - pattern-either:
+                    - pattern: |
+                        function $FUNC(...) {
+                          ...
+                          $METHOD($A, $B, ...);
+                          ...
+                        }
+                    - pattern: |
+                        function $FUNC(...) {
+                          ...
+                          if (<... $METHOD($A, $B, ...) ...>) { ... }
+                          ...
+                        }
+                    - pattern: |
+                        function $FUNC(...) {
+                          ...
+                          $OBJ->$METHOD($A, $B, ...);
+                          ...
+                        }
+                    - pattern: |
+                        function $FUNC(...) {
+                          ...
+                          if (<... $OBJ->$METHOD($A, $B, ...) ...>) { ... }
+                          ...
+                        }
+                - metavariable-regex:
+                    metavariable: $METHOD
+                    regex: (?i).*(verify|validate|check).*(signature|template|hmac).*

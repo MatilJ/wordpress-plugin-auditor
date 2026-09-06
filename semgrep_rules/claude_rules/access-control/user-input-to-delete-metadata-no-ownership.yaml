@@ -1,0 +1,99 @@
+rules:
+  - id: claude.php.wordpress.access-control.user-input-to-delete-metadata-no-ownership
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A resource ID from an HTTP request parameter flows into a WordPress
+      metadata deletion function without a per-resource ownership check.
+      None of these functions perform internal authorization — the caller
+      must verify the appropriate current_user_can() before invocation.
+
+      Covered sinks:
+        - delete_post_meta($post_id, ...): requires
+          current_user_can('edit_post', $post_id)
+        - delete_comment_meta($comment_id, ...): requires
+          current_user_can('moderate_comments')
+        - delete_user_meta($user_id, ...): requires
+          current_user_can('edit_user', $user_id)
+        - delete_term_meta($term_id, ...): requires
+          current_user_can('manage_categories')
+        - delete_metadata($type, $object_id, ...): requires
+          type-appropriate capability check
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - Only nonce/class-level capability checked before the call.
+        - No per-resource current_user_can() anywhere in the call chain.
+        - Resource ID reaches metadata deletion from POST/GET/REQUEST.
+
+      FALSE POSITIVE indicators:
+        - Handler has current_user_can('manage_options') — admin-only (PR:H).
+        - Handler calls current_user_can('edit_post', $id) /
+          current_user_can('edit_user', $id) with the same tainted ID.
+        - The ID is sourced from a DB query (taint broken).
+        - The function is inside an admin-only page.
+        - The meta key is hardcoded and the operation is part of plugin
+          cleanup (e.g., delete_post_meta inside register_uninstall_hook).
+
+      Fix: verify ownership before deleting metadata:
+        if ( ! current_user_can( 'edit_post', (int) $post_id ) ) {
+            wp_send_json_error( 'Unauthorized', 403 );
+        }
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Arbitrary Content Deletion"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/delete_post_meta/
+        - https://developer.wordpress.org/reference/functions/delete_user_meta/
+        - https://developer.wordpress.org/reference/functions/delete_comment_meta/
+        - https://developer.wordpress.org/reference/functions/delete_term_meta/
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: json_decode(file_get_contents("php://input"), ...)
+          - pattern: file_get_contents("php://input")
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: $wpdb->get_results(...)
+          - pattern: $wpdb->get_row(...)
+          - pattern: $wpdb->get_var(...)
+          - pattern: $wpdb->get_col(...)
+          - pattern: get_option(...)
+    pattern-sinks:
+      - patterns:
+          - pattern: delete_post_meta($ID, ...)
+          - focus-metavariable: $ID
+      - patterns:
+          - pattern: delete_comment_meta($ID, ...)
+          - focus-metavariable: $ID
+      - patterns:
+          - pattern: delete_user_meta($ID, ...)
+          - focus-metavariable: $ID
+      - patterns:
+          - pattern: delete_term_meta($ID, ...)
+          - focus-metavariable: $ID
+      - patterns:
+          - pattern: delete_metadata($TYPE, $ID, ...)
+          - focus-metavariable: $ID
+    paths:
+      exclude:
+        - "vendor/"
+        - "freemius/"

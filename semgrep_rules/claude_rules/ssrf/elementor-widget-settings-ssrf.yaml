@@ -1,0 +1,65 @@
+rules:
+  - id: claude.php.wordpress.ssrf.elementor-widget-settings-ssrf
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A URL from an Elementor widget's settings array flows into a network-request
+      function (wp_remote_get, wp_remote_post, file_get_contents, cURL) without host
+      validation. The wp_remote_*() family does NOT block requests to private IP ranges,
+      localhost, or cloud metadata endpoints (169.254.169.254). Contributor+ users can
+      set arbitrary URLs in widget controls via the Elementor editor or REST API meta
+      writes, enabling Server-Side Request Forgery (CWE-918).
+
+      Use wp_safe_remote_get() / wp_safe_remote_post() instead of the raw helpers, or
+      validate the URL with wp_http_validate_url() before making the request.
+    metadata:
+      category: security
+      cwe: "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp: "A10:2021 - Server-Side Request Forgery"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Server-Side Request Forgery (SSRF)"
+      technology: [php, wordpress, elementor]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_safe_remote_get/
+        - https://developer.wordpress.org/reference/functions/wp_http_validate_url/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $this->get_settings()
+          - pattern: $this->get_settings_for_display()
+          - pattern: $this->get_settings(...)
+          - pattern: $this->get_settings_for_display(...)
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: wp_http_validate_url(...)
+          - pattern: urlencode(...)
+          - pattern: rawurlencode(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          - pattern: sanitize_key(...)
+          - pattern: sanitize_title(...)
+          - pattern: sanitize_html_class(...)
+          - pattern: esc_url(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: wp_remote_get($URL, ...)
+              - pattern: wp_remote_post($URL, ...)
+              - pattern: wp_remote_request($URL, ...)
+              - pattern: wp_remote_head($URL, ...)
+              - pattern: download_url($URL)
+          - focus-metavariable: $URL
+      - patterns:
+          - pattern-either:
+              - pattern: curl_init($URL)
+              - pattern: curl_setopt($CH, CURLOPT_URL, $URL)
+          - focus-metavariable: $URL
+      - patterns:
+          - pattern: file_get_contents($URL, ...)
+          - focus-metavariable: $URL

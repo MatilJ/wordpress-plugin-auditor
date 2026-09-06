@@ -1,0 +1,82 @@
+rules:
+  - id: claude.php.wordpress.access-control.rest-permission-callback-optional-verify-default-allow
+    languages: [php]
+    severity: HIGH
+    message: |
+      A REST/webhook permission_callback reads a credential (a signature or
+      token header) from the request, but the verify-or-reject check for it
+      lives ONLY inside `if (! empty($CRED)) { ... }`. When the credential is
+      absent — trivially achieved by an attacker who simply omits the header —
+      the entire verification block is skipped and the function falls through
+      to an unconditional `return true;` instead of a default-deny (CWE-287
+      Improper Authentication / CWE-862 Missing Authorization). Because
+      WordPress admits any request whose permission_callback returns exactly
+      true, "verify only if present" is functionally equivalent to no
+      authentication for a caller who omits the credential.
+
+      Fix: the fallthrough path — reached when no credential was supplied —
+      must return false or a WP_Error, never true. Only return true from
+      inside a branch that itself performed and PASSED a verification of a
+      value the caller cannot simply choose to omit.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-287: Improper Authentication"
+        - "CWE-862: Missing Authorization"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/287.html
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/#permissions-callback
+      # TRIAGE GUIDANCE:
+      # TRUE POSITIVE: the credential is read from an attacker-omittable
+      # source ($request->get_header(), a superglobal, etc.), the verify-or-
+      # reject logic lives ONLY inside the `if (! empty($CRED))` branch, and
+      # the function's last reachable statement outside that branch is a bare
+      # `return true;` with no accompanying default-deny.
+      # FALSE POSITIVE: an `else` branch (or a preceding `if (empty($CRED))`
+      # branch) that itself returns false/WP_Error when the credential is
+      # absent — the function fails closed and the trailing return true is
+      # unreachable when the header is omitted. Read the whole function
+      # before reporting.
+    patterns:
+      # Anchor: an unconditional `return true;` statement.
+      - pattern: return true;
+      # It must live inside a function that reads a credential from the
+      # request and gates a verify-or-reject check behind the credential
+      # being non-empty.
+      - pattern-inside: |
+          function $FUNC($REQ) {
+            ...
+            $CRED = $REQ->get_header(...);
+            ...
+            if (! empty($CRED)) {
+              ...
+              if (...) {
+                ...
+                return $DENY;
+                ...
+              }
+              ...
+            }
+            ...
+          }
+      # ...but the `return true;` itself must NOT be nested inside any
+      # if-block — i.e. it is the function's unconditional fallthrough, not
+      # a `return true;` reached only after a check already passed.
+      - pattern-not-inside: |
+          if (...) {
+            ...
+          }
+      - metavariable-pattern:
+          metavariable: $DENY
+          patterns:
+            - pattern-either:
+                - pattern: new WP_Error(...)
+                - pattern: "false"

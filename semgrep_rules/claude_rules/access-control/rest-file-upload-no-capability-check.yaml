@@ -1,0 +1,202 @@
+rules:
+  - id: claude.php.wordpress.access.rest-file-upload-no-capability-check
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A function reads from $_FILES or calls wp_handle_upload() without a
+      current_user_can() or is_user_logged_in() guard in the same scope.
+      If this function is registered as a REST API or AJAX callback with a
+      nonce-only permission_callback, unauthenticated visitors may upload files by
+      first obtaining a valid nonce from a publicly-accessible companion endpoint
+      (e.g. a /start_session route registered with __return_true that calls
+      wp_create_nonce('wp_rest') unconditionally).
+
+      Confirmed TP: ai-engine 3.4.7 classes/modules/files.php:787
+        register_rest_route uses 'permission_callback' => [$core, 'check_rest_nonce']
+        (nonce-only, no capability check). /start_session with __return_true
+        returns a valid wp_rest nonce to any unauthenticated visitor. Chain:
+        POST /start_session → get nonce → POST /files/upload with X-WP-Nonce.
+
+      Add current_user_can('upload_files') or require is_user_logged_in() at the
+      top of the upload handler before processing any $_FILES data.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      # TRIAGE GUIDANCE — Common FP patterns:
+      #
+      # 1. One-time transient token validates inside the handler — FP.
+      #    Pattern: handler calls get_transient() with a request-supplied token,
+      #    returns 403 if the transient is absent, then deletes it (single-use).
+      #    The __return_true at the route level is intentional; the real auth
+      #    is the one-time secret. Confirm by reading the handler for
+      #    get_transient() + early error return before the $_FILES access.
+      #    Confirmed FP: ai-engine 3.4.7 labs/mcp.php handle_upload()
+      #
+      # 2. Front-end contact / feedback upload forms — likely FP.
+      #    Some plugins intentionally allow unauthenticated file uploads for
+      #    public-facing forms (support tickets, job applications, etc.).
+      #    These are not bounty-eligible if the plugin's documented intent is
+      #    public upload AND the accepted file types are non-executable (images,
+      #    PDF). Check the plugin readme and the file type validation code.
+      #    Confirm that wp_check_filetype_and_ext() or an allowlist blocks PHP.
+      #    Confirmed FP: everest-forms 3.0.9.4
+      #      includes/abstracts/class-evf-form-fields-upload.php lines 142, 162
+      #      upload_file() is the nopriv AJAX handler for public form uploads;
+      #      it runs ajax_validate() → extension allowlist + wp_check_filetype_and_ext()
+      #      → returns errors[] on failure. The AJAX handler itself is safe.
+      #      NOTE: The sibling format() method in the same class IS vulnerable
+      #      (CWE-434) — it calls wp_check_filetype_and_ext(), records an error,
+      #      but proceeds to @rename() without early exit. format() does not read
+      #      $_FILES (uses $_POST JSON), so this rule does NOT fire on it — the
+      #      rule claude.php.wordpress.upload.filetype-check-before-rename-no-exit
+      #      catches that pattern instead.
+      #
+      # 3. check_ajax_referer() with admin-only nonce — FP.
+      #    If the handler calls check_ajax_referer('admin-action', ...) where
+      #    that nonce is only served by admin_enqueue_scripts(), the effective
+      #    privilege is admin. The function body has no current_user_can() but
+      #    the nonce itself gates access. Verify the nonce source.
+      #
+      # 4. Closure factory returned from an included file — FP.
+      #    Pattern: a file returns an anonymous function (return function() {...})
+      #    that reads $_FILES. The closure itself has no current_user_can() call,
+      #    but the file is require'd/include'd from within an admin-gated callback
+      #    (Settings API save, admin AJAX handler). The rule's pattern-not-inside
+      #    for named functions (function $FUNC(...)) does NOT match anonymous closures
+      #    because $FUNC requires an identifier — hence the rule fires even when the
+      #    calling context is already admin-gated. Triage: find where the file is
+      #    included/required and verify the caller enforces current_user_can() or is
+      #    a Settings API sanitize callback (implicitly manage_options-gated).
+      #    Confirmed FP: ultimate-dashboard 3.8.16 modules/tool/inc/process-import.php:15
+      #    — closure called by Settings API save handler (register_setting() enforces
+      #    manage_options before firing the sanitize callback chain).
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_handle_upload/
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/#permissions-callback
+    patterns:
+      # Match $_FILES reads or wp_handle_upload() calls …
+      - pattern-either:
+          # Assignment from any $_FILES key
+          - pattern: $X = $_FILES[$K]
+          # Two-level subscript (tmp_name, name, size, etc.)
+          - pattern: $X = $_FILES[$K][$K2]
+          # Direct pass to WP core upload handler
+          - pattern: wp_handle_upload(...)
+          # isset check on upload superglobal
+          - pattern: isset($_FILES[$K])
+      # … that are NOT inside a function with a capability check.
+      # Uses deep expression matching <... call ...> so that current_user_can() is
+      # found whether it appears as a bare call, inside if (!current_user_can(...)),
+      # or as the argument to any other expression in the function body.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... current_user_can(...) ...>;
+            ...
+          }
+      # … and NOT inside a function with an explicit login check
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... is_user_logged_in() ...>;
+            ...
+          }
+      # … and NOT inside a function guarded by TRIAGE GUIDANCE #1's documented
+      # FP class: a request-supplied token compared against a stored
+      # option/transient value as an early guard before the $_FILES access —
+      # the route-level __return_true/nonce-only gate is intentional; the
+      # real auth is this per-item stored secret, not a WP capability.
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  if (<... $GETTER(...) === $SUPER[$TOKENKEY] ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $GETTER
+                regex: '^(get_option|get_site_option|get_transient|get_site_transient)$'
+            - metavariable-regex:
+                metavariable: $SUPER
+                regex: '^\$_(POST|REQUEST|GET)$'
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  if (<... $SUPER[$TOKENKEY] === $GETTER(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $GETTER
+                regex: '^(get_option|get_site_option|get_transient|get_site_transient)$'
+            - metavariable-regex:
+                metavariable: $SUPER
+                regex: '^\$_(POST|REQUEST|GET)$'
+      # Generalized capability-wrapper naming convention: a static or instance
+      # method whose own name denotes a role/capability/permission-access gate
+      # (check_role_access, check_write_access, has_access, check_permission,
+      # is_allowed, ...) — covers plugin-authored wrappers around
+      # current_user_can() without needing to hardcode every plugin's own
+      # wrapper name. Both the bare-call and if-condition guard forms are
+      # excluded, for static and instance receivers.
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  <... $CLASS::$WRAP(...) ...>;
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $WRAP
+                regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access|role_access|write_access).*
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  if (<... $CLASS::$WRAP(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $WRAP
+                regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access|role_access|write_access).*
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  <... $OBJ->$WRAP(...) ...>;
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $WRAP
+                regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access|role_access|write_access).*
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  if (<... $OBJ->$WRAP(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $WRAP
+                regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access|role_access|write_access).*

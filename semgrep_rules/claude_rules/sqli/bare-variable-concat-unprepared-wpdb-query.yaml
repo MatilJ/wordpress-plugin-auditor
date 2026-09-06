@@ -1,0 +1,277 @@
+rules:
+  - id: claude.php.wordpress.sqli.bare-variable-concat-unprepared-wpdb-query
+    languages: [php]
+    severity: HIGH
+    message: |
+      A bare variable (not wrapped in $wpdb->prepare(), esc_sql(), an
+      integer/float cast, or another recognized SQL sanitizer) is
+      concatenated directly into a SQL string that is then executed via
+      $wpdb->query()/get_results()/get_row()/get_var()/get_col(), with no
+      ->prepare() call anywhere in between. This is CWE-89 SQL Injection
+      regardless of the variable's origin.
+
+      This shape is the common signature of "second-order" SQL injection:
+      the variable was NOT read from the current request's
+      $_GET/$_POST/$_REQUEST directly (a first-order taint scanner would
+      catch that), but instead arrived as a function parameter or local
+      carrying previously-submitted, persisted data — e.g. a value read back
+      from a stored form submission, log entry, queued job payload, or a
+      WordPress core hook callback that replays an earlier request (personal
+      data export/erasure callbacks, scheduled task payloads, webhook
+      re-deliveries, import/sync jobs). Because the tainted value entered the
+      database (or the callback queue) during an earlier, unrelated request,
+      it never touches a superglobal at the vulnerable call site itself.
+
+      Fix: never build a SQL string via '.'-concatenation of a variable that
+      isn't an int/float cast. Use $wpdb->prepare() with %s/%d/%f
+      placeholders (binding the variable as a separate argument), or at
+      minimum esc_sql(), for every interpolated value.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+      # TRIAGE GUIDANCE — this is a pattern-based (non-taint) lead: Semgrep
+      # cannot verify across files/requests whether $VAR ultimately
+      # originates from attacker-influenced input. Manually confirm the
+      # variable's origin before reporting:
+      #
+      # TRUE POSITIVE (second-order) — a function parameter of a callback
+      # registered on a WP core hook that replays previously-stored,
+      # user-influenced data. Example: wp_privacy_personal_data_exporters /
+      # wp_privacy_personal_data_erasers callbacks receive the email address
+      # of a data request the requester themselves submitted and confirmed.
+      # Note is_email() permits an unescaped single quote in the local-part
+      # per RFC 5322 atext (e.g. o'brien@example.com is a syntactically
+      # valid email), so "validated as an email address" does NOT imply
+      # SQL-metacharacter-free.
+      #
+      # TRUE POSITIVE (second-order) — value read back via
+      # get_post_meta()/get_option()/get_transient()/get_user_meta() on a
+      # row a lower-privileged user (or an unauthenticated submitter) can
+      # write, then concatenated unescaped into a later query.
+      #
+      # TRUE POSITIVE (first-order) — value taken directly from
+      # $_GET/$_POST/$_REQUEST in the same function; also confirm with
+      # wpdb-query-user-input-taint for a second, taint-verified signal.
+      #
+      # FALSE POSITIVE — $VAR is a hardcoded constant, an already-int-cast
+      # id, a developer-controlled enum/allowlist value, or a value produced
+      # entirely by WordPress core (e.g. a fresh auto-increment id returned
+      # from $wpdb->insert_id) with no attacker influence anywhere in its
+      # provenance.
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $Q = $BEFORE . $VAR . $AFTER;
+              ...
+              $WPDB->$METHOD($Q, ...);
+          - pattern: $WPDB->$METHOD($BEFORE . $VAR . $AFTER, ...)
+          # Trailing-variable variant (no $AFTER): the concat chain ends
+          # with the bare tainted variable and nothing follows it — e.g.
+          # "SELECT * FROM " . $wpdb->prefix . "table where id =" . $id.
+          # PHP '.' is left-associative, so an N-element chain parses as
+          # ((...).last), meaning the 3-operand $BEFORE.$VAR.$AFTER pattern
+          # above can only ever bind $VAR to the *second-to-last* element —
+          # it structurally cannot match when the tainted variable IS the
+          # last element with no trailing fragment. That is exactly the
+          # seeding CVE's shape and a very common raw-query idiom in WP
+          # plugins, so it needs its own branch rather than being folded
+          # into the pattern above.
+          - pattern: |
+              $Q = $BEFORE . $VAR;
+              ...
+              $WPDB->$METHOD($Q, ...);
+          - pattern: $WPDB->$METHOD($BEFORE . $VAR, ...)
+      # Prepare-then-execute idiom: the concatenated string is built as a
+      # placeholder skeleton (literal text plus %s/%d/%i tokens, or otherwise
+      # entirely developer-controlled fragments) and reassigned through
+      # $wpdb->prepare() BEFORE the final $WPDB->$METHOD($Q, ...) sink call —
+      # the "..." ellipsis between the concat-assignment and the sink call
+      # would otherwise silently skip over this reassignment, matching the
+      # unprepared shape even though the value the sink actually receives is
+      # $wpdb->prepare()'s own escaped output, not the raw concatenation.
+      - pattern-not: |
+          $Q = $BEFORE . $VAR . $AFTER;
+          ...
+          $Q = $WPDB->prepare($Q, $...PREPARGS);
+          ...
+          $WPDB->$METHOD($Q, ...);
+      - pattern-not: |
+          $Q = $BEFORE . $VAR;
+          ...
+          $Q = $WPDB->prepare($Q, $...PREPARGS);
+          ...
+          $WPDB->$METHOD($Q, ...);
+      # Variable-length IN() placeholder idiom: $VAR (the operand bound at
+      # the concat site) was itself assigned, earlier in the same function,
+      # the escaped return value of prepare() called indirectly through
+      # call_user_func_array([$wpdb, 'prepare'], ...) — the common WP
+      # workaround for building a dynamic IN(...) clause (array_fill('%d',
+      # $n, ...) + implode(), then call_user_func_array to pass the
+      # resulting variable-length placeholder list to prepare()'s fixed-
+      # arity signature). $VAR at the later concatenation site already
+      # holds prepare()'s escaped output, not raw attacker input, mirroring
+      # the intval()/absint()-assigned-earlier exclusions below.
+      - pattern-not-inside: |
+          function $ANYFUNC(...) {
+            ...
+            $VAR = call_user_func_array([$WPDB, 'prepare'], $...PREPARGS);
+            ...
+          }
+      - pattern-not-inside: |
+          function $ANYFUNC(...) {
+            ...
+            $VAR = call_user_func_array(array($WPDB, 'prepare'), $...PREPARGS);
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: ^(query|get_results|get_row|get_var|get_col)$
+      # Fix-derived FP guard: the patch for the seeding CVE replaced the
+      # concatenation assignment with $wpdb->prepare(...) entirely, which
+      # naturally does not match this pattern (prepare() is a single call
+      # expression, not a top-level '.' concatenation). The additional
+      # exclusions below cover variables sanitized in place before the
+      # concatenation without switching to prepare().
+      # NOTE: Semgrep's '.'-concatenation matching enumerates every element of
+      # a flattened concat chain as a candidate $VAR binding (not just the
+      # single "real" injectable element) — e.g. in
+      # "..." . $wpdb->prefix . "..." . esc_sql($x) . "...", $wpdb->prefix
+      # itself is one candidate $VAR. A sanitizer-name allowlist alone (only
+      # excluding esc_sql/intval/etc. BY NAME) leaves that candidate
+      # unexcluded and fires a false positive on already-safe code. Excluding
+      # by SHAPE (any property fetch / any call / any array access / any
+      # cast) rather than by sanitizer name closes every such candidate at
+      # once and is what actually suppresses the fix-derived negative case.
+      - metavariable-pattern:
+          metavariable: $VAR
+          patterns:
+            - pattern-not: $OBJ->$PROP
+            - pattern-not: $OBJ->$METHOD(...)
+            - pattern-not: $FUNC(...)
+            - pattern-not: $ARR[$KEY]
+            - pattern-not: (int) $X
+            - pattern-not: (float) $X
+            - pattern-not: (bool) $X
+            - pattern-not: "\"...\""
+            - pattern-not: "'...'"
+            # $VAR must be a leaf, not itself a nested concatenation — without
+            # this, a sanitizer call anywhere later in the SAME chain (e.g.
+            # esc_sql($x) two elements further right) gets absorbed into a
+            # larger $VAR sub-tree ($wpdb->prefix . "...'" . esc_sql($x)) that
+            # matches none of the shape exclusions above, re-opening the exact
+            # false positive they exist to close.
+            - pattern-not: $X . $Y
+      # Bare PHP constants (define()'d, ALL_CAPS by WP/PHP convention) are
+      # compile-time literals with no attacker influence, syntactically
+      # distinguishable from a PHP variable because a constant reference
+      # never carries the leading '$' sigil.
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: ^(?!(?:[A-Z_][A-Z0-9_]*)$).*
+      # $VAR is itself a double-quoted string literal whose only interpolated
+      # content is $wpdb-> table-name properties (WordPress's own prefixed
+      # table-name globals, e.g. "FROM $wpdb->comments comms ") with no other
+      # variable interpolation. PHP double-quoted string interpolation is
+      # parsed as a node shape distinct from a plain string, so it is not
+      # excluded by the bare "\"...\"" pattern-not above even though it
+      # carries no attacker-influenced content.
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: ^(?!"(?:[^$"]|\$wpdb->[a-zA-Z_][a-zA-Z0-9_]*)*"$).*
+      # $VAR was itself assigned, earlier in the same function, to the table
+      # prefix property concatenated with only a string literal — WordPress's
+      # own hardcoded-table-name idiom (e.g. $table = $wpdb->prefix . 'log';).
+      # Neither operand can carry attacker-controlled data, so the resulting
+      # identifier is safe regardless of the missing prepare()/esc_sql() at
+      # the point of use. Scoped narrowly to a single literal-only concat
+      # assignment (not a general "any prior assignment" allowance) so it
+      # cannot mask a later reassignment of the same variable to tainted data.
+      - pattern-not-inside: |
+          function $ANYFUNC(...) {
+            ...
+            $VAR = $WPDB->prefix . "...";
+            ...
+          }
+      - pattern-not-inside: |
+          function $ANYFUNC(...) {
+            ...
+            $VAR = $WPDB->prefix . '...';
+            ...
+          }
+      # Same hardcoded-table-name idiom generalized to a bare ALL_CAPS
+      # constant operand in place of a string literal, with or without an
+      # additional esc_sql() wrapper — the nested metavariable-regex (not
+      # the shape alone) is what keeps this exclusion from also suppressing
+      # a table name built from prefix + attacker-influenced data.
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $ANYFUNC(...) {
+                  ...
+                  $VAR = esc_sql( $WPDB->prefix . $CONST );
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $CONST
+                regex: ^[A-Z_][A-Z0-9_]*$
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $ANYFUNC(...) {
+                  ...
+                  $VAR = $WPDB->prefix . $CONST;
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $CONST
+                regex: ^[A-Z_][A-Z0-9_]*$
+      # $VAR was cast to a numeric type earlier in the same function
+      # (e.g. "$offset = intval($_POST['offset']); ... LIMIT " . $offset), a
+      # very common WordPress idiom for a paginated LIMIT/OFFSET clause built
+      # a few lines after the cast. A single "$VAR = intval(...)"-style
+      # assignment statement anywhere earlier in the function guarantees $VAR
+      # holds a PHP int/float at every later read of the same variable name —
+      # no SQL metacharacter can survive the cast regardless of how many
+      # statements separate the assignment from the concatenation site. This
+      # mirrors the existing $wpdb->prefix-idiom exclusions above, generalized
+      # to the standard WP numeric sanitizers instead of a hardcoded prefix.
+      - pattern-not-inside: |
+          function $ANYFUNC(...) {
+            ...
+            $VAR = intval(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $ANYFUNC(...) {
+            ...
+            $VAR = absint(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $ANYFUNC(...) {
+            ...
+            $VAR = floatval(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $ANYFUNC(...) {
+            ...
+            $VAR = (int) $CASTSRC;
+            ...
+          }
+      - pattern-not-inside: |
+          function $ANYFUNC(...) {
+            ...
+            $VAR = (float) $CASTSRC;
+            ...
+          }

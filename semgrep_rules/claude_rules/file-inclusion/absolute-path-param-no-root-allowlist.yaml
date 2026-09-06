@@ -1,0 +1,143 @@
+rules:
+  - id: claude.php.wordpress.file-inclusion.absolute-path-param-no-root-allowlist
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A request parameter is treated as an already-absolute filesystem path
+      (rather than a relative filename or numeric ID meant to be joined onto
+      a fixed base directory) and reaches a file-read sink, or is returned
+      from a helper straight out of an existence/is-a-file validator, with
+      no check anywhere in the function that the path falls under an
+      allowed root directory (CWE-22: Improper Limitation of a Pathname to
+      a Restricted Directory). Existence/type validators (is_file(),
+      file_exists()-style helpers) confirm the target is a real, readable
+      file but do not confine WHERE that file may live — every file the
+      web-server process can read becomes reachable, not merely a directory
+      the plugin intends to expose. Because the path is already absolute, a
+      literal ".."-substring denylist is irrelevant: no traversal sequence
+      is needed when the attacker can simply name an existing file directly.
+
+      Fix: after resolving the path, verify it starts with one of the
+      plugin's intended root directories (realpath() first, then
+      strpos()/str_starts_with() against the canonicalized root, or an
+      in_array() allow-list of permitted roots) before returning or serving
+      it.
+    metadata:
+      category: security
+      cwe: "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/22.html
+        - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+      # TRIAGE GUIDANCE:
+      #
+      # FALSE POSITIVE — regex-restricted id selects a fixed root, remainder
+      # traversal-stripped, but the two are concatenated before the sink
+      # rather than each being independently proven safe at that point:
+      #   $rootId = $_GET['root-id'];
+      #   if (!preg_match('#^[a-z]+$#', $rootId)) { throw new Exception(); }
+      #   $rest = stripTraversal($_GET['rel']);
+      #   $source = getRootPathById($rootId) . '/' . $rest;
+      #   return existsAndIsFile($source);
+      #   -> Both operands are independently constrained (an enum-like id
+      #      validated against a strict charset, and a traversal-stripped
+      #      remainder) even though this rule cannot see that the
+      #      concatenation as a whole is safe. Manually confirm the id
+      #      validation genuinely restricts to a fixed, small allowlist
+      #      before dismissing — a loose charset (e.g. permitting slashes)
+      #      would not actually confine the lookup.
+      #
+      # CONTEXT CHECK:
+      #   1. Is the flagged path built entirely from the request value with
+      #      NO concatenation onto a server-computed/allowlisted base at all
+      #      (the highest-confidence shape — nothing stands between the
+      #      request and the sink)?
+      #   2. If concatenated, is EVERY component of the concatenation either
+      #      developer-fixed or independently validated against a strict
+      #      allowlist/charset before use?
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+    pattern-sinks:
+      # The specific shape this rule was written for: a path-validator helper
+      # (name suggests existence/is-a-file checking, not containment) wraps
+      # the tainted value directly in a return statement.
+      - patterns:
+          - pattern: return $EXISTSFN($TAINTED);
+          - focus-metavariable: $TAINTED
+          - metavariable-regex:
+              metavariable: $EXISTSFN
+              regex: (?i).*(exist|is_?file).*
+      # Direct file-read sinks, for plugins that skip the helper-return
+      # indirection and read/serve the absolute path inline.
+      - patterns:
+          - pattern-either:
+              - pattern: file_get_contents($TAINTED, ...)
+              - pattern: readfile($TAINTED, ...)
+              - pattern: fopen($TAINTED, ...)
+          - focus-metavariable: $TAINTED
+    pattern-sanitizers:
+      - pattern-either:
+          # The actual fix for this bug class: a containment/allow-list check
+          # against a known-good root directory.
+          - pattern: realpath(...)
+          - pattern: strpos(...)
+          - pattern: str_starts_with(...)
+          # Filename-only sanitizers that discard directory components
+          # entirely, making an absolute-path interpretation impossible.
+          - pattern: basename(...)
+          - pattern: sanitize_file_name(...)
+          - pattern: sanitize_key(...)
+          - pattern: validate_file(...)
+      # Allowlist-membership gate (by-side-effect): the tainted value is
+      # checked with STRICT in_array(..., true) membership against an
+      # existing-values array before the sink runs — positively confining it
+      # to only values already present in that array, not an arbitrary
+      # attacker-chosen path. Replaces a plain (non-by-side-effect)
+      # `in_array(...)` entry formerly in the pattern-either above: that form
+      # only cleaned the call's own return value, not the checked variable
+      # inside the guarded branch (the actual `if (in_array($X, $ARR, true))
+      # { use($X) }` idiom) — and empirically, a plain sanitizer entry
+      # matching the same call expression suppresses this by-side-effect
+      # entry from ever applying to it, so the two cannot coexist for the
+      # same function.
+      - patterns:
+          - pattern: in_array($X, $ALLOWLIST, true)
+          - focus-metavariable: $X
+        by-side-effect: true
+      # A request value used only as the opaque lookup KEY of a WordPress
+      # storage-read function — the returned value is developer-controlled
+      # data set earlier via the matching set_*()/update_*() call, never a
+      # reflection of the key's own content, so taint should not propagate
+      # from the key argument through the return value.
+      - pattern-either:
+          - pattern: get_transient(...)
+          - pattern: get_site_transient(...)
+          - pattern: get_option(...)
+          - pattern: get_post_meta(...)
+          - pattern: get_user_meta(...)
+          - pattern: get_comment_meta(...)
+      # Named-resolver delegation: a method whose own name signals traversal-
+      # stripping or root-containment checking is trusted directly — the
+      # common WP-plugin idiom of delegating the actual safety check to a
+      # sibling helper rather than inlining it at the sink.
+      - patterns:
+          - pattern-either:
+              - pattern: $OBJ::$METHOD(...)
+              - pattern: $OBJ->$METHOD(...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: "(?i).*(traversal|contain|within|allowed_root|inroot).*"
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"

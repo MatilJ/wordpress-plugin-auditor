@@ -1,0 +1,54 @@
+rules:
+  - id: claude.php.wordpress.upload.strpos-false-coercion-extension-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      A file-extension allow-list check computes "$EXT is a suffix of $NAME"
+      by feeding strpos()/strrpos() directly into arithmetic with strlen()
+      (e.g. strpos($NAME, $EXT) + strlen($EXT) === strlen($NAME)) instead of
+      using an anchored suffix comparison. strpos()/strrpos() return the
+      boolean false — not an integer — when the needle is not found in the
+      haystack. PHP silently coerces false to 0 in an arithmetic '+'
+      expression, so whenever strlen($NAME) happens to equal strlen($EXT)
+      (i.e. the candidate filename is exactly as long as one of the allowed
+      extension strings) the "not found" case satisfies the comparison and
+      the disallowed file is accepted anyway — independent of its real
+      extension (CWE-697 manifesting as CWE-434 in an upload validator).
+
+      Replace the arithmetic identity with pathinfo($NAME, PATHINFO_EXTENSION)
+      + in_array(...), str_ends_with($NAME, $EXT), or an explicit
+      `strrpos(...) !== false &&` guard before any arithmetic on the result.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-434: Unrestricted Upload of File with Dangerous Type"
+        - "CWE-697: Incorrect Comparison"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: LOW
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://www.php.net/manual/en/function.strpos.php
+        - https://www.php.net/manual/en/language.types.boolean.php
+    patterns:
+      - pattern-either:
+          - pattern: strpos($NAME, $EXT) + strlen($EXT) === strlen($NAME)
+          - pattern: strpos($NAME, $EXT) + strlen($EXT) == strlen($NAME)
+          - pattern: strlen($NAME) === strpos($NAME, $EXT) + strlen($EXT)
+          - pattern: strlen($NAME) == strpos($NAME, $EXT) + strlen($EXT)
+          - pattern: strrpos($NAME, $EXT) + strlen($EXT) === strlen($NAME)
+          - pattern: strrpos($NAME, $EXT) + strlen($EXT) == strlen($NAME)
+          - pattern: strlen($NAME) === strrpos($NAME, $EXT) + strlen($EXT)
+          - pattern: strlen($NAME) == strrpos($NAME, $EXT) + strlen($EXT)
+      # Defensive rewrite some developers apply in place (without switching to
+      # pathinfo()): explicitly requiring the position to be found before the
+      # arithmetic runs, in the same boolean expression as the check itself.
+      # The official fix for the seeding CVE instead replaced the whole idiom
+      # with pathinfo()+in_array(), which never matches the patterns above by
+      # construction (different sink shape) — this pattern-not covers the
+      # narrower same-idiom guarded fix too.
+      - pattern-not-inside: strpos($NAME, $EXT) !== false && strpos($NAME, $EXT) + strlen($EXT) === strlen($NAME)
+      - pattern-not-inside: strrpos($NAME, $EXT) !== false && strrpos($NAME, $EXT) + strlen($EXT) === strlen($NAME)

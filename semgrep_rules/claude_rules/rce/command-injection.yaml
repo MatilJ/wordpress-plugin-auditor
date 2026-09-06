@@ -1,0 +1,61 @@
+rules:
+  - id: claude.php.wordpress.rce.command-injection
+    mode: taint
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      User-controlled input flows into a shell execution function (system/exec/
+      passthru/shell_exec/popen/proc_open/pcntl_exec) without passing through
+      escapeshellarg()/escapeshellcmd(). This is command injection (CWE-78).
+    metadata:
+      category: security
+      cwe: "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Command Injection"
+      technology: [php, wordpress]
+      references:
+        - https://owasp.org/www-community/attacks/Command_Injection
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: $_FILES
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+    pattern-sinks:
+      - pattern-either:
+          - pattern: system(...)
+          - pattern: exec(...)
+          - pattern: passthru(...)
+          - pattern: shell_exec(...)
+          - pattern: popen(...)
+          - pattern: proc_open(...)
+          - pattern: pcntl_exec(...)
+          - pattern: "`...`"
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: escapeshellarg(...)
+          - pattern: escapeshellcmd(...)
+          # Integer/float casts produce values with no shell metacharacters
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          # sanitize_key() output is [a-z0-9_-] only — no shell metacharacters
+          - pattern: sanitize_key(...)
+          # sanitize_title() → [a-z0-9%-_] — no shell metacharacters
+          - pattern: sanitize_title(...)
+          # sanitize_file_name() → [a-zA-Z0-9._-] — no shell metacharacters
+          - pattern: sanitize_file_name(...)
+          # sanitize_html_class() → [A-Za-z0-9_-] — no shell metacharacters
+          - pattern: sanitize_html_class(...)
+          # sanitize_mime_type() → [-+*.a-zA-Z0-9/] — no shell metacharacters
+          - pattern: sanitize_mime_type(...)

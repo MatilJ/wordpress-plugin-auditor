@@ -1,0 +1,133 @@
+rules:
+  - id: claude.php.wordpress.rce.extract-user-input
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      User-controlled input flows into extract(). This converts array keys
+      into local variables, allowing attackers to overwrite authorization
+      flags ($is_admin, $user_can), file paths used in include()/require(),
+      or any other variable in scope. Can escalate to auth bypass or RCE
+      (CWE-621 / CWE-94).
+      Remove extract() entirely and assign variables explicitly from named keys.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-621: Variable Extraction Error"
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Variable Extraction"
+      technology: [php, wordpress]
+      references:
+        - https://www.php.net/manual/en/function.extract.php
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — extract() on superglobals:
+      #   extract($_POST);
+      #   extract($_GET);
+      #   extract($_REQUEST);
+      #   → Attacker controls all variable names and values in scope.
+      #   Check what variables are used after extract() for auth checks,
+      #   file paths, SQL queries, or any security-sensitive operations.
+      #
+      # TRUE POSITIVE — extract() on unfiltered REST/AJAX data:
+      #   $data = $request->get_json_params();
+      #   extract($data);
+      #   → Same risk as superglobals.
+      #
+      # TRUE POSITIVE — extract() on an ArrayObject-style params/scope wrapper:
+      #   $params = $this->scope;              // set from request data elsewhere
+      #   extract($params->getArrayCopy());    // no EXTR_SKIP
+      #   include $template;                   // $template silently overwritten
+      #   → Many lightweight WP plugin MVC layers wrap view/controller
+      #   parameters in an ArrayObject-derived class (e.g. "ViewParams",
+      #   "Request"). getArrayCopy() returns whatever was stored, and if a
+      #   dangerous sink variable (include/require path, capability flag)
+      #   shares a key name with that wrapper, extract() overwrites it.
+      #
+      # TRUE POSITIVE — extract() on the raw "$data" parameter of a
+      # template/view render helper (CVE-2023-6623 class):
+      #   public static function views($name, $data = []) {
+      #       $file = static::get_views_path($name);   // set BEFORE extract()
+      #       extract($data);                           // no EXTR_SKIP
+      #       if (is_readable($file)) { include $file; }
+      #   }
+      #   → A caller elsewhere in the plugin (typically a REST/AJAX handler)
+      #   merges request-derived data into $data before calling this helper.
+      #   extract() then silently overwrites the already-assigned $file
+      #   variable if the caller's array contains a same-named key, turning
+      #   a fixed template path into an attacker-chosen one -> unauthenticated
+      #   LFI. The parameter itself is the practical taint boundary for this
+      #   plugin-MVC shape even when semgrep cannot trace the value back to
+      #   the REST callback in a different file/function.
+      #
+      # FALSE POSITIVE — extract() with EXTR_SKIP (or a stricter flag):
+      #   extract($_POST, EXTR_SKIP);
+      #   → EXTR_SKIP refuses to overwrite a variable that already exists in
+      #   the current symbol table, which is exactly the primitive attackers
+      #   need for this class of bug. This is the standard, sufficient fix.
+      #
+      # FALSE POSITIVE — shortcode_atts() output:
+      #   $atts = shortcode_atts(array('id' => '', 'class' => ''), $atts);
+      #   extract($atts);
+      #   → shortcode_atts() filters keys to the developer-defined allowlist
+      #   (first argument). Only declared keys survive. This is the standard
+      #   WordPress shortcode pattern and is safe.
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+          # ArrayObject-derived params/scope wrapper classes (common in
+          # lightweight WP plugin MVC layers) - getArrayCopy() surfaces
+          # whatever was stored, unfiltered.
+          - pattern: $OBJ->getArrayCopy()
+          # Raw "$data"/"$atts"/"$args"-style second parameter of a
+          # template/view render helper - the conventional shape callers
+          # (often a REST/AJAX handler in another file) fill with
+          # request-derived data before invoking the helper. focus-metavariable
+          # anchors the source to the parameter's definition site so normal
+          # flow-sensitive reassignment/sanitization still applies afterward.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      function $FUNC(..., $DATA) { ... }
+                  - pattern: |
+                      function $FUNC(..., $DATA = $DEFAULT) { ... }
+              - focus-metavariable: $DATA
+              - metavariable-regex:
+                  metavariable: $DATA
+                  regex: "^\\$(data|atts|attributes|args|params|vars|options)$"
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: shortcode_atts(...)
+          - pattern: (int) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          # sanitize_key() → [a-z0-9_-] — prevents meaningful variable overwrites
+          - pattern: sanitize_key(...)
+          # sanitize_title() → [a-z0-9%-_]
+          - pattern: sanitize_title(...)
+          # sanitize_html_class() → [A-Za-z0-9_-]
+          - pattern: sanitize_html_class(...)
+    pattern-sinks:
+      - patterns:
+          - pattern: extract($ARR, ...)
+          - focus-metavariable: $ARR
+          # EXTR_SKIP prevents extract() from overwriting a variable that
+          # already exists in scope - the documented, sufficient fix for
+          # this variable-clobbering class of bug.
+          - pattern-not: extract($ARR, EXTR_SKIP, ...)

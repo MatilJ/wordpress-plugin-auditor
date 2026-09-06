@@ -1,0 +1,96 @@
+rules:
+  - id: claude.php.wordpress.access-control.dependent-field-context-to-meta-key-no-allowlist
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A scalar value taken from a dependent/watched-field "context" array — the
+      mechanism behind auto-update, cascading-select, or conditional-field
+      features common in WordPress form-builder and dynamic-listing plugins —
+      is used directly as a meta-key lookup value: either assigned into a
+      generator/query settings array under a 'meta_key' key, or passed as the
+      key argument to get_post_meta()/get_user_meta(), without first checking
+      it against a server-side allow-list of keys the site owner actually
+      configured (CWE-862).
+
+      Generic content sanitizers (sanitize_text_field(), sanitize_key(),
+      trim()) do NOT close this gap — they only clean the string's characters,
+      they do not restrict WHICH meta key can be requested. When the
+      underlying read is a bulk/table-wide lookup (e.g. "SELECT DISTINCT
+      meta_value FROM wp_postmeta WHERE meta_key = %s", not scoped to a
+      single already-authorized object ID), any low-privileged or
+      unauthenticated caller who controls the dependent-field value can
+      enumerate every distinct value stored under an arbitrary meta key
+      sitewide — including PII stored in underscore-prefixed keys (e.g.
+      billing email/phone) that are never rendered in any public UI.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - The containing auto-update/cascading-select callback is reachable
+          without authentication (REST permission_callback returns true, or
+          wp_ajax_nopriv_*).
+        - The dependent-field value is used as the meta_key with no allow-list
+          check (in_array($key, $allowed, true) or equivalent) gating it.
+        - The read is a bulk/table-wide query, not scoped to a single
+          already-authorized object ID.
+
+      FALSE POSITIVE indicators:
+        - An in_array($key, $allowed_keys, true) (or equivalent capability/
+          allow-list) check gates the assignment/call, and $allowed_keys is
+          computed server-side from the site's own saved configuration (not
+          from the same request).
+        - The meta key is a hardcoded literal, not derived from the context
+          value.
+        - The callback requires a capability beyond Subscriber/Customer.
+
+      Fix: build the set of permitted keys server-side from data the site
+      owner already configured, and require the requested key to be a member
+      of that set via in_array($key, $allowed_keys, true) before it is used
+      in the lookup.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Information Disclosure"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/get_post_meta/
+        - https://developer.wordpress.org/reference/functions/get_user_meta/
+        - https://cwe.mitre.org/data/definitions/862.html
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: reset($CONTEXT)
+              - pattern: current($CONTEXT)
+              - pattern: array_shift($CONTEXT)
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+              }
+          - metavariable-regex:
+              metavariable: $FUNC
+              regex: "(?i).*(with_context|auto_update|cascad|dependent_field|listen_field|watched_field|trigger_field).*"
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $SETTINGS['meta_key'] = $KEY
+              - pattern: $SETTINGS["meta_key"] = $KEY
+              - pattern: get_post_meta($ID, $KEY, ...)
+              - pattern: get_user_meta($ID, $KEY, ...)
+          - focus-metavariable: $KEY
+          - pattern-not-inside: |
+              function $FUNC2(...) {
+                ...
+                if (<... in_array($KEY, ...) ...>) { ... }
+                ...
+              }
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"

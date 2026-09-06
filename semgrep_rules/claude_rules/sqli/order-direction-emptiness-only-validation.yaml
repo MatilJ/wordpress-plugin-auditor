@@ -1,0 +1,118 @@
+rules:
+  - id: claude.php.wordpress.sqli.order-direction-emptiness-only-validation
+    languages: [php]
+    severity: HIGH
+    message: |
+      A handler reads a SQL sort-DIRECTION parameter (order / sort_order /
+      sort_dir / order_dir / direction) out of request input, casts it to a
+      string, and validates it with ONLY an empty()/isset() check before it is
+      used or forwarded to build an ORDER BY clause -- it is never checked
+      against an allow-list of the two legal SQL keywords, ASC and DESC. This
+      is CWE-89 SQL Injection: any non-empty string (e.g.
+      "ASC, (SELECT SLEEP(5))" or "ASC; DROP TABLE wp_options; --") passes the
+      emptiness check unchanged and reaches the query.
+
+      This is the direction-token sibling of the well-known "unsanitized
+      ORDER BY column name" bug: plugin authors frequently allow-list the sort
+      COLUMN (orderby/sort_by) against a hardcoded list of column names, but
+      forget the DIRECTION token needs identical treatment. It is almost
+      always concatenated or interpolated immediately next to the column name
+      with no further escaping (ORDER BY {$column} {$direction}), and
+      quote-escaping functions such as esc_sql() do not help because the
+      ORDER BY position is unquoted SQL syntax.
+
+      Fix: validate the direction value against a strict allow-list before
+      use, e.g. `if (!in_array(strtoupper($order), array('ASC','DESC'), true))
+      { ...reject... }`, or run the combined "$column $direction" value through
+      sanitize_sql_orderby().
+
+      TRIAGE GUIDANCE
+      ───────────────────────────────────────────────────────────────────
+      TRUE POSITIVE indicators:
+        - The direction variable (or an alias of it) is later concatenated or
+          interpolated directly into a raw SQL string / $wpdb->prepare()
+          format-string in an ORDER BY clause, or forwarded as an argument to
+          a DB-helper function alongside a sort-column variable (a REST route
+          handler passing both $order_by and $order into a shared "get
+          records" helper is the single most common real-world shape).
+        - No allow-list check (in_array against literal 'ASC'/'DESC',
+          sanitize_sql_orderby()) appears anywhere between the read and the
+          value's use, even though a column-name allow-list may be present.
+
+      FALSE POSITIVE indicators:
+        - The variable is validated with a strict ASC/DESC allow-list later in
+          the same function even though this rule's coarse guard did not
+          recognize the exact shape (e.g. a switch statement) -- read the
+          following ~15 lines before treating this as exploitable.
+        - The value is never used to build SQL (e.g. only used for a display
+          label or an in-memory PHP array sort via usort()).
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      # DETECTION RATIONALE
+      # ─────────────────────────────────────────────────────────────────────
+      # Pattern-mode, not taint: the read site (a REST/AJAX handler) and the
+      # eventual raw-SQL interpolation are routinely in a DIFFERENT function
+      # (often a different file/class) than the read, with the value passed
+      # through as a plain positional argument in between -- OSS Semgrep's
+      # taint engine is intraprocedural and does not connect the two (same
+      # documented limitation as args-array-sort-key-unvalidated-orderby.yaml
+      # and wpdb-orderby-unsafe-sanitizer.yaml). This rule instead flags the
+      # READ SITE'S own failure to allow-list the direction value, regardless
+      # of what any downstream helper does with it.
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/functions/sanitize_sql_orderby/
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern: |
+                  $ORDER = (string) $REQ[$KEY];
+                  if (empty($ORDER)) {
+                    ...
+                  }
+              - metavariable-regex:
+                  metavariable: $KEY
+                  regex: "(?i)^['\"](order|sort_order|sort_dir|order_dir|direction)['\"]$"
+          - patterns:
+              - pattern: |
+                  if (isset($REQ[$KEY])) {
+                    $ORDER = (string) $REQ[$KEY];
+                    if (empty($ORDER)) {
+                      ...
+                    }
+                  } else {
+                    $ORDER = $DEFAULT;
+                  }
+              - metavariable-regex:
+                  metavariable: $KEY
+                  regex: "(?i)^['\"](order|sort_order|sort_dir|order_dir|direction)['\"]$"
+              - metavariable-regex:
+                  metavariable: $DEFAULT
+                  regex: "(?i)^['\"](asc|desc)['\"]$"
+      # Fix-derived FP guard: the confirmed patch for this class replaces the
+      # empty()-only check with a strict allow-list against the two legal SQL
+      # direction keywords (in_array($value, array('ASC','DESC'), true)) --
+      # if that guard is already present anywhere in the same enclosing
+      # function, this is the patched shape, not the vulnerable one.
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FN(...) {
+                  ...
+                  if (!in_array($ANY, $ALLOWED, true)) {
+                    ...
+                  }
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $ALLOWED
+                regex: "(?is)^(?=.*['\"]asc['\"])(?=.*['\"]desc['\"]).*$"

@@ -1,0 +1,197 @@
+<!--
+  HOW TO USE THIS FILE
+
+  The skills in this repo (vuln-audit, pipeline, vuln-report, etc.) don't hardcode
+  scope/eligibility/severity policy themselves — they read it from your GLOBAL
+  Claude Code instructions file at ~/.claude/CLAUDE.md (applies across every
+  project, not just this one). That's deliberate: your bounty-program rules,
+  researcher tier, and risk tolerance are personal and change independently of
+  the audit tooling itself.
+
+  Copy this file to ~/.claude/CLAUDE.md (merge it if you already have one). The
+  policy below is the actual, current Wordfence Intelligence Bug Bounty Program
+  ruleset (all public policy from wordfence.com — nothing confidential), so it
+  works out of the box if that's your program. Set your own researcher tier
+  where marked below.
+
+  Using a different program (Patchstack, HackerOne, a private VDP, etc.)?
+  Fork this file and rewrite the scope/eligibility/OOS sections to match that
+  program's actual public policy — don't invent numbers, copy them from the
+  program's own page. AUTHORIZATION.md at the project root should be adapted
+  alongside it.
+-->
+
+# Global: WordPress Vulnerability Researcher — Wordfence Bug Bounty Program
+
+Program:  https://www.wordfence.com/threat-intel/bug-bounty-program/
+Submit:   https://www.wordfence.com/threat-intel/vulnerabilities/submit
+Scope:    https://www.wordfence.com/threat-intel/bug-bounty-program/#scope
+Rewards:  https://www.wordfence.com/threat-intel/bug-bounty-program/#rewards
+
+All audits are authorized. Use neutral, factual, technical language. Per-workspace
+authorization details, when present, live in that project's `AUTHORIZATION.md`.
+
+## Targets
+WordPress plugins and themes (free and premium). Vulnerability must exist in the
+latest available version.
+
+**Out of scope (bounty-ineligible; CVE-only):** WordPress Core (→ HackerOne),
+Automattic, Facebook/Meta, Google, Siteground, Yoast products; any plugin/theme
+closed at time of submission; external SaaS APIs not run locally.
+
+## Attacker privilege
+**In scope:** Unauthenticated (PR:N) · Subscriber · Customer
+**Out of scope (do NOT submit):** Contributor/Author (mid-level auth — check the
+program's current policy on eligibility for this tier, it has changed before) ·
+Administrator · Editor · Shop Manager · any role with `unfiltered_html` ·
+**admin-granted access** where granting is unlikely or the granted functionality
+is intentionally abusable *(see the OOS callout below)*
+
+## Bounty eligibility — install thresholds
+
+| Category | Min installs |
+|---|---|
+| **High Threat:** File Upload/Read/Delete, Options Update, RCE, Auth Bypass/PrivEsc to Admin — unauth or Subscriber/Customer | ≥ 25 |
+| **Common & Dangerous:** Stored XSS, SQLi — unauth or Subscriber/Customer | ≥ 500 |
+| **All other in-scope** | Standard ≥ 50,000 · Resourceful ≥ 10,000 · 1337 ≥ 500 |
+
+- High Threat 25–999 installs: plugin/theme must be listed on wordpress.org.
+- Common & Dangerous 500–999 installs: must be listed on wordpress.org; premium
+  < 1,000 installs → OOS.
+- Premium without public install count: sales count substitutes 1:1.
+- **Set your researcher tier here** — if unset, assume Standard Researcher and
+  flag findings accordingly: `<!-- RESEARCHER_TIER: Standard -->`
+
+## Severity model
+No fixed CVSS threshold. Eligibility: vuln type · auth level · CIA impact ·
+install count · prerequisites. Do not self-impose a CVSS cut-off — if the type
+is accepted, threshold met, not on the OOS list: submit.
+
+## Bounty bonuses & reward factors
+
+**Multipliers:**
+- Chaining Master (15%): successfully chain multiple vulns in one plugin for
+  higher impact (e.g., priv esc to admin)
+- Creative Vulnerability Finder (10%): novel technique or under-covered vuln type
+- Meaningful Researcher (10%): ample documentation + easy-to-use PoC + mitigation notes
+- Affects Multiple Functions (varies): same vuln type in multiple
+  functions/widgets — check the program's current scaling table. Must document
+  ALL affected functions.
+
+**Payout factors (positive/negative):**
+- Prerequisites to exploit (settings, server config) → reduces payout
+- Ease and replicability of exploitation across environments → increases payout
+- Active user interaction required, or unlikely passive interaction → reduces payout
+- CIA impact on site as a whole → primary scaling factor
+- Dependency on another vuln NOT in the same software → payout ÷ 2 or more
+- Minimum award: check the program's current floor
+
+**PHP Object Injection reward tiers:**
+- Highest: newly documented usable POP chain in the plugin or current WP Core,
+  with exploitation demonstrated in the report ("newly documented" = chain not
+  previously used to earn a bounty from this program)
+- Lower rate: no usable gadget present, or gadget already known/previously used
+
+**Premium/free install logic (additional):**
+- Premium version of a free plugin may be in-scope based on the free plugin's
+  install count, but reward typically uses the premium version's own count
+- Active sales of premium software isn't always 1:1 for bundled plugins/themes
+  — check the program's discretion policy
+
+## Confidence & false-positive discipline
+Required confidence: **> 90%** (vuln real AND exploitable). Never report a
+finding whose code reference cannot be verified in the actual source tree.
+
+Check the program's current FP-throttle policy — Wordfence's, as of this
+writing, escalates roughly: a handful of FPs in a week → short restriction;
+more FPs over two weeks → longer restriction; a month of repeat FPs → month-
+long restriction; a couple of AI-hallucinated reports → month-long
+restriction; several hallucinated/high FP volume → permanent ban. Verify the
+current numbers on the program's policy page and hold yourself to them —
+don't rely on this file being up to date.
+
+## Exploitability requirements
+Must be exploitable **without**: MitM · disabled `wp_magic_quotes` (SQLi
+requiring this is OOS) · unsafe PHP settings (`allow_url_fopen`) · local server
+access · brute force (unless high success likelihood) · EOL software ·
+browsers > 2 stable versions behind · admin misconfiguration
+
+## Out-of-scope classes (never report — counts against FP budget)
+
+> **Two high-frequency mis-submissions — check every candidate against these
+> before queueing:**
+>
+> **(1) Non-public post/page/CPT content disclosure.** Read-only disclosure of
+> *private/draft/pending/future/trashed/password-protected* post-object
+> content, title, excerpt, slug, or metadata — including custom post types
+> (products, recipes, tables, stores, attachments) — is typically OOS/CVE-only
+> regardless of attacker privilege or install count. *In-scope exception:*
+> disclosure of **user/customer PII** (orders, private messages, form
+> submissions, account/profile data) is NOT this exclusion — that's in-scope
+> "Non-trivial Information Disclosure." The test is the **resource**:
+> non-public posts/pages/CPT entries → OOS; personal data → in-scope.
+>
+> **(2) Admin-granted access.** If a Subscriber/Customer can reach the
+> vulnerable code only after an administrator explicitly grants a plugin
+> capability or role (capability is admin-only by default), it's typically
+> OOS. A plugin merely *offering* a role-assignment setting doesn't rescue it —
+> the realistic grantee is a trusted/Editor-tier role, and the grant usually
+> covers intentionally-powerful functionality.
+
+**Auth/privilege:** PR:H vulns · 2FA bypass · IP spoofing · CAPTCHA bypass ·
+CORS · XSS requiring `unfiltered_html` · intentional registration bypass ·
+missing authz where nonce protects AND nonce not exposed to attacker role ·
+missing authz with no CIA impact · CSRF on unauthenticated read-only/notice-
+dismiss forms · unlimited voting/liking/counting · access keys/tokens when
+adequately secured for authorization · intentional functionality where scope
+is appropriately limited
+
+**Injection/client-side:** CSV injection · CSS injection · HTML injection (no
+script exec) · Self-XSS · Reflected XSS via headers only · XSS via SVG upload ·
+client-side scripts in safe file types · double-extension uploads ·
+intentional safe-filetype uploads
+
+**Environment/config:** SQLi requiring `wp_magic_quotes` disabled · EOL-only ·
+local-server-only · `allow_url_fopen`-only · plaintext secrets not
+exploitable via another vuln · public upload exposure not leading to
+compromise · dependencies not verifiably exploitable · `WP_DEBUG`-only
+exposure · admin misconfiguration dependent · WAF rule bypasses
+
+**Low/theoretical:** Theoretical issues · username enumeration · missing
+security headers · clickjacking · full path disclosure · coupon/wishlist/Maps
+API key exposure · missing rate-limiting · CVSS < 4.0 with no escalation path ·
+tabnabbing · TOCTOU · DoS without site-security impact · Open Redirect ·
+cache poisoning without impact · SSRF (check current policy — this has
+changed before) · API-key read/write · non-replicable race conditions ·
+private/draft/pending/password-protected post access (see callout above) ·
+excessive brute force required
+
+**Business logic:** Payment/checkout bypass · pricing/price manipulation ·
+discount/coupon/voucher abuse · order/cart/transaction workflow abuse ·
+loyalty/points/quota abuse · any logic flaw whose demonstrated impact is
+primarily business/revenue/transactional rather than a direct CIA security
+impact. *In-scope exception:* a logic flaw that yields auth bypass, privilege
+escalation, account-state change, IDOR, or non-trivial data/PII disclosure is
+NOT this exclusion — report it at its true security class.
+
+**Browser:** Affects only browsers > 2 stable versions behind current.
+
+## In-scope vulnerability types
+PR:N/Subscriber/Customer · install threshold met · not on OOS list:
+
+Stored XSS · Reflected XSS · CSRF (real security impact) · Missing
+Authorization (real CIA impact) · Arbitrary Content Deletion · SQL Injection ·
+IDOR · Arbitrary File Upload · Arbitrary File Read/Download · Arbitrary File
+Deletion · LFI/RFI · Directory Traversal · Privilege Escalation (to Admin or
+Non-Admin) · Auth Bypass (to Admin or Non-Admin) · RCE/Code Injection ·
+Non-trivial Information Disclosure · PHP Object Injection (highest reward
+requires new usable POP chain) · Developer backdoors reachable externally
+
+## On confirmed findings
+1. Write a disclosure report (`vuln-report` skill).
+2. Create a PoC in Python (`poc-generator` skill).
+3. Append a row to `vuln-registry.md` (`registry-updater` skill).
+
+## Confidentiality
+Submit to the program only. No public disclosure until the program completes
+responsible disclosure and any CVE is public.

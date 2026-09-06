@@ -1,0 +1,92 @@
+rules:
+  - id: claude.php.wordpress.sqli.sanitize-text-field-array-implode-sql-injection
+    languages: [php]
+    severity: HIGH
+    message: |
+      $wpdb->query() receives a SQL string that contains implode() in the argument
+      expression. When array elements are built from user-controlled or DB-stored
+      data sanitized only with sanitize_text_field() — which does not escape SQL
+      metacharacters — this constitutes SQL injection (CWE-89).
+      Fix: apply esc_sql() to each value before interpolating into array elements,
+      or replace the bulk INSERT...SELECT UNION with individual $wpdb->insert() calls.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      # DETECTION RATIONALE
+      # ─────────────────────────────────────────────────────────────────────
+      # Semgrep PHP taint does not propagate through $arr[] = "...$var..." + implode().
+      # This structural rule flags $wpdb->query() calls where implode() appears
+      # directly in the argument expression — a signal that SQL is assembled from
+      # accumulated array elements requiring review.
+      #
+      # KNOWN LIMITATION: This rule does not detect the pattern where implode() is
+      # assigned to an intermediate variable via .= before being passed to $wpdb->query():
+      #   $sql .= implode($sep, $parts);    // NOT caught here
+      #   $wpdb->query($sql);               // implode not in query() arg expression
+      # That pattern requires manual review when $parts contains interpolated values.
+      #
+      # TRIAGE STEPS
+      # ─────────────────────────────────────────────────────────────────────
+      # 1. Find the array being implode()d. Trace where elements are pushed.
+      # 2. For each push site ($arr[] = "..."), check what values are interpolated:
+      #    a. sanitize_text_field() output → UNSAFE. Single quotes pass through.
+      #       If origin is user POST/GET or user-writable DB column → SQLi.
+      #    b. esc_sql() applied before interpolation → safe in quoted SQL context.
+      #    c. intval() / absint() / sanitize_key() → safe, no SQL metacharacters.
+      #    d. Hardcoded string literal → safe.
+      # 3. If any element uses sanitize_text_field() (or no sanitization) on
+      #    user-reachable data → TRUE POSITIVE.
+      #
+      # COMMON FALSE POSITIVE — array_map('intval'/'absint'):
+      #   $ids = array_map('intval', $raw);
+      #   $wpdb->query("... IN (" . implode(',', $ids) . ")");
+      #   This is safe (integers only). Dismiss when all array elements come from
+      #   intval/absint/numeric-only transforms. NOTE: pattern-not for array_map
+      #   exclusion does not work reliably with Semgrep deep expression matching;
+      #   must be triaged manually.
+      #
+      # CONFIRMED PATTERN (duplicate-wp-page-post 2.9.5 — second-order SQLi):
+      #   Plugin reads post meta rows, sanitize_text_field($row->meta_key), builds
+      #   bulk INSERT...SELECT UNION via array push + implode. Contributor writes
+      #   meta_key via wp_ajax_add_meta → meta_key contains single quotes →
+      #   duplication triggers injection.
+      #
+      # COMMON FALSE POSITIVE — schema-migration column-rename arrays:
+      #   A DB-upgrade routine builds one $wpdb->prepare()-escaped fragment per
+      #   array element inside a loop (e.g. "CHANGE %1s %2s %3s" with column
+      #   from/to/type args), pushes each already-escaped fragment into an array,
+      #   then implode()s that array into a single ALTER TABLE statement outside
+      #   any further prepare() wrapper. The rule cannot see that each element was
+      #   already escaped at its push site. Dismiss when: (a) every pushed element
+      #   was itself the return value of $wpdb->prepare(...), and (b) the
+      #   loop's input array is a hardcoded developer-defined schema map (not
+      #   reachable from any request parameter or option value) — verify by
+      #   tracing every caller of the enclosing function up to its argument origin.
+      #   UPDATE: a pattern-not-inside spanning the enclosing function (the same
+      #   technique used by file-download-no-path-validation.yaml for cross-statement
+      #   sanitizer detection) does correlate the push-site with the later implode(),
+      #   provided the array is populated via a single `$ARRAY[] = $wpdb->prepare(...)`
+      #   push statement (see patterns below) — confirmed against two real per-element-
+      #   prepare() instances in a live audit.
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/classes/wpdb/#protect-queries-against-sql-injection-attacks
+    patterns:
+      - pattern: $wpdb->query(<... implode($SEP, $ARRAY) ...>, ...)
+      # Exclude fully parameterized calls — pattern-not works for prepare wrapper
+      - pattern-not: $wpdb->query($wpdb->prepare(<... implode($SEP, $ARRAY) ...>, ...), ...)
+      # Each array element individually escaped via $wpdb->prepare() at its push site,
+      # even though the push happens in an earlier statement than the implode()/query() call.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $ARRAY[] = $wpdb->prepare(...);
+            ...
+          }

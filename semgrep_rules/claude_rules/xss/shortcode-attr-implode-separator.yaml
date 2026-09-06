@@ -1,0 +1,72 @@
+rules:
+  # Detects a user-supplied value (shortcode attribute or request parameter) flowing
+  # into the separator argument of implode()/join() without HTML escaping.
+  # Developers frequently escape individual array items but omit escaping on the
+  # separator, which is inserted between items in the HTML output unescaped (CWE-79).
+  #
+  # Limitation: tracks direct flow from $atts[$KEY] / $_GET[...] etc. into implode().
+  # Class-property indirection ($this->params[$key]) is not tracked by this rule —
+  # trace manually if the shortcode attribute is stored in an object property first.
+  - id: claude.php.wordpress.xss.shortcode-attr-implode-separator
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A user-supplied value flows into the separator argument of implode() / join()
+      without HTML escaping. Individual array items may be escaped, but the unescaped
+      separator is inserted between them in the rendered HTML, enabling Stored XSS
+      (shortcode attribute) or Reflected XSS (request parameter) (CWE-79).
+
+      Fix — escape the separator before passing to implode():
+        implode(esc_html($atts['glue']), $items)
+
+      Or escape the entire implode() result (only if all items are also safe):
+        echo esc_html(implode($sep, $items))
+
+      Note: this rule tracks direct data flow. If the shortcode attribute is first
+      stored in an object property ($this->params[$key]), verify the property's use
+      in implode() manually.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET[...]
+          - pattern: $_POST[...]
+          - pattern: $_REQUEST[...]
+          - pattern: $_COOKIE[...]
+          - pattern: $atts[...]
+          - pattern: filter_input(...)
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: esc_html(...)
+          - pattern: esc_attr(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: sanitize_text_field(...)
+          - pattern: sanitize_key(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          - pattern: wp_strip_all_tags(...)
+          - pattern: strip_tags(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: implode($SEP, ...)
+              - pattern: join($SEP, ...)
+          - focus-metavariable: $SEP

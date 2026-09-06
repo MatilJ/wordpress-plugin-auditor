@@ -1,0 +1,66 @@
+rules:
+  - id: claude.php.wordpress.ssrf.fetch-feed-user-input
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      User-controlled URL flows into fetch_feed(). WordPress's fetch_feed()
+      uses WP_SimplePie_File internally, which calls wp_safe_remote_request().
+      wp_safe_remote_request() validates URLs via wp_http_validate_url(), which
+      blocks RFC-1918 private ranges (10.x, 172.16-31.x, 192.168.x) and
+      loopback (127.x), but does NOT block 169.254.0.0/16 (AWS EC2 IMDS,
+      GCP metadata, Azure IMDS). An attacker who controls the feed URL can
+      perform blind SSRF to cloud metadata endpoints (CWE-918).
+      Validate the URL with wp_http_validate_url() plus an explicit
+      169.254.x.x check before passing it to fetch_feed().
+    metadata:
+      category: security
+      cwe: "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp: "A10:2021 - Server-Side Request Forgery"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Server-Side Request Forgery (SSRF)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/fetch_feed/
+        - https://developer.wordpress.org/reference/functions/wp_http_validate_url/
+    pattern-propagators:
+      - pattern: wp_unslash($SRC)
+        from: $SRC
+        to: $RETURN
+      - pattern: json_decode($SRC, ...)
+        from: $SRC
+        to: $RETURN
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_params(...)
+          - pattern: $REQUEST->get_body_params(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_body()
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: wp_http_validate_url(...)
+          - pattern: urlencode(...)
+          - pattern: rawurlencode(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          - pattern: sanitize_key(...)
+          - pattern: sanitize_title(...)
+          - pattern: sanitize_html_class(...)
+    pattern-sinks:
+      - patterns:
+          - pattern: fetch_feed($URL, ...)
+          - focus-metavariable: $URL

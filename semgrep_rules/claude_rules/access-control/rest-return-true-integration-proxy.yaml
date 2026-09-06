@@ -1,0 +1,87 @@
+rules:
+  - id: claude.php.wordpress.access-control.rest-return-true-integration-proxy
+    languages: [php]
+    severity: HIGH
+    message: |
+      A REST API GET route under a third-party integration namespace (email
+      marketing, CRM, payment, messaging, or webhook provider) is registered
+      with the literal permission_callback => '__return_true' — WordPress's
+      built-in "always allow" callback, not a placeholder wrapper function
+      that merely happens to return true. Handlers behind routes like this
+      commonly read the site's own stored, often paid, third-party API
+      credential and use it to call out to that service, returning the
+      response to the caller. With no capability check on the route, any
+      unauthenticated visitor can trigger the site's privileged credential
+      and receive the proxied third-party account data (mailing lists,
+      contacts, CRM records) — CWE-862 leading to CWE-200 disclosure of the
+      account's own third-party data.
+
+      TRIAGE REQUIRED:
+      1. Confirm the callback reads a stored credential (get_option() or a
+         constant) and forwards it in an outbound request
+         (wp_remote_get()/wp_remote_post()), returning response-derived data.
+         A route that only echoes static/public data is a false positive.
+      2. Confirm no capability/nonce check exists in a dispatcher this rule
+         cannot see (uncommon for a directly-registered route, but verify).
+      3. A sibling POST route on the same namespace intended for public form
+         submission (no account data returned) is expected and not itself a
+         finding — the GET/READABLE restriction below already excludes it.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - "https://cwe.mitre.org/data/definitions/862.html"
+        - "https://cwe.mitre.org/data/definitions/200.html"
+        - "https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/#permissions-callback"
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    patterns:
+      # Anchored on the literal '__return_true' string (WP Core's own
+      # convenience callback) rather than a named wrapper function — a real
+      # fix replaces this with an actual callable reference and structurally
+      # no longer matches, so a patched route is silent without a separate
+      # pattern-not clause. Each branch repeats the registration match paired
+      # with one of the two array syntaxes crossed with one of the two
+      # naming-location checks (route path vs. callback name), since a bare
+      # metavariable-regex cannot stand alone as a pattern-either branch.
+      - pattern-either:
+          - patterns:
+              - pattern: |
+                  register_rest_route($NS, $ROUTE, array(..., 'methods' => $METHOD, ..., 'callback' => $CB, ..., 'permission_callback' => '__return_true', ...))
+              - metavariable-regex:
+                  metavariable: $ROUTE
+                  regex: "(?i).*(mailchimp|sendgrid|sendinblue|brevo|constant.?contact|getresponse|aweber|convertkit|klaviyo|mailerlite|activecampaign|hubspot|salesforce|zoho|pipedrive|drip|infusionsoft|campaign.?monitor|stripe|paypal|braintree|square|razorpay|twilio|zapier|integromat|api.?key|api.?integration|third.?party.?api|crm.?sync).*"
+          - patterns:
+              - pattern: |
+                  register_rest_route($NS, $ROUTE, array(..., 'methods' => $METHOD, ..., 'callback' => $CB, ..., 'permission_callback' => '__return_true', ...))
+              - metavariable-regex:
+                  metavariable: $CB
+                  regex: "(?i).*(mailchimp|sendgrid|sendinblue|brevo|constant.?contact|getresponse|aweber|convertkit|klaviyo|mailerlite|activecampaign|hubspot|salesforce|zoho|pipedrive|drip|infusionsoft|campaign.?monitor|stripe|paypal|braintree|square|razorpay|twilio|zapier|integromat|api.?key|api.?integration|third.?party.?api|crm.?sync).*"
+          - patterns:
+              - pattern: |
+                  register_rest_route($NS, $ROUTE, [..., 'methods' => $METHOD, ..., 'callback' => $CB, ..., 'permission_callback' => '__return_true', ...])
+              - metavariable-regex:
+                  metavariable: $ROUTE
+                  regex: "(?i).*(mailchimp|sendgrid|sendinblue|brevo|constant.?contact|getresponse|aweber|convertkit|klaviyo|mailerlite|activecampaign|hubspot|salesforce|zoho|pipedrive|drip|infusionsoft|campaign.?monitor|stripe|paypal|braintree|square|razorpay|twilio|zapier|integromat|api.?key|api.?integration|third.?party.?api|crm.?sync).*"
+          - patterns:
+              - pattern: |
+                  register_rest_route($NS, $ROUTE, [..., 'methods' => $METHOD, ..., 'callback' => $CB, ..., 'permission_callback' => '__return_true', ...])
+              - metavariable-regex:
+                  metavariable: $CB
+                  regex: "(?i).*(mailchimp|sendgrid|sendinblue|brevo|constant.?contact|getresponse|aweber|convertkit|klaviyo|mailerlite|activecampaign|hubspot|salesforce|zoho|pipedrive|drip|infusionsoft|campaign.?monitor|stripe|paypal|braintree|square|razorpay|twilio|zapier|integromat|api.?key|api.?integration|third.?party.?api|crm.?sync).*"
+      # Data-disclosure routes are virtually always read (GET); excludes the
+      # commonly-legitimate public POST form-submission sibling route.
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: "(?i).*(get|readable).*"

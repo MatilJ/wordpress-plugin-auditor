@@ -1,0 +1,127 @@
+rules:
+  - id: claude.php.wordpress.rce.dynamic-hook-name-do-action
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A request-derived value is used directly as the hook NAME argument to
+      do_action()/apply_filters() (or their _ref_array variants), without
+      first validating it against a fixed allow-list of expected action
+      names (CWE-94). Because the hook name is attacker-chosen rather than
+      a hardcoded literal, a requester can trigger execution of ANY hook
+      currently registered on the site by name — including hooks a plugin
+      only intended to be fired from a specific, already-authorized internal
+      code path — with attacker-influenced arguments.
+
+      This is especially dangerous when the same value is also passed as
+      the nonce action to wp_verify_nonce($nonce, $action): since the action
+      string used for verification is itself attacker-chosen, the requester
+      can generate a valid nonce for it without any special privilege
+      (wp_create_nonce() is not a privileged call), so the nonce check
+      provides no real protection against the hook-name injection.
+
+      Note: sanitize_text_field()/sanitize_key()/wp_unslash()/trim() do NOT
+      prevent this. None of them restrict the value to a set of known-safe
+      hook names — any lowercase, underscore-separated string (the shape of
+      most real WordPress hook names) passes through unchanged.
+
+      TRIAGE REQUIRED: confirm what hooks are realistically reachable on the
+      target site/plugin ecosystem and whether any registered callback for
+      an attacker-reachable hook name performs a sensitive or state-changing
+      operation when invoked out of its normal, developer-intended context.
+
+      Mitigation: validate the extracted action/hook name against an
+      explicit allow-list (in_array($action, $allowed, true)) — or a
+      switch/match with a default-deny branch — before it reaches
+      do_action()/apply_filters().
+    metadata:
+      category: security
+      cwe: "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Code Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/94.html
+        - https://developer.wordpress.org/reference/functions/do_action/
+        - https://developer.wordpress.org/apis/security/nonces/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: filter_input(...)
+          - pattern: file_get_contents("php://input")
+    pattern-propagators:
+      - pattern: wp_unslash($INPUT)
+        from: $INPUT
+        to: return
+      - pattern: stripslashes_deep($INPUT)
+        from: $INPUT
+        to: return
+      # Neither sanitizer restricts the character set enough to eliminate a
+      # valid hook-name string — see the message note above.
+      - pattern: sanitize_text_field($INPUT)
+        from: $INPUT
+        to: return
+      - pattern: sanitize_key($INPUT)
+        from: $INPUT
+        to: return
+      - pattern: trim($INPUT)
+        from: $INPUT
+        to: return
+    pattern-sanitizers:
+      # A numeric cast cannot form a meaningful hook-name string.
+      - pattern-either:
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: do_action($ACTION, ...)
+              - pattern: do_action_ref_array($ACTION, ...)
+              - pattern: apply_filters($ACTION, ...)
+              - pattern: apply_filters_ref_array($ACTION, ...)
+          - focus-metavariable: $ACTION
+          # Fix pattern: the same value is checked for membership in a
+          # hardcoded allow-list anywhere in the enclosing function before
+          # the sink is reached (either branch direction of the guard).
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... !in_array($ACTION, $ALLOWED, ...) ...>) {
+                  ...
+                }
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... in_array($ACTION, $ALLOWED, ...) ...>) {
+                  ...
+                }
+                ...
+              }
+          # Alternate fix idiom: instead of (or in addition to) allow-
+          # listing the action value, the dispatching function is gated by
+          # a capability/auth check anywhere in its body (bare call or
+          # nested inside a condition) before the sink is reached.
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                <... current_user_can(...) ...>;
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                <... is_user_logged_in(...) ...>;
+                ...
+              }

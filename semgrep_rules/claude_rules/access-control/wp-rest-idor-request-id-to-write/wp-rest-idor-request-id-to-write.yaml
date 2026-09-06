@@ -1,0 +1,82 @@
+rules:
+  - id: wp-rest-idor-request-id-to-write
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: >
+      An ID or data value from the REST request body flows directly into a
+      database delete or update operation. If the endpoint does not verify that
+      the target record belongs to the authenticated user, any user with the
+      required capability can delete or modify records they do not own
+      (CWE-639 — IDOR / Missing Authorization).
+
+      Before performing the write: fetch the record, compare its owner field
+      (host_id / user_id / author_id) against get_current_user_id(), and return
+      wp_send_json_error() / WP_Error with 403 on mismatch.
+    metadata:
+      category: security
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      # TRIAGE GUIDANCE — Common FP patterns:
+      #
+      # 1. Cache engine update($key, $value) calls: the rule fires when $key is derived
+      #    from a user-supplied lookup ID (e.g. account_id → md5 → cache prefix string).
+      #    The sink $OBJ->update($DATA, ...) matches with $DATA = the cache key, not a
+      #    record identifier. IDOR requires the ability to modify another user's record —
+      #    writing API response data to a cache keyed by the user's own lookup ID does
+      #    not meet this bar. Triage: confirm $OBJ is a cache/transient manager and the
+      #    second arg is an API or internal response, not a user record field.
+      #
+      # 2. Admin-only permission_callback: if the REST endpoint's permission_callback
+      #    requires manage_options or a plugin capability granted only to the administrator
+      #    role, the auth floor is PR:H (out of scope for bounty). This rule cannot trace
+      #    interprocedural permission_callback calls — verify by reading the callback body.
+      #
+      # 3. get()-before-update pattern (suppressed by rule): when the endpoint calls
+      #    $this->cpt->get($id) on the SAME object before $this->cpt->update($id, ...),
+      #    the rule suppresses the hit. This matches the WP ORM ownership-check pattern:
+      #    get() queries with a post_type constraint (returning null on type mismatch)
+      #    and the downstream null-check gates the update. Confirm by reading get():
+      #    if it uses get_posts(['post_type' => $this->slug, 'p' => $id]), cross-type
+      #    IDOR is not possible. Per-user ownership IDORs (same type, wrong user) are
+      #    not caught by this suppression — verify the get() result is checked for
+      #    authorship if per-user ownership matters in context.
+      vulnerability_class: "Insecure Direct Object Reference (IDOR)"
+      technology: [php, wordpress]
+      references:
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/
+    pattern-sources:
+      - pattern-either:
+          # Raw request body — inline pattern (most common in WP plugins)
+          - pattern: json_decode(file_get_contents("php://input"), ...)
+          # Raw request body — two-step assignment pattern
+          - pattern: file_get_contents("php://input")
+          # WP_REST_Request methods
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+    pattern-sinks:
+      - patterns:
+          - pattern: $OBJ->delete($ID, ...)
+          - focus-metavariable: $ID
+      - patterns:
+          - pattern: $OBJ->update($DATA, ...)
+          - focus-metavariable: $DATA
+          # Suppress FP when a get() call on the same object with the same ID
+          # precedes the update() in the same function scope. In WP ORM patterns,
+          # $OBJ->get($id) queries with a post_type constraint and returns null on
+          # mismatch, so the downstream null-check gate prevents cross-type writes.
+          # Confirmed FP: REST update endpoint that calls $this->cpt->get($id) before
+          # $this->cpt->update($id, ...) — the get() is the type-verification gate.
+          - pattern-not-inside: |
+              $OBJ->get($DATA);
+              ...
+              $OBJ->update($DATA, ...);
+      - pattern: $wpdb->delete($TABLE, $WHERE, ...)
+      - pattern: $wpdb->update($TABLE, $DATA, $WHERE, ...)

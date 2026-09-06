@@ -1,0 +1,258 @@
+rules:
+  - id: claude.php.wordpress.file-write-delete.request-filename-unlink-no-auth-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      A non-literal path reaches unlink()/rmdir()/wp_delete_file() inside a
+      function that contains no current_user_can()/wp_verify_nonce()/
+      check_ajax_referer()/is_user_logged_in() call of its own. When the
+      path variable is ultimately sourced from a $_GET/$_POST/$_REQUEST
+      value (directly, or via a separate getter/helper method — common in
+      vendored file-manager code, where the request read and the delete
+      call live in different methods and are therefore invisible to a
+      same-function taint trace), this is an unauthenticated deletion
+      primitive. Sanitizing the filename (basename(), sanitize_file_name(),
+      stripslashes()) only stops path traversal outside the target
+      directory — it does nothing to establish that the requesting visitor
+      is entitled to delete that file, so this remains exploitable against
+      every file inside the directory even when traversal is fully blocked.
+
+      Common in plugins that vendor a third-party upload/file-manager
+      library (adapted from the blueimp jQuery-File-Upload PHP class or
+      similar) largely unmodified: the library dispatches its own delete
+      action off a raw $_SERVER['REQUEST_METHOD'] === 'DELETE' check or a
+      $_REQUEST['_method'] === 'DELETE' override, bypassing WordPress's
+      native admin-ajax/REST nonce+capability idioms entirely. A plugin
+      that exposes that class's entry script directly (no wp-load.php
+      bootstrap, no capability gate anywhere in the call chain) hands any
+      unauthenticated visitor the ability to delete arbitrary files in the
+      shared upload directory (CWE-22/CWE-862).
+
+      TRIAGE:
+        1. Confirm the path variable is actually influenced by request data
+           — trace it back through any getter/helper calls in the same
+           class/file to a $_GET/$_POST/$_REQUEST read. A path built solely
+           from constants, config, or a DB-looked-up value the current
+           request cannot influence is a false positive.
+        2. Confirm the deletion sink is reachable by an unauthenticated
+           visitor or Subscriber — trace the entry point (a standalone PHP
+           script with no WordPress bootstrap, a wp_ajax_nopriv_* hook, or
+           a REST route with permission_callback => '__return_true').
+        3. A capability/nonce check performed in a SIBLING function (e.g. a
+           REST controller's separate *_permissions_check() method, or a
+           hook-registration-time current_user_can() gate) is invisible to
+           this rule, which only inspects the deleting function's own body
+           — verify the real call chain before confirming.
+        4. basename()/sanitize_file_name()/realpath() on the filename do
+           NOT neutralize this finding — they address traversal, not the
+           missing authorization check this rule targets.
+        5. If the only files reachable are ones the deleting user already
+           owns (an ownership/session-id comparison precedes the delete),
+           this is a false positive.
+        6. This rule also fires when check_ajax_referer()/wp_verify_nonce()
+           is the ONLY guard present (see CVE-2026-57709,
+           membership-for-woocommerce <= 3.1.0): a nonce proves the request
+           came from a page this site rendered, not that the requester is
+           entitled to delete this specific file. Confirm the action is
+           reachable without a session tied to a specific identity — a
+           wp_ajax_nopriv_* registration, or any nonce action created via
+           wp_create_nonce() and emitted to logged-out visitors, means the
+           nonce buys nothing. If the site only ever emits this nonce to
+           already-authenticated pages, this is a false positive.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+        - "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Arbitrary File Deletion"
+      technology: [php, wordpress]
+      references:
+        - "https://cwe.mitre.org/data/definitions/22.html"
+        - "https://cwe.mitre.org/data/definitions/862.html"
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    # This is deliberately a structural pattern rule, not taint mode: the
+    # real-world shape (a getter method reads the request, a separate
+    # delete()/action method performs the unlink()) splits the source and
+    # sink across two function bodies, which same-file interprocedural
+    # taint tracking does not reliably follow. Matching the sink function's
+    # own missing-auth shape directly — regardless of where its path
+    # argument originated — is the reliable anchor; TRIAGE step 1 covers
+    # the request-influence check a taint engine would otherwise automate.
+    patterns:
+      - pattern-either:
+          - pattern: unlink($PATH)
+          - pattern: rmdir($PATH)
+          - pattern: wp_delete_file($PATH)
+      - pattern-either:
+          # Branch A: no auth/nonce signal of any kind anywhere in the
+          # deleting function. Deep-match (<... X ...>;) rather than a bare
+          # "X(...);" statement — required because the real-world idiom is
+          # almost always the check nested inside an if-condition
+          # (if (!current_user_can(...)) {...}), never a bare top-level
+          # call; a bare-statement pattern-not-inside does not match that
+          # idiom and would leave the rule firing on every correctly-
+          # authorized handler.
+          - patterns:
+              - pattern-inside: |
+                  function $F(...) {
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    <... current_user_can(...) ...>;
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    <... wp_verify_nonce(...) ...>;
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    <... check_ajax_referer(...) ...>;
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    <... is_user_logged_in(...) ...>;
+                    ...
+                  }
+              # $PATH was assigned from download_url() earlier in the same function.
+              # download_url() is a WP core function (wp-admin/includes/file.php) that
+              # downloads a URL to a NEW, randomly-named local temp file and returns
+              # that generated path — the caller does not choose or predict which file
+              # this is, even when the URL argument passed to download_url() is itself
+              # request-influenced. Deleting that self-generated temp file on a
+              # failed-sideload cleanup path is not an arbitrary-file-deletion primitive.
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    $PATH = <... download_url(...) ...>;
+                    ...
+                  }
+              # $PATH was drawn from a glob() result enumerated earlier in the
+              # same function (directly, or via an intermediate $FILES array
+              # iterated with foreach). glob() returns only files that already
+              # exist on disk and match a fixed, developer-written wildcard —
+              # an attacker cannot inject an arbitrary target path through it,
+              # even though the resulting filenames are not literal constants.
+              # Common idiom: a scheduled/activation-time cleanup routine that
+              # deletes every file matching a fixed extension in a fixed
+              # directory tree.
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    $FILES = glob(...);
+                    ...
+                    foreach ($FILES as $PATH) {
+                      ...
+                    }
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    foreach (<... glob(...) ...> as $PATH) {
+                      ...
+                    }
+                  }
+              # Nested variant: the glob() assignment and its consuming
+              # foreach are siblings inside an OUTER foreach block (e.g. an
+              # outer loop over subdirectories, an inner loop over each
+              # subdirectory's matching files) rather than direct top-level
+              # statements of the enclosing function.
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    foreach ($OUTER as $OUTERITEM) {
+                      ...
+                      $FILES = glob(...);
+                      ...
+                      foreach ($FILES as $PATH) {
+                        ...
+                      }
+                      ...
+                    }
+                    ...
+                  }
+          # Branch B: check_ajax_referer()/wp_verify_nonce() IS present, but
+          # it is the only guard, and $PATH itself was assigned directly
+          # from $_POST/$_GET/$_REQUEST (through any number of wrapper
+          # calls) with no realpath() anywhere in the function to confine
+          # it. A nonce alone does not establish that the requester may
+          # delete this specific file (CVE-2026-57709,
+          # membership-for-woocommerce <= 3.1.0: check_ajax_referer() was
+          # the function's only guard, the action was also registered
+          # wp_ajax_nopriv_*, and sanitize_text_field()/wp_unslash() do not
+          # strip '../' — see TRIAGE step 6). Deliberately narrower than
+          # Branch A (requires $PATH traced to a request superglobal in
+          # this same function) so a legitimate nonce-gated cleanup of a
+          # fixed/developer-controlled path is not flagged.
+          - patterns:
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    <... current_user_can(...) ...>;
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    <... is_user_logged_in(...) ...>;
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    <... realpath(...) ...>;
+                    ...
+                  }
+              - pattern-inside: |
+                  function $F(...) {
+                    ...
+                    $PATH = <... $SRC ...>;
+                    ...
+                  }
+              - metavariable-pattern:
+                  metavariable: $SRC
+                  patterns:
+                    - pattern-either:
+                        - pattern: $_POST[...]
+                        - pattern: $_GET[...]
+                        - pattern: $_REQUEST[...]
+      # WP core delete-lifecycle hook callback: WordPress core only fires
+      # before_delete_post/deleted_post/wp_trash_post/trashed_post AFTER its own
+      # internal current_user_can('delete_post', $id) check has already passed
+      # (see wp-admin/includes/post.php wp_delete_post()/wp_trash_post()), so a
+      # method registered as that hook's callback in the same class inherits its
+      # authorization from WP core and needs no capability check of its own.
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                class $CLASS {
+                  ...
+                  function $REGFUNC(...) {
+                    ...
+                    add_action( $HOOK, array( $THIS, '$F' ), ...);
+                    ...
+                  }
+                  ...
+                  function $F(...) {
+                    ...
+                  }
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $HOOK
+                regex: "^'(before_delete_post|deleted_post|wp_trash_post|trashed_post|untrash_post|untrashed_post)'$"

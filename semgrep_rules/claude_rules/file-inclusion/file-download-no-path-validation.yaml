@@ -1,0 +1,183 @@
+rules:
+  - id: claude.php.wordpress.file.download-endpoint-path-traversal
+    languages: [php]
+    severity: HIGH
+    message: |
+      A file-serving endpoint sets Content-Disposition or octet-stream
+      headers and calls readfile()/file_get_contents() in the same
+      function, but no path sanitizer (basename, sanitize_file_name,
+      realpath, validate_file) appears in the function body. This is the
+      most common WordPress path traversal pattern (CWE-22). An attacker
+      can typically read wp-config.php to obtain database credentials and
+      authentication salts.
+      Canonicalize the file path with realpath() and verify the prefix
+      against an allowed base directory.
+    metadata:
+      category: security
+      cwe: "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - "CVE-2024-9047: WordPress File Upload plugin path traversal in wfu_file_downloader.php"
+        - "CVE-2025-15433: Shared Files plugin Contributor+ download traversal"
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — download handler with no path validation:
+      #   header('Content-Disposition: attachment; filename=' . basename($file));
+      #   header('Content-Type: application/octet-stream');
+      #   readfile($file);
+      #   → Note: basename() on Content-Disposition header filename is cosmetic
+      #     (controls the download name). It does NOT sanitize the path passed
+      #     to readfile(). Check what sanitizes $file itself.
+      #
+      # FALSE POSITIVE — hardcoded base + sanitized filename:
+      #   $file = PLUGIN_DIR . '/exports/' . sanitize_file_name($name) . '.csv';
+      #   header('Content-Disposition: attachment');
+      #   readfile($file);
+      #   → Path safely constructed. sanitize_file_name strips traversal.
+      #
+      # CONTEXT CHECK:
+      #   1. Is the function registered via wp_ajax_nopriv_ or admin_post_nopriv_?
+      #   2. Is the file path built from user input?
+      #   3. Does sanitization apply to the PATH (not just the download filename)?
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                header(...);
+                ...
+                readfile($PATH);
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                header(...);
+                ...
+                echo file_get_contents($PATH);
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $PATH
+          regex: .*\$.*
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            basename(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            sanitize_file_name(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            realpath(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            validate_file(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            sanitize_key(...);
+            ...
+          }
+      # Class-scope variants: the path-resolution/sanitization step lives in a sibling
+      # helper method (not inline in the readfile()-containing function) — a common
+      # OOP delegation pattern (e.g. a private getDownloadFilePath() the public download
+      # handler calls). Confirmed FP: mailpoet 5.34.0 ExportDownload::downloadFile() calls
+      # getDownloadFilePath(), which does the realpath()+prefix-check, in the same class.
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $ANY(...) {
+              ...
+              basename(...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $ANY(...) {
+              ...
+              sanitize_file_name(...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $ANY(...) {
+              ...
+              realpath(...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $ANY(...) {
+              ...
+              validate_file(...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $ANY(...) {
+              ...
+              sanitize_key(...);
+              ...
+            }
+            ...
+          }
+      # FALSE POSITIVE — path variable assigned once, in the same function, from a
+      # zero-argument directory helper concatenated only with a literal string or a
+      # class/static constant (no request-superglobal in the assignment):
+      #   $file = get_temp_dir() . self::FILE_PATH;
+      #   readfile($file);
+      #   → Confirmed FP: fully hardcoded, not attacker-influenceable.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $PATH = $DIRFUNC() . self::$CONST;
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $PATH = $DIRFUNC() . static::$CONST;
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $PATH = $DIRFUNC() . "...";
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $PATH = $DIRFUNC() . '...';
+            ...
+          }

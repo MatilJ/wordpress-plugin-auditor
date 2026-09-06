@@ -1,0 +1,138 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+
+  # wp_ajax_nopriv_ and admin_post_nopriv_ handlers fire for unauthenticated
+  # visitors. A callback that creates or modifies WordPress posts without any
+  # capability or nonce check allows any visitor to insert or modify site
+  # content — including post titles, content, status, and authorship.
+  #
+  # wp_update_post(), wp_insert_post(), and wp_publish_post() have NO
+  # built-in capability checks — authorization is the caller's responsibility.
+
+  - id: claude.php.wordpress.access-control.wp-ajax-nopriv-content-write
+    mode: join
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      A callback registered on a wp_ajax_nopriv_ or admin_post_nopriv_ hook
+      performs a post write (wp_update_post, wp_insert_post, wp_publish_post)
+      without any capability check (current_user_can) or nonce verification
+      (wp_verify_nonce, check_ajax_referer, check_admin_referer). Any
+      unauthenticated visitor can invoke this endpoint and create or modify
+      arbitrary site content (CWE-862).
+
+      Impact: An attacker can modify any post's title, content, excerpt, and
+      author via wp_update_post with a user-supplied post ID — enabling site
+      defacement, SEO poisoning, or watering-hole injection. With wp_insert_post,
+      arbitrary content can be created with any post_status including 'publish'.
+
+      TRIAGE:
+      1. Confirm the post write depends on user-supplied input
+         ($_GET, $_POST, $_REQUEST, php://input).
+      2. Check for auth checks in called sub-functions — this rule only
+         inspects the direct callback body.
+      3. If the post ID is hardcoded and content is not attacker-controlled,
+         impact may be limited — but still Missing Authorization.
+      4. Check whether post_status is set to 'publish' — if so, this
+         bypasses editorial workflow regardless of user role.
+
+      Fix: add current_user_can('edit_post', $post_id) for updates or
+      current_user_can('edit_posts') + current_user_can('publish_posts')
+      for inserts, plus wp_verify_nonce() before the post write. Remove
+      the nopriv hook registration if unauthenticated access is not intended.
+    join:
+      rules:
+        - id: nopriv-hook-registration
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_action('$ACTION', [..., '$CALLBACK'], ...);
+                - pattern: add_action('$ACTION', '$CALLBACK', ...);
+                - pattern: add_action('$ACTION', array($OBJ, '$CALLBACK'), ...);
+            - metavariable-regex:
+                metavariable: $ACTION
+                regex: (wp_ajax_nopriv_.*|admin_post_nopriv_.*)
+
+        - id: no-auth-content-write
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_update_post(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_insert_post(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_publish_post(...);
+                      ...
+                    }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  wp_verify_nonce(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  check_ajax_referer(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  check_admin_referer(...);
+                  ...
+                }
+
+      on:
+        - 'nopriv-hook-registration.path == no-auth-content-write.path'
+        - 'nopriv-hook-registration.$CALLBACK == no-auth-content-write.$CALLBACK'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Arbitrary Content Modification"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/hooks/wp_ajax_nopriv_action/
+        - https://developer.wordpress.org/reference/functions/wp_update_post/
+        - https://developer.wordpress.org/reference/functions/wp_insert_post/

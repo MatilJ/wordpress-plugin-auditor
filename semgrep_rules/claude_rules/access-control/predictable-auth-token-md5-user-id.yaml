@@ -1,0 +1,103 @@
+rules:
+  - id: claude.php.wordpress.access-control.predictable-auth-token-md5-user-id
+    languages: [php]
+    severity: HIGH
+    message: |
+      md5() or sha1() is called with a user ID variable as the sole input to generate
+      an authentication token or hash. User IDs are sequential integers starting at 1,
+      so the resulting token is trivially predictable — an attacker can compute valid
+      tokens for any user by iterating IDs (CWE-330). Replace with a
+      cryptographically random value via wp_generate_password(32, false) or
+      bin2hex(random_bytes(16)), or at minimum include a secret salt unknown to the
+      attacker (e.g., AUTH_SALT, wp_hash()).
+    metadata:
+      category: security
+      cwe: "CWE-330: Use of Insufficiently Random Values"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/330.html
+        - https://www.wordfence.com/threat-intel/vulnerabilities/wordpress-plugins/flavor/flavor-flavor-flavor-flavor
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern: md5($USER_ID)
+              - metavariable-regex:
+                  metavariable: $USER_ID
+                  regex: \$\w*(user_id|user|uid|userid)\w*
+          - patterns:
+              - pattern: sha1($USER_ID)
+              - metavariable-regex:
+                  metavariable: $USER_ID
+                  regex: \$\w*(user_id|user|uid|userid)\w*
+      # Known FP — rate-limit / cache-key derivation: the hash's only consumer
+      # in the enclosing function is get_transient()/set_transient() (or the
+      # site-wide/object-cache equivalents) as the KEY argument, never compared
+      # against a stored secret via ===/hash_equals(). Predictability of a
+      # cache/throttle key has no authentication-bypass impact — unlike a real
+      # auto-login or password-reset token, nothing is granted by guessing it.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $KEY = <... md5($USER_ID) ...>;
+            ...
+            get_transient($KEY);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $KEY = <... md5($USER_ID) ...>;
+            ...
+            set_transient($KEY, ...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $KEY = <... sha1($USER_ID) ...>;
+            ...
+            get_transient($KEY);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $KEY = <... sha1($USER_ID) ...>;
+            ...
+            set_transient($KEY, ...);
+            ...
+          }
+      # Known FP — the hashed value is itself a high-entropy external secret
+      # (retrieved via a meta accessor whose key name signals a token/secret),
+      # not the small sequential WP user ID this rule targets. Hashing an
+      # already-unguessable value yields an unguessable hash regardless of
+      # how the result is later used — CWE-330's "sequential/guessable
+      # source" premise does not hold.
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  $USER_ID = <... get_post_meta($POSTID, $METAKEY, ...) ...>;
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $METAKEY
+                regex: (?i).*(token|secret|api[-_]?key|password).*
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  $USER_ID = <... get_user_meta($USERID2, $METAKEY, ...) ...>;
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $METAKEY
+                regex: (?i).*(token|secret|api[-_]?key|password).*

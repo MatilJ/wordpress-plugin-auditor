@@ -1,0 +1,98 @@
+rules:
+  - id: claude.php.wordpress.upload.move-uploaded-file-no-wp-validation
+    languages: [php]
+    severity: HIGH
+    message: |
+      move_uploaded_file() is called — either inside a function, or at the
+      top level of a standalone script with no enclosing function at all —
+      without any WordPress file type validation (wp_check_filetype,
+      wp_check_filetype_and_ext, or wp_handle_upload) anywhere in the same
+      scope. Without WordPress validation, the uploaded file type is not
+      checked against the allowed MIME types list, potentially allowing PHP
+      files to be uploaded and executed (CWE-434).
+
+      TRIAGE:
+        1. Check for non-WP validation before move_uploaded_file():
+           pathinfo($file, PATHINFO_EXTENSION) against an allowlist/denylist,
+           finfo_file() or mime_content_type() checks, or getimagesize()
+           for image-only contexts. Do NOT dismiss solely because a large
+           denylist of PHP-adjacent extensions is present — a string-based
+           extension check (however long) still only inspects the
+           attacker-supplied filename, not real file content, and is a
+           known-bypassable class distinct from wp_check_filetype_and_ext()/
+           wp_handle_upload(), which validate the actual MIME type. Only
+           dismiss when real WP validation (one of the three functions this
+           rule already excludes on) runs before the move.
+        2. Verify the destination is web-accessible.
+        3. Determine the authentication requirement for this code path. Pay
+           particular attention to standalone dispatcher/handler scripts
+           (a file with no enclosing function, dispatching on a raw
+           $_REQUEST/$_POST action key via if/switch) — this architecture is
+           frequently invoked directly, bypassing admin-ajax.php's routing
+           entirely, so no nonce/capability check may run at all.
+        4. Check if this is inside a WordPress plugin/theme context at all
+           — some bundled libraries handle uploads independently.
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern: move_uploaded_file($SRC, $DST)
+      - pattern-either:
+          # Branch 1 (original): inside a named function/method, validation
+          # search scoped to that function's body.
+          - patterns:
+              - pattern-inside: |
+                  function $FN(...) {
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FN(...) {
+                    ...
+                    wp_check_filetype(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FN(...) {
+                    ...
+                    wp_check_filetype_and_ext(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FN(...) {
+                    ...
+                    wp_handle_upload(...);
+                    ...
+                  }
+          # Branch 2 (variant, CWE-434 standalone-dispatcher shape): the sink
+          # sits in top-level routing code with no enclosing function at all
+          # — common in older-style plugins that implement a direct-request
+          # action dispatcher (an if/switch on a raw request key) instead of
+          # routing through admin-ajax.php. The whole file is the validation
+          # scope since there is no function body to bound the search.
+          - patterns:
+              - pattern: move_uploaded_file($SRC, $DST)
+              - pattern-not-inside: |
+                  function $FN(...) {
+                    ...
+                  }
+              - pattern-not-inside: |
+                  wp_check_filetype(...);
+                  ...
+              - pattern-not-inside: |
+                  wp_check_filetype_and_ext(...);
+                  ...
+              - pattern-not-inside: |
+                  wp_handle_upload(...);
+                  ...

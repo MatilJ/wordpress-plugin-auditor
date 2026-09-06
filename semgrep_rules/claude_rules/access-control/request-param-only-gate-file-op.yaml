@@ -1,0 +1,119 @@
+rules:
+  - id: claude.php.wordpress.access-control.request-param-only-gate-file-op
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function performs a destructive file operation (recursive directory
+      delete, file overwrite) whose only preceding gate is a comparison against
+      $_GET/$_REQUEST values — not a nonce or capability check. A request-parameter
+      equality/isset check is a ROUTING condition: it only selects which code path
+      executes, it does not verify the caller's identity or privilege level. If
+      this function is reachable on a hook that fires before authentication (e.g.
+      a bootstrap hook registered unconditionally at class-load time) or on any
+      nopriv/unauthenticated endpoint, any visitor who supplies the matching
+      parameters can trigger the file operation (CWE-862).
+
+      TRIAGE REQUIRED:
+      1. Confirm no current_user_can() / wp_verify_nonce() / check_ajax_referer()
+         / check_admin_referer() exists anywhere in this function.
+      2. Trace how this function becomes reachable: hook registration (and which
+         hook — pay particular attention to hooks that fire on every request
+         before auth_redirect(), such as after_setup_theme, plugins_loaded, init),
+         file-scope class instantiation, or a direct AJAX/REST callback. A
+         function that is never actually invoked is a FP (dead code).
+      3. Confirm the destructive operation has real effect: a fixed/no-op target
+         (e.g., deleting a path that can never exist) would reduce impact, but a
+         real theme/plugin/upload directory or file is a genuine finding.
+
+      Confirmed TP pattern: a class constructor registered on after_setup_theme
+      (fires on every request, before auth_redirect()) gates entirely on a
+      multi-field $_GET equality check, then unconditionally deletes a directory
+      and overwrites a JSON configuration file with no capability or nonce check
+      anywhere in the call chain.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/apis/security/user-capabilities-and-roles/
+        - https://developer.wordpress.org/reference/hooks/after_setup_theme/
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    patterns:
+      # Anchor: the destructive file operation itself — the hit is reported here.
+      - pattern-either:
+          - pattern: $FS->delete(...)
+          - pattern: unlink(...)
+          - pattern: file_put_contents(...)
+          - pattern: $FS->put_contents(...)
+      # Must be inside a function (the enclosing scope this rule reasons about).
+      - pattern-inside: |
+          function $FUNC(...) {
+            ...
+          }
+      # The same function reads a $_GET/$_REQUEST value — the routing-gate
+      # condition this rule targets (as opposed to a genuine auth check, excluded below).
+      - pattern-either:
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+                <... $_GET[$KEY] ...>;
+                ...
+              }
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+                <... $_REQUEST[$KEY] ...>;
+                ...
+              }
+      # Exclude: a real authorization or CSRF check exists anywhere in the function.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can(...) ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            wp_verify_nonce(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... wp_verify_nonce(...) ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            check_ajax_referer(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            check_admin_referer(...);
+            ...
+          }

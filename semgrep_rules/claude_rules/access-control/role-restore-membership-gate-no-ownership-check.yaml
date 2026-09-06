@@ -1,0 +1,162 @@
+rules:
+  - id: claude.php.wordpress.access-control.role-restore-membership-gate-no-ownership-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      A request-controlled identifier (username/email/ID) is checked only for
+      membership in a plugin-stored list/array, then used to resolve an
+      arbitrary WP_User via get_user_by(), and a role is granted/restored to
+      that resolved user via add_role()/set_role() — with no check that the
+      requester IS that user and no re-validation that the target's current
+      role assignment still warrants the restore (CWE-266 — Incorrect
+      Privilege Assignment).
+
+      This is the shape of a "temporary role switch" / "act as another role"
+      feature: a privileged role is snapshotted (e.g. into user meta) when a
+      user switches to a lower role, and a self-service endpoint later
+      restores that snapshot for any identifier present in the stored list.
+      If the plugin never invalidates the snapshot/list entry when the
+      target user's actual role is changed through normal WordPress user
+      management (the profile_update / set_user_role hooks), a user who was
+      legitimately demoted can still resurrect the stale privileged role by
+      supplying their own (or another still-listed) identifier — because
+      array membership was mistaken for proof of continued entitlement.
+
+      Fix: bind the restore to the authenticated requester
+      (get_current_user_id() must equal the resolved target's ID, or require
+      current_user_can() on the actor) AND invalidate the stored snapshot/
+      list entry whenever the target's role changes via profile_update /
+      set_user_role, so a later restore cannot resurrect a role the site
+      owner already revoked.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - The request-controlled identifier resolved by get_user_by() can
+          name ANY user in the stored list, not just the requester's own
+          account (no get_current_user_id() / wp_get_current_user() identity
+          check gates the branch).
+        - The role passed to add_role()/set_role() comes from a stored
+          snapshot (e.g. user meta recorded at an earlier "switch" event),
+          not a hardcoded low-privilege literal.
+        - No sibling method/hook anywhere in the class purges the stored
+          list entry or the snapshot meta in response to a role-change event
+          (profile_update, set_user_role, user_register).
+
+      FALSE POSITIVE indicators:
+        - The branch first verifies get_current_user_id() === $target->ID
+          (or an equivalent capability check on the actor) before restoring
+          the role.
+        - The same class also registers/implements an invalidation routine
+          (e.g. deletes the snapshot meta or removes the list entry) hooked
+          to a role-change event — the class already closes the stale-state
+          window even if this exact function looks permissive in isolation.
+        - The restored role is a fixed, low-privilege literal (e.g. always
+          'subscriber') rather than a stored higher-privilege snapshot.
+    metadata:
+      category: security
+      cwe: "CWE-266: Incorrect Privilege Assignment"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/266.html
+        - https://developer.wordpress.org/reference/functions/get_user_by/
+        - https://developer.wordpress.org/reference/hooks/profile_update/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $UNAME = $SOURCE;
+              ...
+              if (<... in_array($UNAME, $LIST) ...>) {
+                ...
+                $TARGET = get_user_by($TYPE, $UNAME);
+                ...
+                $TARGET->add_role($ROLE);
+                ...
+              }
+          - pattern: |
+              $UNAME = $SOURCE;
+              ...
+              if (<... in_array($UNAME, $LIST) ...>) {
+                ...
+                $TARGET = get_user_by($TYPE, $UNAME);
+                ...
+                $TARGET->set_role($ROLE);
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $SOURCE
+          regex: '.*\$_(GET|POST|REQUEST|COOKIE).*'
+      # Suppressed when the SAME class also contains a sibling method that
+      # purges the stored snapshot/list state (the compensating-control shape
+      # of the real-world fix, added on a role-change hook rather than at
+      # this call site itself).
+      - pattern-not-inside:
+          pattern-either:
+            - pattern: |
+                class $CLASS {
+                  ...
+                  function $ANY(...) {
+                    ...
+                    delete_user_meta(...);
+                    ...
+                  }
+                  ...
+                }
+            - pattern: |
+                class $CLASS {
+                  ...
+                  function $ANY(...) {
+                    ...
+                    add_action( "profile_update", ...);
+                    ...
+                  }
+                  ...
+                }
+            - pattern: |
+                class $CLASS {
+                  ...
+                  function $ANY(...) {
+                    ...
+                    add_action( 'profile_update', ...);
+                    ...
+                  }
+                  ...
+                }
+            - pattern: |
+                class $CLASS {
+                  ...
+                  function $ANY(...) {
+                    ...
+                    add_action( 'set_user_role', ...);
+                    ...
+                  }
+                  ...
+                }
+      # Suppressed when the enclosing function first proves the requester
+      # IS the resolved target before restoring the role. Function-level
+      # (not if-level) containment is required: the sink pattern's matched
+      # span starts at the earlier $UNAME assignment, outside the identity
+      # check's own if-block, so only a containing node spanning the whole
+      # function reliably encloses the full match.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... get_current_user_id() === $TARGET->ID ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... $TARGET->ID === get_current_user_id() ...>) {
+              ...
+            }
+            ...
+          }

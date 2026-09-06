@@ -1,0 +1,135 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+
+  # wp_ajax_nopriv_ and admin_post_nopriv_ handlers fire for unauthenticated
+  # visitors. A callback that creates or modifies WordPress comments without
+  # any capability or nonce check allows any visitor to inject comments on
+  # arbitrary posts. wp_insert_comment(), wp_update_comment(), and
+  # wp_new_comment() have NO built-in capability checks — authorization is
+  # the caller's responsibility.
+
+  - id: claude.php.wordpress.access-control.nopriv-comment-write-no-auth
+    mode: join
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A callback registered on a wp_ajax_nopriv_ or admin_post_nopriv_ hook
+      performs a comment write (wp_insert_comment, wp_update_comment,
+      wp_new_comment) without any capability check (current_user_can). Any
+      unauthenticated visitor can invoke this endpoint and create or modify
+      comments on arbitrary posts (CWE-862). A nonce check alone
+      (wp_verify_nonce/check_ajax_referer/check_admin_referer) does NOT
+      neutralize this: per CANON:nonce-verification, a nonce confirms
+      request intent (CSRF) but not caller identity or privilege — if the
+      nonce's own action string is emitted to every visitor (a public
+      front-end localization, common for nopriv AJAX endpoints), it
+      provides zero authorization value here.
+
+      Impact: Attacker can inject comment content on any post, potentially
+      including stored XSS payloads if comment content is not properly
+      escaped on output. wp_insert_comment() bypasses WordPress's built-in
+      comment moderation and spam checks (unlike wp_new_comment which
+      applies them) — and if the call's argument array omits the
+      'comment_approved' key entirely, WordPress core's own default
+      (comment.php: "$comment_approved = ! isset($data['comment_approved'])
+      ? 1 : ...") auto-approves the injected comment immediately, making it
+      publicly visible with no moderation step at all.
+
+      TRIAGE:
+      1. Confirm the comment write depends on user-supplied input.
+      2. Check for auth checks in called sub-functions.
+      3. Distinguish wp_insert_comment (bypasses moderation) from
+         wp_new_comment (applies moderation) — the former is higher impact,
+         especially when its args array has no 'comment_approved' key.
+      4. Check whether comment_post_ID is user-controlled — if so, comments
+         can be injected on any post.
+      5. If a nonce check is present, verify where wp_create_nonce() for
+         that exact action string is emitted — a nonce localized on every
+         front-end page load is not a privilege boundary.
+
+      Fix: add current_user_can('edit_post', $comment_post_id) before the
+      comment write (a nonce check is not a substitute), or remove the
+      nopriv hook registration if unauthenticated access is not intended.
+    join:
+      rules:
+        - id: nopriv-hook-registration
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_action('$ACTION', [..., '$CALLBACK'], ...);
+                - pattern: add_action('$ACTION', '$CALLBACK', ...);
+                - pattern: add_action('$ACTION', array($OBJ, '$CALLBACK'), ...);
+            - metavariable-regex:
+                metavariable: $ACTION
+                regex: (wp_ajax_nopriv_.*|admin_post_nopriv_.*)
+
+        - id: no-auth-comment-write
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_insert_comment(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_update_comment(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_new_comment(...);
+                      ...
+                    }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            # Nonce checks (wp_verify_nonce/check_ajax_referer/
+            # check_admin_referer) are deliberately NOT treated as
+            # disqualifying here — per CANON:nonce-verification a nonce
+            # confirms request intent, not caller privilege, so a nonce-only
+            # gate on an otherwise-nopriv comment-write endpoint is still a
+            # missing-authorization finding, not a false positive.
+
+      on:
+        - 'nopriv-hook-registration.path == no-auth-comment-write.path'
+        - 'nopriv-hook-registration.$CALLBACK == no-auth-comment-write.$CALLBACK'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Arbitrary Content Modification"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/functions/wp_insert_comment/
+        - https://developer.wordpress.org/reference/functions/wp_update_comment/

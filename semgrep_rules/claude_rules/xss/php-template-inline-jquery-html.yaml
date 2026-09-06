@@ -1,0 +1,60 @@
+rules:
+  - id: claude.php.wordpress.xss.php-template-inline-jquery-html
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A jQuery DOM-insertion sink (.html()) is called with a bare
+      variable/property, or a concatenation ending in one, inside inline
+      JavaScript embedded directly in a PHP view/template file (a <script>
+      block emitted by the template itself, rather than a separate enqueued
+      .js asset). If the value originates from an AJAX/REST response field
+      (e.g. response.message, data.error) or another externally-influenced
+      source and is inserted via .html() instead of .text(), any HTML/script
+      content in that value executes in the visitor's browser (CWE-79).
+
+      This is a companion to jquery-html-unsafe-variable and
+      jquery-dom-insertion-ajax-response: Semgrep's JS/TS parser is only
+      applied to .js/.ts files by extension and never sees a <script> block
+      embedded inside a .php template, so those AST-based siblings cannot
+      see this exact shape when it lives inline in a PHP file. This rule
+      closes that blind spot with a raw-text regex scan of .php files
+      instead of an AST match — intentionally coarser than the sibling
+      rules.
+
+      TRIAGE:
+        - Confirm the argument is not a hardcoded string/template literal —
+          those are already excluded by this rule's negative clause and the
+          core pattern's identifier-only shape.
+        - Confirm the AJAX handler backing the request can return
+          attacker-influenced content in that field: an SSRF-redirectable
+          remote fetch, an echoed request parameter, a stored value written
+          by a lower-privileged or unauthenticated actor, etc. A response
+          field that is always a fixed, hardcoded server-side string is not
+          exploitable even though the syntax matches.
+        - Verify the method is actually .html() and not a neighboring
+          .text()/.val() call on an adjacent line.
+
+      Fix: use .text() for plain-text content, or sanitize with a proper
+      HTML sanitizer (DOMPurify.sanitize()) before passing the value to
+      .html().
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [php, javascript, jquery, wordpress]
+      references:
+        - https://api.jquery.com/html/
+        - https://cheatsheetseries.owasp.org/cheatsheets/DOM_based_XSS_Prevention_Cheat_Sheet.html
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-regex: '\.html\(\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\s*\)|\.html\([^()]{0,200}?\+\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\s*\)'
+      - pattern-not-regex: '(?i)\.html\(\s*[\w$.]*(css|style)[\w$.]*\s*\)'

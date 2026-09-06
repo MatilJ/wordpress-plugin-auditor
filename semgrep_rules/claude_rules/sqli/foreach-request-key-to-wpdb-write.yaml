@@ -1,0 +1,118 @@
+rules:
+  - id: claude.php.wordpress.sqli.foreach-request-key-to-wpdb-write
+    languages: [php]
+    severity: HIGH
+    message: |
+      A foreach loop iterates over $_POST/$_REQUEST/$_GET (or a local
+      variable assigned directly from one of them) and copies the loop's
+      KEY into an array element that is later passed as the $data argument
+      to $wpdb->insert(), $wpdb->update(), or $wpdb->replace(). Those wpdb
+      helpers build the SQL column list directly from array_keys($data),
+      wrapping each key only in backticks with no further escaping — the
+      paired VALUE is the only part ever bound through a placeholder. An
+      attacker who names a request parameter containing a backtick (or
+      other identifier-breaking character) controls a raw, unescaped
+      column identifier in the generated INSERT/UPDATE/REPLACE statement,
+      achieving SQL injection even when every value in the array is
+      sanitized (CWE-89).
+
+      Fix: never build the $data array for $wpdb->insert()/update()/
+      replace() from request-supplied keys. Iterate a hardcoded allow-list
+      of column names instead and read each value by that fixed key:
+        $allowed = ['name', 'email'];
+        $data = [];
+        foreach ($allowed as $key) {
+            if (isset($_POST[$key])) {
+                $data[$key] = sanitize_text_field($_POST[$key]);
+            }
+        }
+        $wpdb->insert($table, $data);
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/classes/wpdb/insert/
+        - https://developer.wordpress.org/reference/classes/wpdb/update/
+    patterns:
+      - pattern: $ARR[$KEY] = $ASSIGNED;
+      # The array-key source must be a request superglobal itself, or a
+      # variable copied directly from one — not an arbitrary iterable —
+      # so a loop over a hardcoded allow-list array never matches.
+      - pattern-either:
+          - pattern-inside: |
+              foreach ($_POST as $KEY => $VAL) {
+                ...
+              }
+          - pattern-inside: |
+              foreach ($_REQUEST as $KEY => $VAL) {
+                ...
+              }
+          - pattern-inside: |
+              foreach ($_GET as $KEY => $VAL) {
+                ...
+              }
+          - pattern-inside: |
+              $SRC = $_POST;
+              ...
+              foreach ($SRC as $KEY => $VAL) {
+                ...
+              }
+          - pattern-inside: |
+              $SRC = $_REQUEST;
+              ...
+              foreach ($SRC as $KEY => $VAL) {
+                ...
+              }
+      # The same array must, somewhere in the enclosing function, reach a
+      # wpdb write call as the $data argument (any nesting depth: the
+      # scope check recurses through if/else/loop blocks).
+      - pattern-either:
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+                $wpdb->insert($TABLE, $ARR, ...);
+                ...
+              }
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+                $wpdb->update($TABLE, $ARR, ...);
+                ...
+              }
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+                $wpdb->replace($TABLE, $ARR, ...);
+                ...
+              }
+      # An inline allow-list check gating the key before assignment is an
+      # equivalent guard to iterating a hardcoded allow-list array.
+      - pattern-not-inside: |
+          foreach ($SRC2 as $KEY => $VAL) {
+            ...
+            if (in_array($KEY, $ALLOWED, ...)) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          foreach ($SRC2 as $KEY => $VAL) {
+            ...
+            if (!in_array($KEY, $ALLOWED, ...)) {
+              continue;
+            }
+            ...
+          }
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"

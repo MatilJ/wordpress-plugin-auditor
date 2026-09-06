@@ -1,0 +1,93 @@
+rules:
+  - id: claude.php.wordpress.access-control.delete-option-add-option-bypass
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function calls both delete_option() and add_option() with the same
+      variable as the option name. This delete+add pattern is used by some
+      plugins as an alternative to update_option() — often to bypass
+      update_option hooks or to control the autoload flag. When the option
+      name is attacker-controlled, this is functionally equivalent to
+      arbitrary options update (CWE-862).
+
+      The delete+add pair is specifically used in CVE-2026-3596 (Riaxe
+      Product Customizer) where delete_option() removes the existing value
+      and add_option() inserts an attacker-controlled replacement, bypassing
+      any update_option_{name} hook that might enforce validation.
+
+      TRIAGE:
+      1. Trace $KEY to its source — is it user-controlled ($_POST, $_GET,
+         $_REQUEST, $request->get_param())?
+      2. If $KEY is hardcoded, check whether the VALUE ($VALUE) is
+         attacker-controlled and the option is security-sensitive.
+      3. Verify capability and nonce checks exist before the delete+add.
+      4. Check what hooks are registered on update_option_{name} — the
+         delete+add pattern intentionally bypasses these.
+
+      Fix: use update_option() with proper capability checks, or validate
+      the option name against a strict allowlist.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-269: Improper Privilege Management"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Arbitrary Options Update"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/delete_option/
+        - https://developer.wordpress.org/reference/functions/add_option/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                delete_option($KEY);
+                ...
+                add_option($KEY, $VALUE, ...);
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                delete_site_option($KEY);
+                ...
+                add_option($KEY, $VALUE, ...);
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                delete_option($KEY);
+                ...
+                add_option($KEY, $VALUE);
+                ...
+              }
+      - pattern-not:
+          patterns:
+            - pattern-either:
+                - pattern: |
+                    function $FUNC(...) {
+                      ...
+                      delete_option("...");
+                      ...
+                      add_option("...", $VALUE, ...);
+                      ...
+                    }
+                - pattern: |
+                    function $FUNC(...) {
+                      ...
+                      delete_option("...");
+                      ...
+                      add_option("...", $VALUE);
+                      ...
+                    }
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"

@@ -1,0 +1,170 @@
+rules:
+  # Closes a reachability gap in
+  # claude.php.wordpress.access-control.ajax-post-id-to-wp-delete-post-no-ownership:
+  # that rule's taint sink is wp_delete_post()/wp_delete_attachment()/etc. matched
+  # directly in the SAME function as the tainted source. A recurring WP variant
+  # wraps the actual deletion inside a small helper/manager class: the caller's
+  # function receives the request-tainted IDs, constructs `new $HELPER($ID1,
+  # $ID2)`, and calls a destructively-named method on the resulting object —
+  # the wp_delete_post() call itself lives in a DIFFERENT method (often a
+  # different file/class entirely). Single-function taint analysis cannot see
+  # past that method call into the helper's own body, so the original rule goes
+  # silent on this shape even though the same "unvalidated ID reaches a
+  # destructive call" defect is present. This rule instead treats construction
+  # of an object from tainted IDs followed by a destructively-named method call
+  # ON that object, within the SAME calling function, as the sink — independent
+  # of what the helper does internally. The negative clause looks for a call to
+  # anything name-shaped like a validation/ownership check (validate/verify/
+  # check/authorize/owner) appearing earlier in the same function, which is
+  # exactly the shape a fix takes (call a static/instance validator, bail out on
+  # WP_Error, THEN construct/act) — matching the FALSE POSITIVE indicator below.
+  - id: claude.php.wordpress.access-control.constructed-object-delete-method-no-validation-guard
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A request-supplied ID is used to construct a helper/manager object, and a
+      destructively-named method (delete/remove/destroy/purge) is then called
+      on that object in the same function — with no call to anything shaped
+      like a validation/ownership check (validate*, verify*, check*, authorize*,
+      *owner*) earlier in the function. The object's constructor and the
+      destructive method itself are opaque to this rule (they may live in a
+      different class/file entirely), so if neither the constructing function
+      nor the constructed class independently confirms the ID actually belongs
+      to the requesting user / is of the expected post type before the
+      destructive call, this is a Missing Authorization / IDOR (CWE-639) that
+      typically resolves to arbitrary post or attachment deletion — for
+      attachment posts, WordPress deletes the underlying file from disk on
+      force-delete, making this an arbitrary file deletion primitive.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - No get_post_type()/ownership-meta comparison, no current_user_can()
+          with a per-resource capability, and no validator-shaped call anywhere
+          in the constructing function.
+        - The destructive method (traced into the constructed class, if present
+          in the same codebase) performs a force-delete keyed only on the
+          constructor-supplied ID, with no internal check either.
+        - The construction/call happens in a nopriv-reachable AJAX action, a
+          REST route without a capability permission_callback, or any other
+          Subscriber/unauthenticated-reachable handler.
+
+      FALSE POSITIVE indicators:
+        - A validator/ownership-check call (however named) appears earlier in
+          the function, even if its result is assigned to a variable and
+          checked via `if (is_wp_error(...))`/`if (!...)` rather than wrapping
+          the tainted value directly — this rule's negative clause already
+          recognizes that idiom.
+        - The handler is gated by current_user_can('manage_options') or an
+          equivalently broad, admin-only capability (PR:H — out of scope).
+        - The constructed class's own destructive method independently checks
+          get_post_type($id)/ownership before deleting (trace into the class if
+          it's in the same codebase).
+        - The ID is sourced from a DB query or from server-generated state
+          (e.g. a WP-Cron callback argument), not directly from the request.
+
+      Fix: validate that the ID resolves to the expected post type AND belongs
+      to the calling context (e.g. compare a stored owner/parent-reference
+      meta value) before constructing the helper or invoking the destructive
+      method:
+        if ( get_post_type( $id ) !== 'expected_type' || <ownership check fails> ) {
+            wp_die( 'Invalid request' );
+        }
+    metadata:
+      category: security
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Insecure Direct Object Reference (IDOR)"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/639.html
+        - https://developer.wordpress.org/reference/functions/wp_delete_post/
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: json_decode(file_get_contents("php://input"), ...)
+          - pattern: file_get_contents("php://input")
+          # A private/protected same-class helper that itself wraps $_GET/
+          # $_POST/$_REQUEST access (a very common WP AJAX-handler idiom —
+          # e.g. sanitize_post()/get_request_data()/parse_args() — often
+          # doing the nonce check and returning the raw request array in one
+          # call) is opaque to single-function taint analysis: the caller
+          # never sees $_POST directly. Treated as a source by name shape
+          # rather than by tracing into the callee.
+          - patterns:
+              - pattern: $this->$METHOD(...)
+              - metavariable-regex:
+                  metavariable: $METHOD
+                  regex: "(?i).*(sanitize_post|sanitize_request|get_post_data|get_request|get_args|parse_request|request_data|get_params).*"
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: $wpdb->get_results(...)
+          - pattern: $wpdb->get_row(...)
+          - pattern: $wpdb->get_var(...)
+          - pattern: $wpdb->get_col(...)
+          - pattern: get_option(...)
+          - pattern: absint(...)
+          - pattern: intval(...)
+          - pattern: (int)$X
+    pattern-sinks:
+      - patterns:
+          - pattern: $OBJ->$METHOD(...)
+          - focus-metavariable: $OBJ
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: "(?i).*(delete|remove|destroy|purge).*"
+          # FALSE POSITIVE indicator: a validator-shaped call (any name
+          # containing validate/verify/check/authoriz/owner) appears earlier
+          # in the same function — whether as a bare statement or assigned to
+          # a variable and checked afterward (`$v = X::validate(...); if
+          # (is_wp_error($v)) { ... }`), both forms are recognized.
+          - pattern-not-inside:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) {
+                      ...
+                      $CHECK(...);
+                      ...
+                    }
+                - metavariable-regex:
+                    metavariable: $CHECK
+                    regex: "(?i).*(valid|verify|check|authoriz|owner).*"
+          - pattern-not-inside:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) {
+                      ...
+                      if (<... $CHECK(...) ...>) {
+                        ...
+                      }
+                      ...
+                    }
+                - metavariable-regex:
+                    metavariable: $CHECK
+                    regex: "(?i).*(valid|verify|check|authoriz|owner).*"
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                current_user_can(...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... current_user_can(...) ...>) {
+                  ...
+                }
+                ...
+              }

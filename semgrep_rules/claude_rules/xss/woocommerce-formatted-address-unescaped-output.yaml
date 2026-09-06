@@ -1,0 +1,73 @@
+rules:
+  - id: claude.php.wordpress.xss.woocommerce-formatted-address-unescaped-output
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      WC_Order::get_formatted_billing_address() / get_formatted_shipping_address()
+      returns an HTML string assembled from customer-controlled checkout fields
+      (first/last name, company, address lines, city, state, postcode) with an
+      embedded line-break tag between lines — any customer placing a WooCommerce
+      order controls these values without needing a WordPress account. When this
+      value is echoed, printed, or returned by a wrapper/getter without passing
+      through a sanitizer first, it is Stored XSS reaching any document, export,
+      or admin view that renders the address (PR:N, CVSS typically 7.1-8.3).
+
+      TRIAGE: because the return value already contains markup (the inserted
+      line-break tag), a naive esc_html() wrap would also encode that tag and
+      break the intended formatting — this is why developers often skip
+      escaping the formatted-address getters specifically, even in code that
+      correctly escapes the single-field getters (first_name, city, ...)
+      elsewhere. Confirm the sink actually renders as HTML (not merely stored
+      to a log or passed to a plain-text mailer).
+
+      Fix: sanitize with an explicit allow-list HTML filter (e.g. wp_kses()
+      permitting only the line-break tag and a small set of formatting tags)
+      applied to the address BEFORE it is echoed or returned.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — Stored"
+      technology: [php, wordpress, woocommerce]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+    pattern-sources:
+      - pattern-either:
+          - pattern: $ORDER->get_formatted_billing_address()
+          - pattern: $ORDER->get_formatted_shipping_address()
+    pattern-sinks:
+      - pattern-either:
+          - pattern: echo $X;
+          - pattern: print $X;
+          - pattern: print($X);
+          - pattern: return $X;
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: esc_html(...)
+          - pattern: esc_html__(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          - pattern: sanitize_text_field(...)
+          - pattern: sanitize_textarea_field(...)
+          - pattern: wp_strip_all_tags(...)
+          - pattern: strip_tags(...)
+      # Generic fallback for plugin-authored sanitizer wrappers (e.g. a project's
+      # own "sanitize_html_content()"-style helper) — any single-argument call
+      # whose name reads as a sanitizer/escaper is treated as neutralizing.
+      - patterns:
+          - pattern: $SANFUNC($X, ...)
+          - metavariable-regex:
+              metavariable: $SANFUNC
+              regex: "(?i).*(kses|saniti|escap|esc_|purify|strip[_a-z]*tags|htmlspecial|htmlentit|clean).*"

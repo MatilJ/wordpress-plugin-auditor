@@ -1,0 +1,178 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.ajax-sensitive-data-no-capability
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A sensitive option value (API key, secret, license, token, password,
+      credentials), a freshly-minted auth/access token (a create()/generate()/
+      issue()/mint()-style method call), or a user query result flows into a
+      JSON response, an inline/localized frontend script, or a raw echo/print
+      statement, inside a function that lacks a current_user_can() capability
+      check anywhere in its body. If this function is hooked to wp_ajax_
+      (authenticated-only AJAX) or to a broadly-firing hook such as admin_head,
+      wp_head, wp_footer, admin_footer, or wp_enqueue_scripts/
+      admin_enqueue_scripts, any logged-in user — including Subscribers, or
+      even an unauthenticated visitor for frontend-firing hooks — can trigger
+      it and retrieve the data.
+      Real-world example: CVE-2025-14864 (Virusdie — Subscriber+ API key
+      exposure via wp_ajax_ handler without capability check).
+      Verify the function is an AJAX callback, an admin/frontend hook callback,
+      or a render callback, and that no capability check exists in the call
+      chain.
+    metadata:
+      category: security
+      cwe: "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Sensitive Data Exposure"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/200.html
+    pattern-sources:
+      - patterns:
+          - pattern: get_option($KEY, ...)
+          - metavariable-regex:
+              metavariable: $KEY
+              regex: "(?i).*(api_key|secret|license|token|password|smtp|stripe|paypal|credentials).*"
+      - patterns:
+          - pattern-either:
+              - pattern: get_users(...)
+              - pattern: get_userdata(...)
+              - pattern: get_user_by(...)
+          # Exclude: lookup of the caller's own account by get_current_user_id() —
+          # self-scoped read, not a capability-check gap. Confirmed FP: really-simple-ssl
+          # 9.6.1 class-rsssl-two-factor-profile-settings.php (see sibling rule
+          # rest-return-true-sensitive-data-response for full rationale).
+          - pattern-not: get_user_by($FIELD, get_current_user_id())
+          - pattern-not: get_userdata(get_current_user_id())
+          # Same self-scoped-lookup exception via WP Core's older `global $current_user`
+          # idiom (lowercase $current_user is a literal match, not a metavariable).
+          - pattern-not: get_userdata($current_user->ID)
+          # get_users() restricted to the same public-equivalent identity fields
+          # WP Core's own /wp/v2/users endpoint exposes for unauthenticated
+          # requests (id/name/slug) — not a capability gap, already public data.
+          - pattern-not: get_users(array("fields" => array("ID", "display_name", "user_nicename")))
+          - pattern-not: get_users(array("capability__in" => $CAPS, "fields" => array("ID", "display_name", "user_nicename")))
+          # get_users() piped directly through array_map() to build a dropdown/
+          # option-list — only the mapper's own return value reaches the sink,
+          # not the raw user objects/fields.
+          - pattern-not-inside: array_map($FN, get_users(...))
+      # Sensitive-domain noun required in ADDITION to the action verb — either in the
+      # method name or in the receiver (object/class) name. An action verb alone
+      # matches routine content/UI-generation helpers (e.g. generate_report_data(),
+      # create_duplicate_link()) that return no secret material; requiring the noun
+      # only in $METHOD would miss the common $tokenManager->generate()-style shape
+      # where the sensitive context lives in the receiver instead of the verb.
+      - pattern-either:
+          - patterns:
+              - pattern: $OBJ->$METHOD(...)
+              - metavariable-regex:
+                  metavariable: $METHOD
+                  regex: "(?i).*(create|generate|issue|mint).*"
+              - metavariable-regex:
+                  metavariable: $METHOD
+                  regex: "(?i).*(token|key|secret|credential|license|password|api|auth).*"
+          - patterns:
+              - pattern: $OBJ->$METHOD(...)
+              - metavariable-regex:
+                  metavariable: $METHOD
+                  regex: "(?i).*(create|generate|issue|mint).*"
+              - metavariable-regex:
+                  metavariable: $OBJ
+                  regex: "(?i).*(token|key|secret|credential|license|password|api|auth).*"
+    pattern-sanitizers:
+      - pattern-either:
+          # Account whose credentials were just verified in this same request
+          # via wp_signon()/wp_authenticate() — a self-scoped read, not a gap.
+          - pattern: wp_signon(...)
+          - pattern: wp_authenticate(...)
+          # WP_Error message text is developer-authored generic text, not the
+          # underlying sensitive record, even when derived from a tainted lookup.
+          - pattern: $ERR->get_error_message()
+          # A presence/boolean check (e.g. "hasApiKey" => !empty(get_option('x_api_key')))
+          # reduces the sensitive value to a true/false signal — the return value of
+          # these functions can never carry the original secret content, regardless of
+          # how the input value was obtained.
+          - pattern: empty($X)
+          - pattern: isset($X)
+          - pattern: is_null($X)
+          - pattern: boolval($X)
+          - pattern: (bool) $X
+          # A user object's display_name/user_nicename properties mirror the same
+          # public-equivalent fields already excluded via get_users()'s "fields"
+          # parameter above — reading only this property, not the full object, is
+          # not a capability-check gap.
+          - pattern: $USER->display_name
+          - pattern: $USER->user_nicename
+          # wp_insert_comment()/wp_update_comment() return a plain integer ID (or
+          # false/WP_Error) — never a reflection of the tainted argument data —
+          # so taint should not propagate through their return value. Same
+          # rationale already established in the sibling rule
+          # rest-return-true-sensitive-data-response.
+          - pattern: wp_insert_comment(...)
+          - pattern: wp_update_comment(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: wp_send_json($X, ...)
+              - pattern: wp_send_json_success($X, ...)
+              - pattern: wp_send_json_error($X, ...)
+              - pattern: new WP_REST_Response($X, ...)
+              - pattern: rest_ensure_response($X)
+              - pattern: wp_localize_script($HANDLE, $NAME, $X)
+              - pattern: wp_add_inline_script($HANDLE, $X, ...)
+              - pattern: echo $X;
+              - pattern: print $X;
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                <... current_user_can(...) ...>;
+                ...
+              }
+          # Generalized capability-wrapper naming convention (same rationale as
+          # the sibling auth rule claude.php.wordpress.auth.nonce-without-capability-check
+          # and claude.php.wordpress.info-disclosure.rest-return-true-sensitive-data-response):
+          # a static or instance method whose own name denotes a capability/
+          # permission/view-tier gate, called bare or guarded via an early-return
+          # if-condition, in place of an inline current_user_can().
+          - pattern-not-inside:
+              patterns:
+                - pattern: |
+                    function $F(...) {
+                      ...
+                      self::$WRAP(...);
+                      ...
+                    }
+                - metavariable-regex:
+                    metavariable: $WRAP
+                    regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access|view_capability|can_view).*
+          - pattern-not-inside:
+              patterns:
+                - pattern: |
+                    function $F(...) {
+                      ...
+                      if (<... self::$WRAP(...) ...>) {
+                        ...
+                      }
+                      ...
+                    }
+                - metavariable-regex:
+                    metavariable: $WRAP
+                    regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access|view_capability|can_view).*
+          - pattern-not-inside:
+              patterns:
+                - pattern: |
+                    function $F(...) {
+                      ...
+                      if (<... $OBJ->$WRAP(...) ...>) {
+                        ...
+                      }
+                      ...
+                    }
+                - metavariable-regex:
+                    metavariable: $WRAP
+                    regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access|view_capability|can_view).*

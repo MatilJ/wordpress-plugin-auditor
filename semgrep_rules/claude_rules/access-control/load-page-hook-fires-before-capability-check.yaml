@@ -1,0 +1,67 @@
+rules:
+  - id: claude.php.wordpress.access-control.load-page-hook-fires-before-capability-check
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A callback is registered on a `load-{page}.php` admin hook (e.g.
+      `load-post.php`, `load-edit.php`, `load-upload.php`). These hooks fire
+      during `wp-admin/admin.php`'s early dispatch — after `auth_redirect()`
+      (any logged-in user) but BEFORE the target admin page's own per-object
+      `current_user_can()` gate executes (that check lives later, in the
+      page's own script; e.g. `wp-admin/post.php`'s `edit_post` check for the
+      `edit` action runs after `load-post.php` has already fired). Any
+      authenticated user (Subscriber+) can therefore trigger this callback
+      simply by requesting the corresponding wp-admin page with
+      attacker-chosen query parameters, before WordPress itself has verified
+      the requester may act on the requested object (CWE-862).
+
+      This pattern is not detectable from the hook registration alone — the
+      security gap is inside the registered callback. Inspect the callback:
+        - Does it read $_GET/$_POST/$_REQUEST (e.g. a post/object ID)?
+        - Does it reach a write/delete/state-changing sink using that value,
+          directly or via a helper method?
+        - Is there a current_user_can() (or equivalent capability/ownership
+          check) or a nonce check (check_admin_referer/wp_verify_nonce)
+          BEFORE the sink?
+      If the callback performs a state-changing operation on
+      attacker-influenced data with no capability or nonce check, it is
+      exploitable by any authenticated user regardless of the target admin
+      page's own capability requirements.
+
+      Confirmed real-world pattern: a `load-post.php` callback resolved a
+      request-controlled post ID via `get_post()` + a post-meta lookup and
+      permanently deleted a related post object (`wp_delete_post(..., true)`)
+      with zero `current_user_can()` call anywhere in the call chain —
+      reachable by any Subscriber via
+      `GET /wp-admin/post.php?post=<id>&action=edit` (CVSS 6.5, CWE-862).
+
+      Fix: add `current_user_can()` (with the appropriate per-object
+      capability, e.g. `edit_post`/`delete_post`) as the first check inside
+      the callback, before any state-changing operation.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/hooks/load-page_php/
+        - https://developer.wordpress.org/apis/security/user-capabilities-and-roles/
+        - https://cwe.mitre.org/data/definitions/862.html
+    patterns:
+      - pattern-either:
+          - pattern: add_action($HOOK, [$OBJ, $METHOD], ...)
+          - pattern: \add_action($HOOK, [$OBJ, $METHOD], ...)
+          - pattern: add_action($HOOK, $METHOD, ...)
+          - pattern: \add_action($HOOK, $METHOD, ...)
+      - metavariable-regex:
+          metavariable: $HOOK
+          regex: "^['\"]load-[a-zA-Z0-9_-]+\\.php['\"]$"
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"

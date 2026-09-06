@@ -1,0 +1,717 @@
+rules:
+  - id: claude.php.wordpress.file.file-exists-not-sanitizer
+    languages: [php]
+    severity: HIGH
+    message: |
+      file_exists() or is_file() is used as the only validation before
+      include/require, or before a concatenated path is stored (as a
+      property or variable) for later use by an include/require or a
+      file-read function (file_get_contents, readfile, fopen) elsewhere.
+      These functions confirm the path resolves to a real file but do NOT
+      prevent path traversal — ../../wp-config.php passes file_exists()
+      when the file exists (and it always does in WordPress).
+      This is NOT a sanitizer (CWE-98 / CWE-22).
+      Apply basename(), sanitize_file_name(), or realpath() + prefix check
+      BEFORE the file_exists() / include (or store-for-later-use) sequence.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program ('PHP Remote File Inclusion')"
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — file_exists as only guard:
+      #   $path = PLUGIN_DIR . '/templates/' . $_GET['tpl'] . '.php';
+      #   if (file_exists($path)) {
+      #       include $path;
+      #   }
+      #   -> ../../wp-config passes file_exists and gets included.
+      #
+      # FALSE POSITIVE — real sanitizer also present:
+      #   $name = sanitize_file_name($_GET['tpl']);
+      #   $path = PLUGIN_DIR . '/templates/' . $name . '.php';
+      #   if (file_exists($path)) {
+      #       include $path;
+      #   }
+      #   -> sanitize_file_name strips traversal. file_exists is redundant
+      #      but not the security boundary.
+      #
+      # FALSE POSITIVE — hardcoded path, no user input:
+      #   $path = PLUGIN_DIR . '/includes/class-core.php';
+      #   if (file_exists($path)) {
+      #       include $path;
+      #   }
+      #   -> Path is entirely developer-controlled.
+      #
+      # TRUE POSITIVE — deferred/property-stored form (negated guard):
+      #   public function setLang($lang) {
+      #       if (!file_exists(BASE_DIR . 'lang/' . $lang)) {
+      #           throw new Exception('not found');
+      #       }
+      #       $this->_lang = BASE_DIR . 'lang/' . $lang;   // consumed by
+      #                                                     // file_get_contents() elsewhere
+      #   }
+      #   -> file_exists() only confirms existence; a traversal value that
+      #      resolves to a real file (e.g. an existing config/log file)
+      #      still passes and is later read/included.
+      #
+      # TRUE POSITIVE — negated guard, same variable re-used (no reassignment):
+      #   public function cache_get($file) {
+      #       if (!@is_file($file) || empty($this->filesize($file))) {
+      #           return false;
+      #       }
+      #       if (!$handle = @fopen($file, 'rb')) {
+      #           return false;
+      #       }
+      #       $data = @include $file;   // may be nested inside e.g. an
+      #   }                             // "if (flock(...)) { try {...} }"
+      #                                 // read-lock wrapper
+      #   -> A file-backed object/page-cache "read a keyed data file and
+      #      execute it as PHP" getter: only an existence check gates the
+      #      include, so a traversal value that resolves to any real
+      #      *.php-suffixed file is included.
+      #
+      # FALSE POSITIVE — deferred form with basename()/realpath() present
+      # anywhere in the same function (already suppressed by the
+      # pattern-not-inside clauses below — e.g. basename($input) + an
+      # extension allow-list + realpath() prefix containment before the
+      # deferred assignment).
+      #
+      # TRUE POSITIVE — ternary-assignment-then-truthy-include (fallback-
+      # chain resolver):
+      #   function get_template_part($slug) {
+      #       $template = '';
+      #       $fallback = PLUGIN_DIR . "/templates/{$slug}.php";
+      #       $template = file_exists($fallback) ? $fallback : '';
+      #       if ($template) {
+      #           include $template;
+      #       }
+      #   }
+      #   -> Same flaw as the if-statement form, just expressed as a
+      #      "resolve first existing candidate, then include whichever one
+      #      won" fallback chain: the ternary's file_exists() only confirms
+      #      the candidate exists, and $slug reaches the path with no
+      #      filename-safe sanitizer anywhere in the function.
+      #
+      # CONTEXT CHECK:
+      #   1. Is $PATH built from user input? (trace the variable)
+      #   2. Is a SEPARATE sanitizer applied to the user-input portion?
+      #   3. Does the hardcoded prefix constrain traversal scope?
+      #   4. Deferred form only: does the stored value eventually reach an
+      #      include/require/file_get_contents/readfile/fopen call, even in
+      #      a different method? (confirm before treating as TP)
+    # Exclude WP-CLI command files: code paths gated behind a WP-CLI command class
+    # only execute in an operator's local CLI session, never via HTTP request.
+    # Confirmed FP: really-simple-ssl 9.6.1 class-wp-cli.php:1741.
+    paths:
+      exclude:
+        - "**/*wp-cli*.php"
+        - "**/cli/**"
+    patterns:
+      - pattern-either:
+          # Group 1: immediate-wrap / deferred-assignment / elseif-combined
+          # forms — the sink sits directly inside, or immediately after, the
+          # guard's own statement sequence. FP suppression here is
+          # deliberately loose (a recognized sanitizer call ANYWHERE in the
+          # function, not necessarily applied to $PATH itself) because in
+          # this shape the sanitizer is typically applied to the raw
+          # input BEFORE it is concatenated into $PATH, not to $PATH itself.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      if (file_exists($PATH)) {
+                        ...
+                        include $PATH;
+                      }
+                  - pattern: |
+                      if (file_exists($PATH)) {
+                        ...
+                        include($PATH);
+                      }
+                  - pattern: |
+                      if (file_exists($PATH)) {
+                        ...
+                        include_once $PATH;
+                      }
+                  - pattern: |
+                      if (file_exists($PATH)) {
+                        ...
+                        include_once($PATH);
+                      }
+                  - pattern: |
+                      if (file_exists($PATH)) {
+                        ...
+                        require $PATH;
+                      }
+                  - pattern: |
+                      if (file_exists($PATH)) {
+                        ...
+                        require($PATH);
+                      }
+                  - pattern: |
+                      if (file_exists($PATH)) {
+                        ...
+                        require_once $PATH;
+                      }
+                  - pattern: |
+                      if (file_exists($PATH)) {
+                        ...
+                        require_once($PATH);
+                      }
+                  - pattern: |
+                      if (is_file($PATH)) {
+                        ...
+                        include $PATH;
+                      }
+                  - pattern: |
+                      if (is_file($PATH)) {
+                        ...
+                        include($PATH);
+                      }
+                  - pattern: |
+                      if (is_file($PATH)) {
+                        ...
+                        require $PATH;
+                      }
+                  - pattern: |
+                      if (is_file($PATH)) {
+                        ...
+                        require($PATH);
+                      }
+                  - pattern: |
+                      if (is_file($PATH)) {
+                        ...
+                        require_once $PATH;
+                      }
+                  - pattern: |
+                      if (is_file($PATH)) {
+                        ...
+                        require_once($PATH);
+                      }
+                  # Inverted/deferred form: reject-if-missing guard clause
+                  # (early throw/return on failure) followed by storing the
+                  # SAME unresolved concatenated path for later use (property
+                  # or local variable), rather than an immediate adjacent
+                  # include/require. The path may be consumed by
+                  # include/require OR a read sink (file_get_contents,
+                  # readfile, fopen) in a different method entirely —
+                  # file_exists() is still not a containment check either way.
+                  - pattern: |
+                      if (!file_exists($PATH)) {
+                        ...
+                      }
+                      $VAR = $PATH;
+                  - pattern: |
+                      if (!is_file($PATH)) {
+                        ...
+                      }
+                      $VAR = $PATH;
+                  # elseif/combined-condition form: file_exists() is one
+                  # clause of a compound elseif condition (e.g. paired with a
+                  # recursion guard or a "class not already loaded" branch
+                  # above it) rather than the sole condition of a standalone
+                  # if. The deep-expression operator lets file_exists($PATH)
+                  # appear anywhere inside the elseif condition and the
+                  # require/include appear anywhere inside the block, so an
+                  # extra "&& !$rec"-style clause doesn't hide the missing
+                  # containment check. CVE-2025-12851 (My auctions allegro):
+                  # a static component-loader factory gated require_once()
+                  # behind "elseif (file_exists($path) && !$rec)".
+                  - pattern: |
+                      if ($OTHERCOND) {
+                        ...
+                      } elseif (<... file_exists($PATH) ...>) {
+                        ...
+                        require_once($PATH);
+                        ...
+                      }
+                  - pattern: |
+                      if ($OTHERCOND) {
+                        ...
+                      } elseif (<... file_exists($PATH) ...>) {
+                        ...
+                        require($PATH);
+                        ...
+                      }
+                  - pattern: |
+                      if ($OTHERCOND) {
+                        ...
+                      } elseif (<... file_exists($PATH) ...>) {
+                        ...
+                        include($PATH);
+                        ...
+                      }
+                  - pattern: |
+                      if ($OTHERCOND) {
+                        ...
+                      } elseif (<... file_exists($PATH) ...>) {
+                        ...
+                        include_once($PATH);
+                        ...
+                      }
+              # $PATH's own captured text contains no PHP variable ($) at
+              # all — i.e. it is built purely from constants (a plugin's own
+              # PLUGIN_DIR-style define, __DIR__, ABSPATH, dirname(__FILE__))
+              # and string literals. A path with zero runtime-variable input
+              # cannot be traversed regardless of the file_exists()-only
+              # guard, and this generalizes the __DIR__/ABSPATH/
+              # dirname(__FILE__) special cases below to any plugin's own
+              # constant name rather than enumerating each one.
+              - metavariable-regex:
+                  metavariable: $PATH
+                  regex: (?s).*\$.*
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    basename(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    sanitize_file_name(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    realpath(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    validate_file(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    sanitize_key(...);
+                    ...
+                  }
+              # A preg_replace() call anywhere in the function is treated as
+              # sanitization intent, matching the shape of a vendor fix that
+              # strips traversal sequences ("../", "./") from the path
+              # in-place rather than calling a named sanitizer helper. Bare
+              # (not bound to $PATH) for the same reason the other sanitizer
+              # clauses above are bare — a same-function stripping call is
+              # the fix pattern regardless of which local variable it is
+              # written against. str_replace() is deliberately NOT included
+              # here: it is also the idiomatic non-sanitizing way to build a
+              # path from a class/component name (str_replace('_', '/',
+              # $name)), so treating it as a blanket sanitizer would silence
+              # the elseif/combined-condition true positives above.
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    preg_replace(...);
+                    ...
+                  }
+              # $PATH's directory component is enumerated via glob() over the
+              # plugin's own bundled directory (a __DIR__/dirname(__FILE__)-rooted
+              # glob pattern) rather than sourced from request data. The loop
+              # variable carries only filenames that already exist inside the
+              # plugin's own package — populating it with anything else would
+              # require a separate file-write primitive, a different bug entirely.
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    $LIST = glob(__DIR__ . $SUFFIX, ...);
+                    ...
+                    foreach ($LIST as $ITEMVAR) {
+                      ...
+                    }
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    $LIST = glob(dirname(__FILE__) . $SUFFIX, ...);
+                    ...
+                    foreach ($LIST as $ITEMVAR) {
+                      ...
+                    }
+                    ...
+                  }
+              # Inline character-blocklist guard: an if-condition that tests
+              # one of the assembled path's own input variables for a
+              # traversal metacharacter (a dot, slash, or backslash) with
+              # strpos()/str_contains() and bails out (return/throw) before
+              # the path is used, closing the hole at the source without
+              # calling a named sanitizer function.
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    if (<... strpos(...) !== false ...>) {
+                      ...
+                      return ...;
+                    }
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    if (<... str_contains(...) ...>) {
+                      ...
+                      return ...;
+                    }
+                    ...
+                  }
+              - pattern-not: |
+                  if (file_exists($THIS->$PROP)) {
+                    ...
+                    require_once $THIS->$PROP;
+                  }
+              - pattern-not: |
+                  if (file_exists($THIS->$PROP)) {
+                    ...
+                    require $THIS->$PROP;
+                  }
+              - pattern-not: |
+                  if (file_exists($THIS->$PROP)) {
+                    ...
+                    include $THIS->$PROP;
+                  }
+              - pattern-not: |
+                  if (file_exists($THIS->$PROP)) {
+                    ...
+                    include_once $THIS->$PROP;
+                  }
+              - pattern-not: |
+                  if (file_exists(__DIR__ . $SUFFIX)) {
+                    ...
+                    require __DIR__ . $SUFFIX;
+                  }
+              - pattern-not: |
+                  if (file_exists(__DIR__ . $SUFFIX)) {
+                    ...
+                    require_once __DIR__ . $SUFFIX;
+                  }
+              - pattern-not: |
+                  if (file_exists(__DIR__ . $SUFFIX)) {
+                    ...
+                    include __DIR__ . $SUFFIX;
+                  }
+              - pattern-not: |
+                  if (file_exists(__DIR__ . $SUFFIX)) {
+                    ...
+                    include_once __DIR__ . $SUFFIX;
+                  }
+              # dirname(__FILE__) is the pre-PHP-5.3-compatible equivalent of
+              # __DIR__, still widely used in WordPress plugins; ABSPATH is
+              # WordPress core's own root-path constant. Both are
+              # non-attacker-controllable prefixes, and a literal suffix
+              # repeated identically in the guard and the include/require
+              # call is developer-fixed, not traversable.
+              - pattern-not: |
+                  if (file_exists(dirname(__FILE__) . $SUFFIX)) {
+                    ...
+                    require dirname(__FILE__) . $SUFFIX;
+                  }
+              - pattern-not: |
+                  if (file_exists(dirname(__FILE__) . $SUFFIX)) {
+                    ...
+                    require_once dirname(__FILE__) . $SUFFIX;
+                  }
+              - pattern-not: |
+                  if (file_exists(dirname(__FILE__) . $SUFFIX)) {
+                    ...
+                    include dirname(__FILE__) . $SUFFIX;
+                  }
+              - pattern-not: |
+                  if (file_exists(dirname(__FILE__) . $SUFFIX)) {
+                    ...
+                    include_once dirname(__FILE__) . $SUFFIX;
+                  }
+              - pattern-not: |
+                  if (file_exists(ABSPATH . $SUFFIX)) {
+                    ...
+                    require ABSPATH . $SUFFIX;
+                  }
+              - pattern-not: |
+                  if (file_exists(ABSPATH . $SUFFIX)) {
+                    ...
+                    require_once ABSPATH . $SUFFIX;
+                  }
+              - pattern-not: |
+                  if (file_exists(ABSPATH . $SUFFIX)) {
+                    ...
+                    include ABSPATH . $SUFFIX;
+                  }
+              - pattern-not: |
+                  if (file_exists(ABSPATH . $SUFFIX)) {
+                    ...
+                    include_once ABSPATH . $SUFFIX;
+                  }
+          # Group 2: negated early-return guard, SAME variable re-used
+          # directly (no reassignment to a new $VAR, unlike the deferred
+          # form in Group 1) by an include/require some statements later,
+          # possibly nested one or more blocks deeper (e.g. inside an
+          # "if (flock(...)) { try {...} }" read-lock wrapper around the
+          # actual inclusion) rather than a direct sibling statement — a
+          # plain "..." statement-sequence ellipsis does not descend into a
+          # nested if/try to find it, so the sink half of this shape is its
+          # own pattern-inside/pattern pair rather than one linear
+          # "if {...} ... SINK;" pattern. The deep-expression operator on
+          # the guard side lets the check appear standalone or OR'd with an
+          # unrelated second condition ("!is_file($f) || empty(...)"), and
+          # both the bare and "@"-error-suppressed call forms are matched
+          # explicitly since a leading "@" on the call breaks a plain
+          # "!is_file($X)" AST match. This is the "read a keyed data file
+          # and execute it as PHP" shape used by file-backed object/page
+          # caches: a getter takes a path, checks only that the target
+          # exists, and includes it (at any nesting depth within the
+          # function) to retrieve the cached value.
+          #
+          # FP suppression here is scoped to $PATH specifically (a
+          # reassignment "$PATH = ...sanitizer(...)"), NOT loose
+          # anywhere-in-function like Group 1 — this shape's guard/sink pair
+          # already binds $PATH to a single variable end-to-end (no
+          # intermediate rename to $VAR/$name the way Group 1's deferred
+          # form allows), so the sanitizer that matters is one that
+          # reassigns that same variable. A loose bare match would false-
+          # negative on realistic code where an unrelated basename() call
+          # elsewhere in the same function (e.g. formatting an exception's
+          # own file path for a log message in a catch block) has nothing
+          # to do with sanitizing $PATH.
+          - patterns:
+              - pattern-either:
+                  - pattern: include $PATH;
+                  - pattern: include_once $PATH;
+                  - pattern: require $PATH;
+                  - pattern: require_once $PATH;
+              - pattern-either:
+                  - pattern-inside: |
+                      function $FUNC(...) {
+                        ...
+                        if (<... !is_file($PATH) ...>) {
+                          ...
+                        }
+                        ...
+                      }
+                  - pattern-inside: |
+                      function $FUNC(...) {
+                        ...
+                        if (<... !@is_file($PATH) ...>) {
+                          ...
+                        }
+                        ...
+                      }
+                  - pattern-inside: |
+                      function $FUNC(...) {
+                        ...
+                        if (<... !file_exists($PATH) ...>) {
+                          ...
+                        }
+                        ...
+                      }
+                  - pattern-inside: |
+                      function $FUNC(...) {
+                        ...
+                        if (<... !@file_exists($PATH) ...>) {
+                          ...
+                        }
+                        ...
+                      }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    $PATH = <... basename(...) ...>;
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    $PATH = <... sanitize_file_name(...) ...>;
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    $PATH = <... realpath(...) ...>;
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    $PATH = <... sanitize_key(...) ...>;
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    $PATH = <... preg_replace(...) ...>;
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $FUNC(...) {
+                    ...
+                    validate_file($PATH, ...);
+                    ...
+                  }
+          # Group 3: ternary-assignment-then-truthy-include form — the
+          # existence guard and the assignment are fused into a single
+          # ternary ("$VAR = file_exists($PATH) ? $PATH : $DEFAULT;")
+          # instead of an if-statement, and the sink is reached later via a
+          # plain truthiness check on the same $VAR ("if ($VAR) { ...
+          # include $VAR; }") rather than re-testing file_exists()/is_file()
+          # directly. This is the common WP "resolve the first existing
+          # candidate across N fallback locations (theme override, add-on/
+          # pro variant, base plugin), then include whichever one won" idiom:
+          # a template-part loader tries a theme override, then an optional
+          # add-on fallback, then a base-plugin fallback — each candidate
+          # gated only by this ternary, often nested one level inside its own
+          # "if (!$template) {...}" guard clause — before including whichever
+          # candidate ended up non-empty. file_exists()/is_file() here still
+          # only confirms the candidate resolves to a real file; it applies
+          # no path-containment check, so a traversal segment in $PATH that
+          # resolves to an existing off-tree .php file is still selected and
+          # included. Both statements are wrapped in a "function $FUNC(...)
+          # { ... }" frame (rather than matched as a bare top-level
+          # statement pair) so the assignment may sit nested inside its own
+          # fallback-branch if-block while the include sink sits at the
+          # function's top level (or vice versa) — the same
+          # function-wide "..." reach already relied on by this rule's own
+          # pattern-not-inside FP guards below.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $VAR = file_exists($PATH) ? $PATH : $DEFAULT;
+                        ...
+                        if ($VAR) {
+                          ...
+                          include $VAR;
+                          ...
+                        }
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $VAR = file_exists($PATH) ? $PATH : $DEFAULT;
+                        ...
+                        if ($VAR) {
+                          ...
+                          include_once $VAR;
+                          ...
+                        }
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $VAR = file_exists($PATH) ? $PATH : $DEFAULT;
+                        ...
+                        if ($VAR) {
+                          ...
+                          require $VAR;
+                          ...
+                        }
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $VAR = file_exists($PATH) ? $PATH : $DEFAULT;
+                        ...
+                        if ($VAR) {
+                          ...
+                          require_once $VAR;
+                          ...
+                        }
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $VAR = is_file($PATH) ? $PATH : $DEFAULT;
+                        ...
+                        if ($VAR) {
+                          ...
+                          include $VAR;
+                          ...
+                        }
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $VAR = is_file($PATH) ? $PATH : $DEFAULT;
+                        ...
+                        if ($VAR) {
+                          ...
+                          include_once $VAR;
+                          ...
+                        }
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $VAR = is_file($PATH) ? $PATH : $DEFAULT;
+                        ...
+                        if ($VAR) {
+                          ...
+                          require $VAR;
+                          ...
+                        }
+                        ...
+                      }
+                  - pattern: |
+                      function $FUNC(...) {
+                        ...
+                        $VAR = is_file($PATH) ? $PATH : $DEFAULT;
+                        ...
+                        if ($VAR) {
+                          ...
+                          require_once $VAR;
+                          ...
+                        }
+                        ...
+                      }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    basename(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    sanitize_file_name(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    realpath(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    validate_file(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    sanitize_key(...);
+                    ...
+                  }
+              - pattern-not-inside: |
+                  function $F(...) {
+                    ...
+                    preg_replace(...);
+                    ...
+                  }

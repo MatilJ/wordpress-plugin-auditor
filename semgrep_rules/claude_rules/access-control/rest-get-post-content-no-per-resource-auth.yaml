@@ -1,0 +1,346 @@
+rules:
+  - id: claude.php.wordpress.access.rest-get-post-content-no-per-resource-auth
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A function calls get_post($id) and accesses the result's post_content,
+      post_excerpt, or post_title field — whether assigned to a variable first or
+      read inline (e.g. embedded directly in a json_encode()/wp_send_json() array
+      literal or an echo argument) — without a per-resource capability check
+      (current_user_can('read_post', $post_id) or current_user_can('edit_post',
+      $post_id)) and without restricting the resolved object to one known,
+      non-sensitive post type.
+
+      When this function is a REST or AJAX callback accessible to Contributors,
+      the class-level permission_callback checking only 'edit_posts' (plural) does
+      NOT prevent reading private or draft posts authored by other users. An attacker
+      with Contributor-level access can supply any post ID and read content from
+      posts they should not be able to access (CWE-639 — IDOR / Missing Per-Resource
+      Authorization). The same shape recurs as CWE-862 Missing Authorization when the
+      handler has no capability check at all, letting Subscriber+ users dump the
+      title/content of ANY post or CPT on the site regardless of status.
+
+      This vulnerability is especially impactful when the post content is relayed
+      to an external service (AI, translation, OCR) — even indirect disclosure via
+      a third-party API constitutes IDOR when the attacker controls the post ID.
+
+      Fix: either add a per-resource check —
+        if ( ! current_user_can( 'read_post', $post_id ) ) {
+            return new WP_Error( 'rest_forbidden', __( 'Access denied.' ), [ 'status' => 403 ] );
+        }
+      — or, when the endpoint is only meant to serve one specific plugin-owned post
+      type (e.g. a template/snippet CPT), hard-restrict to it before use:
+        if ( ! $post || $post->post_type !== 'my_specific_type' ) {
+            wp_die( -1 );
+        }
+
+      HIGH FP RATE — this pattern also appears in admin-only and cron contexts
+      where per-resource auth is not required. Always confirm the function is
+      accessible to non-admin users before reporting.
+
+      SCOPE NOTE (Wordfence bounty policy): the disclosed resource here is post/page/
+      CPT content (title/content/excerpt) — under current policy this class is
+      CVE-only / bounty-ineligible regardless of auth floor or install count. Record
+      it as an architectural lead (auth-model fact), not a submittable finding, unless
+      the same gap discloses user/customer PII rather than post/CPT content.
+    metadata:
+      category: security
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      # TRIAGE GUIDANCE — Common FP patterns:
+      #
+      # 1. Admin-only handlers: functions gated by current_user_can('manage_options')
+      #    in their own body or in a permission_callback are PR:H (OOS for bounty).
+      #    Confirm by checking the calling register_rest_route() or add_action() auth gate.
+      #
+      # 2. Internal processing functions: functions called only by cron, CLI, or
+      #    other admin-initiated operations — not directly reachable via HTTP.
+      #    Confirm: no wp_ajax_*, rest_api_init, or admin_post_* hooks link to this
+      #    function without an admin capability check.
+      #
+      # 3. Functions with edit_post (singular + ID) check: current_user_can('edit_post',
+      #    $id) is a per-resource check (may be too strict for read-only endpoints, but
+      #    does prevent unauthorized access). This rule excludes these — verify that
+      #    edit_post is called with the same ID that reaches get_post().
+      #
+      # 4. Cross-function helper pattern: if the function shown here is only called
+      #    by callers that perform the auth check before invoking it, this is an FP.
+      #    Trace all call sites of this function to confirm per-resource auth occurs.
+      #
+      # 5. post_type allow-list gate: if the function checks the resolved post's
+      #    post_type against a fixed, single expected value (and dies/returns on
+      #    mismatch) before using post_content/post_excerpt/post_title, the
+      #    arbitrary-post/CPT disclosure vector is closed even without a per-resource
+      #    read_post/edit_post check — this is a confirmed real-world fix shape for
+      #    this exact class. Excluded by this rule.
+      vulnerability_class: "Insecure Direct Object Reference (IDOR)"
+      technology: [php, wordpress]
+      references:
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+        - https://developer.wordpress.org/reference/functions/get_post/
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        # Admin-directory functions are PR:H regardless of the capability name used;
+        # plugins use custom import/admin capability strings, not only 'manage_options'
+        - "**/admin/**"
+    patterns:
+      # Function body fetches a post, then accesses post_content/post_excerpt/
+      # post_title somewhere in the same function — whether assigned to a bare
+      # variable first (`$X = $POST->post_content;`) or read inline nested inside
+      # another statement (array literal, function argument, echo — the deep-match
+      # `<... ... ...>` operator matches the field access at any nesting depth
+      # within the statement). Kept as whole-function pattern-either branches
+      # (not split via pattern-inside + a bare sub-pattern) so every branch matches
+      # at the same function-level granularity as the pattern-not clauses below —
+      # a bare sub-pattern match anchors at the smaller expression node instead,
+      # which silently defeats the function-scoped pattern-not clauses.
+      - pattern-either:
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $POST = get_post($ID);
+                ...
+                $X = $POST->post_content;
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $POST = get_post($ID);
+                ...
+                <... $POST->post_content ...>;
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $POST = get_post($ID);
+                ...
+                <... $POST->post_excerpt ...>;
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $POST = get_post($ID);
+                ...
+                <... $POST->post_title ...>;
+                ...
+              }
+      # No per-resource read authorization check in the function body.
+      # Two forms per capability: bare expression statement and if-condition guard
+      # (the most common real-world pattern).
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            current_user_can('read_post', ...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            current_user_can("read_post", ...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if (!current_user_can('read_post', ...)) {
+              ...
+            }
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if (!current_user_can("read_post", ...)) {
+              ...
+            }
+            ...
+          }
+      # Compound if-condition form: the capability check is one clause of a
+      # larger "&&"-joined condition (e.g. "if ($post && $post->post_status
+      # === 'publish' && current_user_can('read_post', $post->ID)) { ... }")
+      # rather than its own standalone statement or a negated single-
+      # condition guard. The deep-expression operator lets the capability
+      # call appear anywhere inside the condition regardless of what other
+      # clauses (status/type checks) sit alongside it.
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can('read_post', ...) ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can("read_post", ...) ...>) {
+              ...
+            }
+            ...
+          }
+      # edit_post (singular + ID) also constitutes per-resource auth
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            current_user_can('edit_post', ...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            current_user_can("edit_post", ...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if (!current_user_can('edit_post', ...)) {
+              ...
+            }
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if (!current_user_can("edit_post", ...)) {
+              ...
+            }
+            ...
+          }
+      # Compound if-condition form, same rationale as the read_post variant above.
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can('edit_post', ...) ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can("edit_post", ...) ...>) {
+              ...
+            }
+            ...
+          }
+      # Admin-only context: manage_options gate implies PR:H (OOS for bounty)
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            current_user_can('manage_options');
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            current_user_can("manage_options");
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if (!current_user_can('manage_options')) {
+              ...
+            }
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if (!current_user_can("manage_options")) {
+              ...
+            }
+            ...
+          }
+      # Compound if-condition form, same rationale as the read_post variant above.
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can('manage_options') ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can("manage_options") ...>) {
+              ...
+            }
+            ...
+          }
+      # post_type allow-list gate: restricting the resolved object to one known,
+      # non-sensitive post type closes the arbitrary-post/CPT disclosure vector
+      # even when no per-resource capability check is present at all.
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if ($POST->post_type !== $TYPE) {
+              ...
+            }
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if ($POST->post_type != $TYPE) {
+              ...
+            }
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if (!$POST || $POST->post_type !== $TYPE) {
+              ...
+            }
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if (!$POST || $POST->post_type != $TYPE) {
+              ...
+            }
+            ...
+          }
+      # post_status + post_password gate: checking that a post is published
+      # (not draft/private/future/trashed) AND not password-protected before
+      # using its content closes the non-public-content disclosure vector
+      # without requiring an explicit current_user_can() call — this is a
+      # standard WP idiom for gating read access to shared/reusable content.
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if ($POST->post_status !== $STATUS) {
+              ...
+            }
+            ...
+            if (!empty($POST->post_password)) {
+              ...
+            }
+            ...
+          }
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            if ($POST->post_status != $STATUS) {
+              ...
+            }
+            ...
+            if (!empty($POST->post_password)) {
+              ...
+            }
+            ...
+          }

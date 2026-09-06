@@ -1,0 +1,133 @@
+rules:
+  - id: claude.php.wordpress.sqli.csv-explode-uncast-tax-query-terms
+    languages: [php]
+    severity: HIGH
+    message: |
+      A comma- or plus-separated string is split via explode() and the
+      resulting array is assigned directly to the 'terms' element of a
+      taxonomy-filter row array (a tax_query-shaped row, keyed by
+      'taxonomy'/'field'/'terms'), with no array_map('absint'/'intval', ...)
+      or wp_parse_id_list() cast applied to the exploded array first
+      (CWE-89).
+
+      Plugins that reimplement their own taxonomy-term-to-SQL resolution
+      (custom search/relevance engines, caching layers, or query builders
+      that read this row instead of handing it to a real WP_Query) commonly
+      skip the integer-cast step WordPress core performs internally in
+      WP_Tax_Query::clean_query(). If the term list later reaches a raw
+      $wpdb IN() clause without $wpdb->prepare(), a single non-numeric
+      element from the exploded array is spliced into the query verbatim.
+      This is typically reachable through a public, unauthenticated search
+      or filter request parameter (e.g. "cat"/"tag"/"category"/"terms")
+      registered as a WP_Query public query var, so no authentication is
+      required to reach the split.
+
+      The vulnerable line is this explode() assignment itself, not the
+      eventual $wpdb call — the value commonly threads through several more
+      function calls (a taxonomy-row processor, a term-lookup helper) before
+      reaching raw SQL, which is why detection at the sink alone misses it.
+
+      Fix: cast every element to an integer immediately after the explode:
+        $ids = array_map( 'absint', explode( ',', $csv ) );
+      or use wp_parse_id_list( $csv ), which explodes AND absint-casts.
+
+      TRIAGE GUIDANCE
+      ───────────────────────────────────────────────────────────────────
+      TRUE POSITIVE indicators:
+        - The exploded source string (or an alias of it) traces back to a
+          public/REST query var, $_GET/$_POST/$_REQUEST, or another
+          request-controlled source, with no numeric cast applied anywhere
+          before this explode().
+        - The resulting array is consumed by the plugin's OWN taxonomy/term
+          resolution code (not passed straight into WP_Query()/get_posts()),
+          eventually reaching a raw, unprepared $wpdb query.
+
+      FALSE POSITIVE indicators:
+        - The exploded array is passed directly into WP_Query()/get_posts()
+          as the 'terms' value of a real WP_Query tax_query —
+          WP_Tax_Query::clean_query() internally applies wp_parse_id_list()/
+          intval() to non-slug/name fields, so no injection occurs even
+          without a cast here (confirm the consumer is NOT WP_Query itself).
+        - The exploded source string is a hardcoded or developer-controlled
+          constant, never request-influenced.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      # DETECTION RATIONALE
+      # ─────────────────────────────────────────────────────────────────────
+      # Pattern-mode, not taint: the cast that matters happens several
+      # function calls away from the eventual $wpdb execution (a separate
+      # term-lookup/tax-row-processor helper), which OSS Semgrep PHP taint
+      # does not reliably follow across function boundaries. This rule
+      # instead keys on the explode()-into-'terms' ASSIGNMENT shape itself,
+      # the same rationale documented in raw-sql-clause-quoted-variable-
+      # interpolation.yaml and unquoted-bare-variable-sql-fragment-
+      # interpolation.yaml for this corpus.
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/functions/wp_parse_id_list/
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $VAR = explode($SEP, $SRC);
+              ...
+              $ROW = array(..., 'terms' => $VAR, ...);
+          - pattern: |
+              $VAR = explode($SEP, $SRC);
+              ...
+              $ROW = [..., 'terms' => $VAR, ...];
+          - pattern: |
+              $VAR = explode($SEP, $SRC);
+              ...
+              $ROW[] = array(..., 'terms' => $VAR, ...);
+          - pattern: |
+              $VAR = explode($SEP, $SRC);
+              ...
+              $ROW[] = [..., 'terms' => $VAR, ...];
+          # Same shape, but the explode() sits inside one (or both) branches
+          # of an if/else that only decides the separator character (e.g.
+          # '+' vs ',') — the array-append that consumes $VAR as 'terms' is
+          # the sibling statement right after the whole if/else, one nesting
+          # level up from the assignment.
+          - pattern: |
+              if (...) {
+                $VAR = explode($SEP, $SRC);
+                ...
+              }
+              ...
+              $ROW[] = array(..., 'terms' => $VAR, ...);
+          - pattern: |
+              if (...) {
+                $VAR = explode($SEP, $SRC);
+                ...
+              } else {
+                $VAR = explode($SEP2, $SRC);
+                ...
+              }
+              ...
+              $ROW[] = array(..., 'terms' => $VAR, ...);
+      - pattern-not-inside: |
+          $VAR = array_map('absint', explode($SEP, $SRC));
+          ...
+      - pattern-not-inside: |
+          $VAR = array_map('intval', explode($SEP, $SRC));
+          ...
+      - pattern-not-inside: |
+          $VAR = explode($SEP, $SRC);
+          $VAR = array_map('absint', $VAR);
+          ...
+      - pattern-not-inside: |
+          $VAR = explode($SEP, $SRC);
+          $VAR = array_map('intval', $VAR);
+          ...
+      - pattern-not-inside: |
+          $VAR = wp_parse_id_list($SRC);
+          ...

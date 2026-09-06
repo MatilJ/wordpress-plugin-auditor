@@ -1,0 +1,132 @@
+rules:
+  - id: claude.php.wordpress.xss.stored-record-foreach-field-unescaped-echo
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A foreach loop iterates over a collection of stored records (a form
+      submission, imported row, log/history entry, or similar array of
+      associative sub-arrays) and echoes/prints a named field of the current
+      item (`$item['field']`) directly, or concatenated into an HTML string,
+      with no escaping function applied. Admin-facing "view entry" / metabox
+      templates for form-builder, CRM, and data-import plugins commonly
+      render each stored record's fields this way; when any field of the
+      record can be set by a lower-privileged or unauthenticated submitter,
+      this is Stored XSS executed in the viewing administrator's session.
+
+      A closely related shape: the loop iterates a field-schema/definition
+      array keyed by field name, and the sink instead indexes a SEPARATE
+      sibling array of submitted values using that same loop key — commonly
+      guarded only by an `isset($sibling[$key]) ? $sibling[$key] : $default`
+      null-guard ternary, which checks presence but performs no escaping.
+      This "field schema drives a lookup into a stored-value array" idiom is
+      common to form-builder entry/metabox renderers and is equally unescaped.
+
+      A third, equally common shape: the iterated collection holds OBJECTS
+      rather than associative sub-arrays — each loop item is a field object
+      (`$field->value`, `$field->label`, `$field->type`) — and the current
+      item's property is echoed directly. Object-shaped field records are
+      the norm for page-builder / form-builder "view submission" admin
+      templates; a field whose value is itself attacker-supplied (a
+      file-upload field's stored filename/URL, a free-text answer) reaching
+      an `<a href="...">`/text sink with literally no escaping function
+      — not even `strip_tags()` — is Stored XSS, and when the URL-context
+      copy of the value lands in an `href` attribute unescaped it is also an
+      unvalidated-scheme injection vector (`javascript:`, `data:`).
+
+      TRIAGE: confirm the iterated collection's fields genuinely originate
+      from a prior user submission (not solely admin-authored configuration
+      data), and that the output context is HTML body/attribute — not a
+      JSON/REST response consumed via wp_send_json*() or a safe DOM method.
+
+      Fix: wrap each field access (including the isset-ternary form, wrap the
+      whole ternary) in esc_html() (or esc_attr() for an attribute context);
+      use esc_url() specifically when the same value is placed in a URL
+      attribute (href/src) — esc_html() alone does not neutralize a
+      javascript:/data: scheme there.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — Stored"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+        - "**/freemius/**"
+    patterns:
+      - pattern-either:
+          - pattern: echo $ITEM[$FIELD];
+          - pattern: echo $A . $ITEM[$FIELD];
+          - pattern: echo $ITEM[$FIELD] . $B;
+          - pattern: echo $A . $ITEM[$FIELD] . $B;
+          - pattern: print $ITEM[$FIELD];
+          - pattern: print $A . $ITEM[$FIELD];
+          - pattern: print $ITEM[$FIELD] . $B;
+          - pattern: print $A . $ITEM[$FIELD] . $B;
+          - pattern: print($ITEM[$FIELD]);
+          - pattern: print($A . $ITEM[$FIELD]);
+          - pattern: print($ITEM[$FIELD] . $B);
+          - pattern: print($A . $ITEM[$FIELD] . $B);
+          - pattern: echo $ITEM->$FIELD;
+          - pattern: echo $A . $ITEM->$FIELD;
+          - pattern: echo $ITEM->$FIELD . $B;
+          - pattern: echo $A . $ITEM->$FIELD . $B;
+          - pattern: print $ITEM->$FIELD;
+          - pattern: print $A . $ITEM->$FIELD;
+          - pattern: print $ITEM->$FIELD . $B;
+          - pattern: print $A . $ITEM->$FIELD . $B;
+          - pattern: print($ITEM->$FIELD);
+          - pattern: print($A . $ITEM->$FIELD);
+          - pattern: print($ITEM->$FIELD . $B);
+          - pattern: print($A . $ITEM->$FIELD . $B);
+          - pattern: |
+              echo (isset($SINK[$KEY]) ? $SINK[$KEY] : $DEFAULT);
+          - pattern: |
+              echo $A . (isset($SINK[$KEY]) ? $SINK[$KEY] : $DEFAULT);
+          - pattern: |
+              echo (isset($SINK[$KEY]) ? $SINK[$KEY] : $DEFAULT) . $B;
+          - pattern: |
+              echo $A . (isset($SINK[$KEY]) ? $SINK[$KEY] : $DEFAULT) . $B;
+          - pattern: |
+              print (isset($SINK[$KEY]) ? $SINK[$KEY] : $DEFAULT);
+          - pattern: |
+              print $A . (isset($SINK[$KEY]) ? $SINK[$KEY] : $DEFAULT);
+          - pattern: |
+              print (isset($SINK[$KEY]) ? $SINK[$KEY] : $DEFAULT) . $B;
+          - pattern: |
+              print $A . (isset($SINK[$KEY]) ? $SINK[$KEY] : $DEFAULT) . $B;
+      - pattern-either:
+          - pattern-inside: |
+              foreach ($ARR as $KEY => $ITEM) { ... }
+          - pattern-inside: |
+              foreach ($ARR as $ITEM) { ... }
+      - pattern-not-inside: esc_html(...)
+      - pattern-not-inside: esc_attr(...)
+      - pattern-not-inside: esc_html__(...)
+      - pattern-not-inside: esc_attr__(...)
+      - pattern-not-inside: esc_url(...)
+      - pattern-not-inside: esc_url_raw(...)
+      - pattern-not-inside: htmlspecialchars(...)
+      - pattern-not-inside: htmlentities(...)
+      - pattern-not-inside: wp_kses(...)
+      - pattern-not-inside: wp_kses_post(...)
+      - pattern-not-inside: wp_strip_all_tags(...)
+      - pattern-not-inside: sanitize_text_field(...)
+      - pattern-not-inside: absint(...)
+      - pattern-not-inside: intval(...)
+      # WP Core Settings API globals ($wp_settings_fields / $wp_settings_sections),
+      # populated exclusively via add_settings_field()/add_settings_section(),
+      # hold developer-registered field labels and callbacks, not user-submitted
+      # form data — common in plugins that reimplement WP Core's own
+      # do_settings_fields()/do_settings_sections() rendering loop.
+      - metavariable-regex:
+          metavariable: $ARR
+          regex: '^(?!.*\$wp_settings_(fields|sections)\b).*$'

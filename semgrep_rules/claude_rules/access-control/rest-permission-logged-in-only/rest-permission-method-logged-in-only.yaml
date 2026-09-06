@@ -1,0 +1,89 @@
+rules:
+  # Detects methods that wrap is_user_logged_in() as a permission check without
+  # any current_user_can() capability check. Common in base route classes where a
+  # shared method is used as permission_callback for multiple REST routes.
+  - id: claude.php.wordpress.access-control.rest-permission-method-logged-in-only
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      Method returns is_user_logged_in() without calling current_user_can().
+      If used as a REST route permission_callback, any authenticated user
+      (including Subscribers) can access the endpoint — is_user_logged_in()
+      only validates session existence, not capabilities (CWE-862).
+
+      TRIAGE: Search for register_rest_route() calls that reference this method
+      as a permission_callback (e.g., [$this, 'method_name']). For each route,
+      verify whether the endpoint's operations require a higher capability.
+      Routes performing admin-only actions (settings, log export, data deletion)
+      with this callback are likely missing authorization.
+
+      Remediation: add current_user_can('appropriate_capability') to the method
+      body, or replace the callback with a method that performs a capability check.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/#permissions-callback
+        - https://developer.wordpress.org/reference/functions/is_user_logged_in/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $METHOD(...) {
+                ...
+                return is_user_logged_in();
+              }
+          # Variant: guard-clause shape `if ( is_user_logged_in() ) { return true; }`
+          # with an implicit deny (null/void) on the else path. Functionally identical
+          # to `return is_user_logged_in()` as a gate, but a distinct AST the bare
+          # `return` pattern misses. Name-scoped to *_permissions_check because this
+          # if/return-true control flow is common in non-permission code; the suffix
+          # keeps the branch precise while still catching the WP_REST_Controller
+          # permission-method convention.
+          - patterns:
+              - pattern: |
+                  function $METHOD(...) {
+                    ...
+                    if (is_user_logged_in()) {
+                      ...
+                      return true;
+                    }
+                    ...
+                  }
+              - metavariable-regex:
+                  metavariable: $METHOD
+                  regex: ^\w+_permissions_check$
+      # Negative clause (from the fix, which added current_user_can): suppress when the
+      # method carries a real capability gate. current_user_can() can appear as a bare
+      # statement, a return, or an if-condition (allow or deny form) — enumerate the
+      # realistic shapes so a genuine gate anywhere in the body clears the finding.
+      - pattern-not: |
+          function $METHOD(...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not: |
+          function $METHOD(...) {
+            ...
+            return current_user_can(...);
+            ...
+          }
+      - pattern-not: |
+          function $METHOD(...) {
+            ...
+            if (current_user_can(...)) { ... }
+            ...
+          }
+      - pattern-not: |
+          function $METHOD(...) {
+            ...
+            if (! current_user_can(...)) { ... }
+            ...
+          }

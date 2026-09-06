@@ -1,0 +1,190 @@
+rules:
+  - id: claude.php.wordpress.ssrf.wp-safe-remote-user-input
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      User-controlled input flows into wp_safe_remote_get(), wp_safe_remote_post(),
+      wp_safe_remote_head(), wp_remote_get(), wp_remote_post(), wp_remote_head(),
+      or wp_remote_request() without adequate host validation (CWE-918).
+
+      wp_safe_remote_get/post() calls wp_http_validate_url() internally, which blocks
+      RFC-1918 private ranges (10.x, 172.16-31.x, 192.168.x) and loopback (127.x).
+      However, wp_http_validate_url() does NOT block the 169.254.x.x link-local range.
+      This range is used by:
+        - AWS EC2 Instance Metadata Service (IMDS): http://169.254.169.254/latest/meta-data/
+        - GCP Compute Engine metadata: http://169.254.169.254/computeMetadata/v1/
+        - Azure IMDS: http://169.254.169.254/metadata/instance
+
+      A Contributor-accessible REST endpoint that accepts a user-supplied URL and passes
+      it to wp_safe_remote_get() can be used to exfiltrate cloud IAM credentials,
+      instance identity documents, and other IMDS data.
+
+      wp_remote_get/post() (without 'safe_' prefix) additionally has no built-in
+      reject_unsafe_urls protection and will follow requests to any RFC-1918 or
+      loopback address as well.
+
+      sanitize_url() is a direct core alias of esc_url_raw() (it calls
+      esc_url($url, $protocols, 'db') internally) and provides the exact same
+      non-protection: scheme/character validation only, no destination-host or
+      IP-range check. A URL is also frequently handed to a plugin-defined thin
+      wrapper (e.g. a helper method that itself just forwards its argument into
+      wp_remote_get()/wp_remote_post()) rather than to the WP core function
+      directly — the wrapper adds no validation of its own, so the taint and the
+      vulnerability are identical to calling the core function inline.
+
+      Fix:
+        - For wp_safe_remote_*: add an explicit 169.254.x.x / link-local check before
+          the call, e.g. validate that the parsed IP is not in 169.254.0.0/16.
+        - Replace with an allowlist approach: only permit URLs matching a known set
+          of safe hostnames or patterns.
+        - For wp_remote_*: use wp_http_validate_url() plus the 169.254 check, or
+          switch to wp_safe_remote_get() with the explicit link-local block.
+        - Treat any in-house HTTP-fetch helper the same as the core function it
+          wraps — the fix belongs at the shared call site or inside the helper
+          itself, not just at one caller.
+
+      TRIAGE GUIDANCE:
+        - Confirm the REST/AJAX endpoint is accessible to Contributor/Subscriber
+          (permission_callback uses 'edit_posts', 'read', or is __return_true).
+        - Check whether the server is likely cloud-hosted (common for WP deployments).
+        - IMDSv2-only AWS deployments block GET-based IMDS access (wp_safe_remote_get
+          issues GET; IMDSv2 requires a PUT to obtain a token). However, GCP and Azure
+          do not require token-based auth by default.
+        - wp_safe_remote_post() can be used to satisfy IMDSv2 token acquisition (PUT
+          is structurally similar; confirm by checking wp_remote_request() usage).
+    metadata:
+      category: security
+      cwe: "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp: "A10:2021 - Server-Side Request Forgery"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Server-Side Request Forgery (SSRF)"
+      technology: [php, wordpress]
+      references:
+        - https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-metadata.html
+        - https://developer.wordpress.org/reference/functions/wp_safe_remote_get/
+        - https://developer.wordpress.org/reference/functions/wp_http_validate_url/
+        - https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/
+    # wp_http_validate_url() blocks RFC-1918 + loopback but NOT 169.254.x.x (link-local).
+    # Do not list it as a sanitizer: its 169.254 gap is the precise bypass documented here.
+    #
+    # esc_url_raw() and esc_url() are URL-formatting functions, NOT sanitizers for SSRF.
+    # They enforce http/https scheme and encode some characters but do NOT perform any
+    # IP-range blocking. A 169.254.x.x URL passes through esc_url_raw() unchanged.
+    # Both must be propagators so taint survives them and reaches the sink.
+    # Common pattern: wp_safe_remote_head(esc_url_raw($_POST['url']), ...) — still SSRF.
+    # sanitize_text_field() strips HTML but does not validate IP ranges — also a propagator.
+    # wp_unslash() and json_decode() are already handled by pattern-propagators below.
+    paths:
+      exclude:
+        - "**/freemius/**"
+    pattern-propagators:
+      # wp_unslash() reverses PHP magic-quote escaping — taint passes through unchanged.
+      - pattern: wp_unslash($SRC)
+        from: $SRC
+        to: $RETURN
+      # json_decode() returns a PHP value from the JSON string — taint follows through.
+      - pattern: json_decode($SRC, ...)
+        from: $SRC
+        to: $RETURN
+      # esc_url_raw() enforces http/https scheme and encodes some characters, but does NOT
+      # block IP ranges — a 169.254.x.x URL passes through unchanged. Taint must propagate.
+      - pattern: esc_url_raw($SRC, ...)
+        from: $SRC
+        to: $RETURN
+      # esc_url() is the HTML-attribute variant of esc_url_raw() — same SSRF non-protection.
+      - pattern: esc_url($SRC, ...)
+        from: $SRC
+        to: $RETURN
+      # sanitize_text_field() strips HTML tags but does not validate IP ranges.
+      # A URL like http://169.254.169.254/ passes through sanitize_text_field() unchanged.
+      - pattern: sanitize_text_field($SRC)
+        from: $SRC
+        to: $RETURN
+      # sanitize_textarea_field() — same as sanitize_text_field() for SSRF purposes.
+      - pattern: sanitize_textarea_field($SRC)
+        from: $SRC
+        to: $RETURN
+      # sanitize_url() is a core alias of esc_url_raw() (returns esc_url($url,...,'db'))
+      # — same scheme/character validation, no host or IP-range check. Taint propagates.
+      - pattern: sanitize_url($SRC, ...)
+        from: $SRC
+        to: $RETURN
+    pattern-sources:
+      - pattern-either:
+          # REST API request parameters
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_body()
+          # AJAX superglobals
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+    pattern-sinks:
+      - patterns:
+          # wp_safe_remote_get/post — has built-in reject_unsafe_urls=true but
+          # wp_http_validate_url() does not block 169.254.x.x (link-local/IMDS range).
+          - pattern-either:
+              - pattern: wp_safe_remote_get($URL, ...)
+              - pattern: wp_safe_remote_post($URL, ...)
+              - pattern: wp_safe_remote_head($URL, ...)
+              - pattern: wp_remote_get($URL, ...)
+              - pattern: wp_remote_head($URL, ...)
+              - pattern: wp_remote_post($URL, ...)
+              - pattern: wp_remote_request($URL, ...)
+          - focus-metavariable: $URL
+      # A plugin-defined thin wrapper (method/static call) that just forwards its
+      # own first argument into a core remote-fetch call adds no host/IP validation
+      # of its own — the taint and the vulnerability are the same as calling the
+      # wrapped core function directly. Matches common wrapper names (e.g. a class
+      # method literally called http_get()/remote_get()/fetch_url()) that mirror
+      # the wp_remote_* verb they wrap.
+      - patterns:
+          - pattern-either:
+              - pattern: $OBJ->$METHOD($URL, ...)
+              - pattern: $CLASS::$METHOD($URL, ...)
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: "(?i).*(http_get|http_post|http_request|remote_get|remote_post|remote_request|fetch_url|url_fetch|get_remote_url).*"
+          - focus-metavariable: $URL
+    pattern-sanitizers:
+      - pattern-either:
+          # Numeric values cannot be valid URLs
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          # Identifier-only sanitizers — [a-z0-9_-] cannot form scheme://host
+          - pattern: sanitize_key(...)
+          # Email format cannot contain / or : needed for URL scheme/host
+          - pattern: sanitize_email(...)
+          # URL-encoding applied to a PATH COMPONENT (urlencode prevents injection
+          # into a path segment, but only when the scheme+host are developer-controlled).
+          # Do NOT treat urlencode() as a full URL sanitizer when the host is attacker-supplied.
+          # Listed here to avoid FPs where urlencode($path) follows a fixed scheme+host prefix.
+          - pattern: urlencode(...)
+          - pattern: rawurlencode(...)
+          # md5() always produces [0-9a-f]{32} — cannot form scheme://host or influence destination host
+          - pattern: md5(...)
+          # wp_parse_url() decomposes a URL into scheme/host/path/query components rather
+          # than returning a fetchable URL string — its presence signals the code is about
+          # to inspect (and typically allowlist-check) the host before any request is made,
+          # the documented fix shape for this class of bug. Breaks the tainted-string chain.
+          - pattern: wp_parse_url(...)
+          # esc_url() validates URL structure and encodes some chars, but does NOT block
+          # 169.254.x.x. Listed only because it removes control characters and limits schemes
+          # to http/https/ftp/ftps/mailto/news/irc — practical protection in many contexts
+          # but NOT sufficient for IMDS bypass. Remove from sanitizers if targeting cloud SSRF.
+          # Uncomment to suppress esc_url() hits that are not cloud-IMDS scenarios:
+          # - pattern: esc_url(...)
+          # - pattern: esc_url_raw(...)

@@ -1,0 +1,97 @@
+rules:
+  - id: claude.js.wordpress.xss.jquery-dom-insertion-ajax-response
+    languages: [js, typescript]
+    severity: MEDIUM
+    message: |
+      jQuery DOM-insertion method (.append(), .prepend(), .after(), .before(),
+      .replaceWith()) is called with dynamically built HTML containing a
+      variable. All six jQuery DOM-insertion methods (plus .html()) parse
+      their argument as HTML and execute inline scripts and event handlers —
+      they are functionally equivalent to innerHTML as XSS sinks (CWE-79).
+
+      If the variable originates from an AJAX response, REST API call, or
+      any server-side data source containing user-controlled content, this
+      is a DOM-based XSS vector.
+
+      This rule complements jquery-html-unsafe-variable by covering the
+      additional jQuery DOM insertion methods beyond .html().
+
+      TRIAGE:
+        - .text(), .val(), .textContent are safe — verify the method name
+        - DOMPurify.sanitize() wrapping is safe
+        - Admin-only JS files (enqueued on manage_options pages) are PR:H
+        - Multi-step write flow FP applies (see jquery-html-unsafe-variable)
+
+      Fix: use .text() for plain text, or DOMPurify.sanitize() before
+      DOM insertion. For structured HTML, consider DOM API methods
+      (createElement + textContent) instead of string concatenation.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [javascript, jquery, wordpress]
+      references:
+        - https://api.jquery.com/append/
+        - https://api.jquery.com/prepend/
+        - https://cheatsheetseries.owasp.org/cheatsheets/DOM_based_XSS_Prevention_Cheat_Sheet.html
+    paths:
+      exclude:
+        - "jquery.*.js"
+        - "*.min.js"
+        - "*-min.js"
+        - "**/inc/**"
+        - "**/min/**"
+        - "**/select2/**"
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          - pattern: $EL.append($A + $B)
+          - pattern: $EL.prepend($A + $B)
+          - pattern: $EL.after($A + $B)
+          - pattern: $EL.before($A + $B)
+          - pattern: $EL.replaceWith($A + $B)
+          - pattern: $EL.append($VAR.join(...))
+          - pattern: $EL.prepend($VAR.join(...))
+          - pattern: $EL.after($VAR.join(...))
+          - pattern: $EL.before($VAR.join(...))
+          - pattern: $EL.replaceWith($VAR.join(...))
+          # Pre-built variable idiom: the HTML string is accumulated via +=
+          # concatenation on an earlier statement (e.g. an AJAX success
+          # handler building up markup across several fields), then passed
+          # as a bare variable — not an inline "$A + $B" expression — into
+          # the DOM-insertion call. Common when the handler embeds an
+          # AJAX-response field (e.g. file["author"]) into an attribute
+          # string before insertion.
+          - pattern: |
+              $VAR += $A + $B;
+              ...
+              $EL.append($VAR)
+          - pattern: |
+              $VAR += $A + $B;
+              ...
+              $EL.prepend($VAR)
+          - pattern: |
+              $VAR += $A + $B;
+              ...
+              $EL.after($VAR)
+          - pattern: |
+              $VAR += $A + $B;
+              ...
+              $EL.before($VAR)
+          - pattern: |
+              $VAR += $A + $B;
+              ...
+              $EL.replaceWith($VAR)
+      - pattern-not:
+          patterns:
+            - pattern: $EL.$METHOD($CSS_VAR)
+            - metavariable-regex:
+                metavariable: $CSS_VAR
+                regex: "(?i)css|style"

@@ -1,0 +1,59 @@
+rules:
+  # Fires when html_entity_decode(stripslashes(...)) decodes stored \uXXXX sequences
+  # to raw HTML chars, and the decoded URL is returned without esc_url()/esc_attr().
+  - id: claude.php.wordpress.xss.url-unicode-decode-no-esc-url
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A URL is decoded from JSON-style Unicode escape sequences via
+      html_entity_decode(stripslashes()) — converting \uXXXX sequences
+      stored verbatim through wp_kses() sanitization (which treats them as
+      inert backslash-u text) to literal characters including HTML-unsafe
+      ones ("→", >→>). The decoded URL is then re-slashed for
+      JSON output via addcslashes($url, '/'), which only escapes '/' and
+      leaves '"', '<', '>' unmodified. If this slashed-but-HTML-unsafe
+      value is used in an HTML attribute context (str_replace into an img
+      tag, attribute concatenation, etc.) without first passing through
+      esc_url() or esc_attr(), an attacker who controls the stored URL can
+      inject \uXXXX sequences that survive wp_kses() at save-time and then
+      expand to raw HTML metacharacters at render-time, enabling Stored XSS.
+
+      Fix: apply esc_url() to the decoded URL before addcslashes(), so
+      HTML special characters are percent-encoded before re-slashing.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: LOW
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — Post-Decode Reintroduction"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/79.html
+        - https://www.php.net/manual/en/function.html-entity-decode.php
+        - https://developer.wordpress.org/apis/security/escaping/
+    pattern-sources:
+      - pattern-either:
+          - pattern: html_entity_decode(stripslashes($URL))
+          - pattern: html_entity_decode(stripslashes(preg_replace(..., ..., $URL)))
+    # esc_url/esc_attr applied after decode neutralizes the HTML-unsafe chars.
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: esc_url(...)
+          - pattern: esc_url_raw(...)
+          - pattern: esc_attr(...)
+          - pattern: esc_html(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+    # addcslashes($X, '/') only escapes '/' — leaves '"', '<', '>' unmodified.
+    # When $X is tainted from a decode, the result is HTML-unsafe.
+    pattern-sinks:
+      - pattern: addcslashes($X, '/')
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+        - "**/freemius/**"

@@ -1,0 +1,91 @@
+rules:
+  - id: claude.php.wordpress.file.option-to-include
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A database-stored value (get_option, get_post_meta, get_user_meta,
+      get_transient, etc.) flows into include/require or a WordPress template
+      loading function. This is a second-order LFI: if a lower-privilege
+      user can write to the option/meta key (via REST API, AJAX, or other
+      write path), they control the included file path (CWE-98 / CWE-22).
+      Validate the stored value against an allowlist or apply
+      sanitize_file_name() / realpath() + prefix check before inclusion.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program ('PHP Remote File Inclusion')"
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - "CVE-2025-2158: WordPress Review Plugin post custom field LFI"
+      # TRIAGE GUIDANCE — SECOND-ORDER VULNERABILITY:
+      #
+      # This rule confirms the READ-to-INCLUDE flow. The auditor must ALSO
+      # verify the WRITE path:
+      #
+      # TRUE POSITIVE — option writable by lower-privilege user:
+      #   $template = get_option('my_plugin_template');
+      #   include PLUGIN_DIR . '/templates/' . $template . '.php';
+      #   + update_option('my_plugin_template', $_POST['template']) in
+      #     an AJAX handler accessible to Subscribers.
+      #   -> Subscriber writes traversal path, next page load includes it.
+      #
+      # TRUE POSITIVE — post meta writable by Contributor:
+      #   $tpl = get_post_meta($post_id, '_custom_template', true);
+      #   load_template($tpl);
+      #   + Contributor saves _custom_template via block editor / custom field.
+      #
+      # FALSE POSITIVE — option only writable by admins:
+      #   $template = get_option('plugin_settings')['template'];
+      #   include PLUGIN_DIR . '/templates/' . $template . '.php';
+      #   + Settings page requires manage_options to save.
+      #   -> Admin already has unfiltered_html — no privilege escalation.
+      #
+      # FALSE POSITIVE — stored value used as allowlist key:
+      #   $key = get_option('active_template');
+      #   $map = ['default' => 'default.php', 'modern' => 'modern.php'];
+      #   include PLUGIN_DIR . '/templates/' . ($map[$key] ?? 'default.php');
+      #   -> Stored value selects from hardcoded map, not used as path.
+    pattern-sources:
+      - pattern-either:
+          - pattern: get_option(...)
+          - pattern: get_post_meta(...)
+          - pattern: get_user_meta(...)
+          - pattern: get_comment_meta(...)
+          - pattern: get_transient(...)
+          - pattern: get_site_option(...)
+          - pattern: get_site_transient(...)
+    pattern-sinks:
+      - pattern-either:
+          - pattern: include $X;
+          - pattern: include($X);
+          - pattern: include_once $X;
+          - pattern: include_once($X);
+          - pattern: require $X;
+          - pattern: require($X);
+          - pattern: require_once $X;
+          - pattern: require_once($X);
+          - pattern: load_template($X, ...)
+          - pattern: locate_template($X, ...)
+          - pattern: get_template_part($X, ...)
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_file_name(...)
+          - pattern: basename(...)
+          - pattern: sanitize_key(...)
+          - pattern: realpath(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          - pattern: sanitize_title(...)
+          - pattern: sanitize_html_class(...)
+          - pattern: validate_file(...)

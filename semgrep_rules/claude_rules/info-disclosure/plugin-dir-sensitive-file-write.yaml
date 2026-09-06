@@ -1,0 +1,45 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.plugin-dir-sensitive-file-write
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A web-accessible directory path (plugin_dir_path(), WP_PLUGIN_DIR,
+      WP_CONTENT_DIR) flows into a file write function (file_put_contents,
+      fopen). Files written to wp-content/plugins/ or wp-content/ are directly
+      requestable via HTTP, potentially exposing log data, configuration dumps,
+      SQL exports, or debug output to unauthenticated users.
+      Real-world: CVE-2024-44000 (LiteSpeed Cache debug.log with session
+      cookies), CVE-2025-11693 (Export WP Page cookies.txt exposure).
+      Detectify research found 19M+ installs affected by plugin log files in
+      web-accessible directories.
+      Verify the file contains sensitive data and no .htaccess protection exists.
+    metadata:
+      category: security
+      cwe: "CWE-552: Files or Directories Accessible to External Parties"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Sensitive Data Exposure"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/552.html
+    # Exclude WP-CLI command files: code paths gated behind a WP-CLI command class
+    # only execute in an operator's local CLI session, never via HTTP request.
+    # Confirmed FP: really-simple-ssl 9.6.1 class-wp-cli.php:686 — a lock file write
+    # reachable only through a registered wp-cli command.
+    paths:
+      exclude:
+        - "**/*wp-cli*.php"
+        - "**/cli/**"
+    pattern-sources:
+      - pattern-either:
+          - pattern: plugin_dir_path(...)
+          - pattern: WP_PLUGIN_DIR
+          - pattern: WP_CONTENT_DIR
+    pattern-sinks:
+      - pattern-either:
+          - pattern: file_put_contents($PATH, ...)
+          - pattern: fopen($PATH, ...)

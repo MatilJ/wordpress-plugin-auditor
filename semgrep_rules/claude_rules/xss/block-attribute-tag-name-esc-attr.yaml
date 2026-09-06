@@ -1,0 +1,52 @@
+rules:
+  - id: claude.php.wordpress.xss.block-attribute-tag-name-esc-attr
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: >
+      A Gutenberg block render callback reads an HTML tag-name attribute from
+      $attributes and outputs it via esc_attr() instead of tag_escape().
+      esc_attr() does not strip spaces, slashes, or equals signs; a payload like
+      "img src=x onerror=alert(1)//" passes unchanged and renders as a valid
+      HTML element at the tag-name position. Replace esc_attr() with tag_escape(),
+      which validates the value against WordPress's allowlist of known HTML tags.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Stored Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/tag_escape/
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    pattern-sources:
+      - patterns:
+          # Block attribute key name contains a tag-name indicator word
+          - pattern: $attributes[$TAG_KEY]
+          - metavariable-pattern:
+              metavariable: $TAG_KEY
+              pattern-regex: "(?i)(tag|element|heading|wrapper)"
+    pattern-sanitizers:
+      - pattern-either:
+          # tag_escape() is the correct function for HTML tag-name context
+          - pattern: tag_escape(...)
+          # Numeric casts rule out injection entirely
+          - pattern: (int) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          # sanitize_key() restricts to lowercase alphanumeric + hyphens
+          - pattern: sanitize_key(...)
+          # Ternary allowlist gate: the value is used only if it strictly matches
+          # (in_array with strict=true) an entry in a fixed allowlist, otherwise a
+          # hardcoded fallback is substituted — functionally equivalent to an
+          # allowlist-validating sanitizer function, a common defensive idiom for
+          # dynamic HTML tag names (e.g. restricting to h1-h6/div/p before use).
+          - pattern: "<... in_array($X, $ALLOWLIST, true) ...> ? $X : $FALLBACK"
+    pattern-sinks:
+      # esc_attr() is the wrong sanitizer for tag-name position — treat as sink
+      - pattern: esc_attr($X)

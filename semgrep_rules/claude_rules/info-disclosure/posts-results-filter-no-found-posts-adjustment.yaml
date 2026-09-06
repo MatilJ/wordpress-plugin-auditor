@@ -1,0 +1,104 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+  - id: claude.php.wordpress.info-disclosure.posts-results-filter-no-found-posts-adjustment
+    mode: join
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function registered on the posts_results or the_posts query filter
+      removes entries from the post array (e.g. via unset()) to hide
+      restricted or private content from the caller, but never adjusts
+      $query->found_posts or $query->max_num_pages.
+
+      WordPress computes found_posts/max_num_pages from the raw SQL result
+      set before this filter runs. On paginated collection queries (notably
+      REST API endpoints, where these values are surfaced directly as the
+      X-WP-Total / X-WP-TotalPages response headers) the pre-filter total
+      remains observable even though the hidden entries themselves are
+      stripped from the response. This lets an unauthorized caller detect
+      the existence and exact count of hidden items, and — when the query
+      is combined with a caller-controlled search/filter parameter — use
+      the total as a boolean oracle to infer keywords or content inside
+      items they cannot otherwise view (CWE-200).
+
+      TRIAGE: confirm the filtered array actually hides restricted/private
+      content (not just deduplication or post-type filtering) and that the
+      same query drives a paginated public listing where found_posts /
+      max_num_pages become visible to the caller. The fix is to either
+      exclude the hidden rows at the SQL level (so found_posts is correct
+      from the start) or decrement found_posts / recompute max_num_pages
+      for every entry removed here.
+    join:
+      rules:
+        - id: posts-results-hook-registration
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: add_filter($HOOK, '$FUNC', ...)
+                - pattern: add_filter($HOOK, $FUNC, ...)
+            # $HOOK captures the whole quoted string; metavariable-regex uses
+            # prefix-anchored match semantics, so a leading .* is required to
+            # match past the opening quote before the hook name.
+            - metavariable-regex:
+                metavariable: $HOOK
+                regex: "(?i).*(posts_results|the_posts).*"
+
+        - id: results-filter-no-pagination-adjustment
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: |
+                    function $FUNC($POSTS, $QUERY) {
+                      ...
+                      unset($POSTS[$KEY]);
+                      ...
+                    }
+                - pattern: |
+                    function $FUNC($POSTS, $QUERY) {
+                      ...
+                      $POSTS = array_filter($POSTS, ...);
+                      ...
+                    }
+                - pattern: |
+                    function $FUNC($POSTS, $QUERY) {
+                      ...
+                      $POSTS = array_diff_key($POSTS, ...);
+                      ...
+                    }
+            # The fix reassigns found_posts/max_num_pages somewhere in the
+            # same function to keep pagination totals in sync with removal.
+            - pattern-not: |
+                function $FUNC($POSTS, $QUERY) {
+                  ...
+                  $QUERY->found_posts = $FOUND;
+                  ...
+                }
+            - pattern-not: |
+                function $FUNC($POSTS, $QUERY) {
+                  ...
+                  $QUERY->max_num_pages = $PAGES;
+                  ...
+                }
+
+      # Join on function name only, not path: WP plugins commonly register a
+      # hook (add_filter) in a different file from the callback definition.
+      on:
+        - 'posts-results-hook-registration.$FUNC == results-filter-no-pagination-adjustment.$FUNC'
+
+    metadata:
+      category: security
+      cwe:
+        - "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Information Exposure"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/hooks/posts_results/
+        - https://developer.wordpress.org/rest-api/using-the-rest-api/pagination/
+        - https://cwe.mitre.org/data/definitions/200.html

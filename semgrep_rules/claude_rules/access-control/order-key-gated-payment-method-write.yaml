@@ -1,0 +1,80 @@
+rules:
+  - id: claude.php.wordpress.access-control.order-key-gated-payment-method-write
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function whose name suggests it changes a stored payment method/gateway
+      gates access using only an order-key comparison (key_is_valid() against
+      a WooCommerce order/subscription) and contains no session-identity check
+      (is_user_logged_in(), current_user_can(), or get_current_user_id())
+      anywhere in its body. An order key is a per-order bearer secret, not an
+      account credential — if it can be obtained through any channel (a
+      forwarded confirmation-email URL, Referer-header leakage, a companion
+      information-disclosure bug), an unauthenticated attacker can rebind the
+      order/subscription's stored payment method to a payment instrument they
+      control, hijacking future recurring or repeat charges (CWE-862).
+
+      Confirmed TP: woo-stripe-payment 4.0.7
+      SubscriptionsController::process_change_payment_method_redirect()
+      validates only $subscription->key_is_valid($order_key) before calling
+      set_payment_method_id()/process_change_payment_method(), with no
+      is_user_logged_in()/current_user binding anywhere in the function —
+      contrast the plugin's own sibling add_payment_method branch, which
+      requires login and binds to get_current_user_id().
+
+      TRIAGE: Confirm the flagged function actually WRITES a payment method/
+      gateway/token (not merely reads or displays order data), and check
+      whether a sibling code path in the same class handles a related request
+      variant WITH the session-identity binding this one omits — that
+      asymmetry is strong confirmation, not just a missing-check guess. Also
+      confirm the order-key value is a genuine per-order secret (not itself
+      guessable/sequential) before treating exploitability as established.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: LOW
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress, woocommerce]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/functions/is_user_logged_in/
+    patterns:
+      - pattern: <... $ORDER->key_is_valid($KEY) ...>
+      - pattern-inside: |
+          function $FUNC(...) {
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $FUNC
+          regex: (?i).*(change_payment|update_payment_method|save_payment_method|process_payment_method).*
+      # Deep-matched inside an if-condition so a session check nested in a
+      # guard (the common shape: `if (!is_user_logged_in()) { ... }`) is
+      # still detected, not just a bare top-level statement.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... is_user_logged_in() ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can(...) ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... get_current_user_id() ...>) {
+              ...
+            }
+            ...
+          }

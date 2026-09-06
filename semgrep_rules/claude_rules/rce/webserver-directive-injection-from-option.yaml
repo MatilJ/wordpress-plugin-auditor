@@ -1,0 +1,113 @@
+rules:
+  - id: claude.php.wordpress.rce.webserver-directive-injection-from-option
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A database-stored value (get_option, get_site_option, get_post_meta,
+      get_user_meta, get_transient, or a plugin settings-wrapper getter)
+      flows directly into a string literal shaped like an Apache
+      (`Header set/always/append "..."`) or Nginx (`add_header ... "...";`)
+      directive, with no sanitizer stripping CR/LF/NUL/`<`/`>`/the quote
+      character in between. This buffer is characteristic of code that
+      generates `.htaccess` / `nginx.conf` rule blocks from plugin settings
+      (custom CSP/security-header, cache-control, or CORS features are the
+      most common carriers).
+
+      If the stored value can contain a raw `\r\n`, it terminates the
+      current directive line and the following bytes are parsed by the web
+      server as a brand-new directive — e.g. a `<FilesMatch>` block or a
+      `SetHandler application/x-httpd-php` line — once the generated file is
+      (re)written to disk. That is web-server directive injection (CWE-94),
+      and on Apache/LiteSpeed it is a path to remote code execution.
+
+      Fix: strip `\r`, `\n`, `\x00`, `<`, `>`, and the directive's own quote
+      delimiter from the value immediately before it is concatenated in
+      (e.g. `preg_replace('/[\r\n\x00<>"]/', '', $value)`), or reject/encode
+      it at the point the setting is saved.
+
+      TRIAGE — SECOND-ORDER VULNERABILITY:
+        This rule confirms the READ-to-DIRECTIVE flow. Also verify the WRITE
+        path for the same option/meta key:
+
+      TRUE POSITIVE — value reaches the rules file unsanitized AND either
+      (a) a non-admin role (Subscriber/Customer, or any authenticated user
+      via a broken-capability AJAX/REST handler) can write the option, or
+      (b) the rules file is regenerated automatically (page-cache flush, a
+      cron event, an unrelated settings save) so a single CRLF-bearing value
+      — however it was entered — is enough; no further attacker action is
+      needed to trigger the write.
+
+      FALSE POSITIVE — the concatenated value is provably constrained before
+      this point: an enum/allowlist selecting between hardcoded strings, an
+      integer/boolean cast, or a value that already passed through
+      sanitize_text_field()/esc_attr() or an equivalent CR/LF-stripping
+      helper earlier in the same call chain that this rule's dataflow
+      analysis did not see (e.g. sanitized at the point of storage rather
+      than at render time — check `update_option`/`register_setting` for a
+      `sanitize_callback`).
+    metadata:
+      category: security
+      cwe: "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: LOW
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Code Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/94.html
+        - https://owasp.org/www-community/attacks/Command_Injection
+    pattern-sources:
+      - pattern-either:
+          - pattern: get_option(...)
+          - pattern: get_site_option(...)
+          - pattern: get_post_meta(...)
+          - pattern: get_user_meta(...)
+          - pattern: get_transient(...)
+          - pattern: get_site_transient(...)
+          - pattern: $CONFIG->get_string(...)
+          - pattern: $CONFIG->get_array(...)
+    pattern-sinks:
+      # `.` is left-associative, so a 3+-operand chain like
+      # `'Header set X "' . $val . "\"\n"` parses as
+      # `('Header set X "' . $val) . "\"\n"` — the two-operand pattern below
+      # matches that inner node regardless of what follows it.
+      - patterns:
+          - pattern: $DIRECTIVE . $TAINT
+          - metavariable-regex:
+              metavariable: $DIRECTIVE
+              # $DIRECTIVE captures the full PHP string-literal token
+              # (including its own quote delimiters), e.g.
+              # '    Header set Content-Security-Policy "' — so the
+              # relevant signal is the directive keyword appearing
+              # anywhere in that token; the trailing quote that opens the
+              # attribute value is part of the *content*, not a fixed
+              # offset from the string's own end, so it is not anchored.
+              regex: "(?i).*(header\\s+(set|always|append)|add_header).*"
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_text_field(...)
+          - pattern: esc_attr(...)
+          - pattern: esc_html(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          - pattern: sanitize_key(...)
+          - pattern: sanitize_html_class(...)
+          - pattern: preg_replace("...", "...", $X)
+          - pattern: str_replace("...", "...", $X)
+          - pattern: strip_tags(...)
+          # Name-agnostic match on any project-local helper whose own name
+          # declares the intent (e.g. W3TC's sanitize_directive_value(), a
+          # plugin's own escape_header_value()/strip_directive_bytes()) —
+          # the generalizable signal is the name, not a specific class.
+          # $CLASS::$SANITIZER(...) matches both static and instance calls.
+          - patterns:
+              - pattern: $CLASS::$SANITIZER(...)
+              - metavariable-regex:
+                  metavariable: $SANITIZER
+                  regex: "(?i).*(sanitiz|escape|strip).*"

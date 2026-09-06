@@ -1,0 +1,137 @@
+rules:
+  - id: claude.php.wordpress.file.tainted-realpath-no-extension-check
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A function reads $_GET/$_POST/$_REQUEST and separately calls is_file()
+      or file_exists() to validate a resolved path, but the function applies
+      no path sanitizer and no file-extension allow-list anywhere in its
+      body. These existence checks confirm a resolved path is a real file
+      but do not restrict WHICH file is accepted — when the checked path is
+      later treated as a valid content source (e.g. a multi-file
+      combiner/minifier that reads and outputs each accepted path), an
+      attacker can disclose the contents of any file the process can read,
+      including configuration files such as wp-config.php (CWE-22).
+      Sanitize the path (basename()/sanitize_file_name()/realpath() with a
+      prefix check) AND restrict accepted file extensions to the intended
+      asset types before treating the checked path as valid. Note: this rule
+      recognizes pathinfo()/validate_file()/realpath() anywhere in the
+      function as a guard, but NOT basename()/sanitize_file_name() applied to
+      an intermediate variable a few lines earlier — verify those manually.
+    metadata:
+      category: security
+      cwe: "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — request-array loop feeding a combiner/minifier source list:
+      #   foreach ($_GET['files'] as $name) {
+      #       $path = $base . $name;
+      #       $real = SomeHelper::realpath($path);
+      #       if (is_file($real)) {
+      #           $sources[] = array('filepath' => $real);
+      #       }
+      #   }
+      #   -> No extension check: $name = 'wp-config.php' is accepted and, once
+      #      the combiner reads/outputs $real elsewhere, discloses its contents.
+      #
+      # FALSE POSITIVE — extension allow-list applied before acceptance:
+      #   $ext = strtolower(pathinfo($real, PATHINFO_EXTENSION));
+      #   if ('css' !== $ext && 'js' !== $ext) { continue; }
+      #   if (is_file($real)) { $sources[] = array('filepath' => $real); }
+      #   -> Only the intended asset types can ever be accepted/served.
+      #
+      # NOT AUTO-DETECTED (verify manually) — basename()/sanitize_file_name()
+      # applied to an intermediate variable before the path is built:
+      #   $name = basename($_GET['file']);
+      #   if (is_file($dir . '/' . $name)) { ... }
+      #   -> Safe (traversal impossible), but this rule only recognizes
+      #      pathinfo()/validate_file()/realpath() as function-wide guards;
+      #      a basename()/sanitize_file_name() reassignment a few lines
+      #      earlier still requires manual confirmation.
+      #
+      # CONTEXT CHECK:
+      #   1. Is $_GET/$_POST/$_REQUEST actually used to build the checked path
+      #      (not merely present elsewhere in the same function for unrelated
+      #      reasons)?
+      #   2. Does an EARLIER statement sanitize the specific variable that
+      #      feeds the checked path (basename()/sanitize_file_name()), even
+      #      though this rule doesn't trace that automatically?
+      #   3. Is the checked path later stored as a source/spec used for
+      #      reading file content elsewhere (same class or a bundled library)?
+      #   4. Is there ANY extension/type restriction on the accepted files?
+    patterns:
+      - pattern-either:
+          - pattern: is_file($PATH)
+          - pattern: file_exists($PATH)
+      - pattern-either:
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+                $_GET[$K];
+                ...
+              }
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+                $_POST[$K];
+                ...
+              }
+          - pattern-inside: |
+              function $FUNC(...) {
+                ...
+                $_REQUEST[$K];
+                ...
+              }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            pathinfo(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... pathinfo(...) ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            validate_file(...);
+            ...
+          }
+      # Statement-level "X(...);" templates above only match validate_file()/
+      # pathinfo() when they appear in an expression-statement (bare call or
+      # assignment RHS) — a call embedded in an if-condition needs the deep
+      # expression operator to be found by the same function-wide search.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... validate_file(...) ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            realpath(...);
+            ...
+          }
+      # A $PATH built entirely from string literals and bare constants (no
+      # PHP variable anywhere in its source text) cannot carry the
+      # request-derived value even if $_GET/$_POST/$_REQUEST is read
+      # elsewhere in the same function — this only excludes the
+      # zero-variable case, not a genuinely tainted path.
+      - metavariable-regex:
+          metavariable: $PATH
+          regex: (?s).*\$.*

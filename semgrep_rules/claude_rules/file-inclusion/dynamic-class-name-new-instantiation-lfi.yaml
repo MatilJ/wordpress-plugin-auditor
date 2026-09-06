@@ -1,0 +1,102 @@
+rules:
+  - id: claude.php.wordpress.file-inclusion.dynamic-class-name-new-instantiation-lfi
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      Unsanitized request data flows into a class-name expression used with
+      the `new` operator (`new $CLASS(...)`). When the resulting class name
+      is not already declared, PHP invokes every registered autoloader
+      (spl_autoload_register callbacks, including WordPress's own and any
+      plugin/theme-defined ones) with the attacker-controlled string before
+      raising an error. A common custom-autoloader idiom converts the class
+      name to a relative file path (e.g. via str_replace('\\', DIRECTORY_SEPARATOR, ...))
+      and does `include`/`require` it — if that conversion does not also
+      strip ".." path-traversal sequences (stripping "\\" alone is
+      insufficient), an attacker-chosen class-name suffix can traverse to
+      and include any other *.php file reachable from the resolved base
+      path: unauthenticated Local File Inclusion (CWE-98 / CWE-22), with
+      Remote Code Execution potential if any other file-write primitive on
+      the host can place attacker-influenced content into a *.php file.
+
+      This is CWE-470 (Unsafe Reflection: externally-controlled input used
+      to select code to execute) combined with CWE-98/CWE-22 in the
+      autoloader's own file resolution.
+
+      Verify the registered autoloader(s) reachable from this class-name
+      value: do they strip "../" (not just "\\") before the include/require?
+      Do they require the resolved file to already exist under a fixed
+      base directory via a realpath()+prefix containment check? If neither
+      protection is present, this is exploitable.
+
+      Fix: reduce the class-name suffix to a safe charset (sanitize_key())
+      or validate it against a hardcoded allow-list of legitimate class/
+      handler names before it reaches `new`.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-470: Use of Externally-Controlled Input to Select Classes or Code ('Unsafe Reflection')"
+        - "CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program"
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/470.html
+        - https://cwe.mitre.org/data/definitions/98.html
+        - https://www.php.net/manual/en/function.spl-autoload-register.php
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+          # AJAX-handler "request-data-bag" object convention: many WP page-
+          # builder/form frameworks (Elementor and its ecosystem included)
+          # populate a $this->record/$this->data/$this->params array from
+          # $_POST once in a dispatcher class, then pass that object to
+          # per-action handler classes that read the array back — an
+          # intraprocedural taint engine cannot see across that hop, so this
+          # heuristically treats the read side as tainted too.
+          - pattern-either:
+              - pattern: $OBJ->record[...]
+              - pattern: $OBJ->data[...]
+              - pattern: $OBJ->params[...]
+              - pattern: $OBJ->request_data[...]
+              - pattern: $OBJ->post_data[...]
+    pattern-sinks:
+      - patterns:
+          - pattern: new $CLASS(...)
+          - focus-metavariable: $CLASS
+    pattern-sanitizers:
+      # sanitize_key() output is [a-z0-9_-] only — traversal is impossible.
+      - pattern: sanitize_key(...)
+      - pattern: sanitize_file_name(...)
+      - pattern: sanitize_title(...)
+      - pattern: basename(...)
+      # Value confirmed to be a member of a fixed, known set before use.
+      - pattern: "in_array($X, $ARR, true) ? $X : $DEFAULT"
+      # Blacklist-strip fix idiom that removes traversal AND path-separator
+      # characters entirely, which blocks moving into any subdirectory at
+      # all — effective when both are present, even though neither alone
+      # would be.
+      - patterns:
+          - pattern-either:
+              - pattern: |
+                  $X = str_replace("..", $R1, $X);
+                  ...
+                  $X = str_replace("/", $R2, $X);
+              - pattern: |
+                  $X = str_replace('..', $R1, $X);
+                  ...
+                  $X = str_replace('/', $R2, $X);
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"

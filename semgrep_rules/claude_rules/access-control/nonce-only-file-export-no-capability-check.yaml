@@ -1,0 +1,111 @@
+rules:
+  - id: claude.php.wordpress.access-control.nonce-only-file-export-no-capability-check
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A function sends a file-download response (a Content-Disposition:
+      attachment header, followed by echoing generated/exported content) but
+      the only authorization gate anywhere in the function is a nonce check
+      (wp_verify_nonce / check_ajax_referer / check_admin_referer) — no
+      current_user_can() and no is_user_logged_in() call is present (CWE-862).
+
+      A nonce alone confirms CSRF origin, not the caller's authentication state
+      or privilege level. If this function is reachable pre-authentication —
+      directly on a hook that fires for logged-out visitors (init, wp_loaded,
+      parse_request, template_redirect), or indirectly through a custom
+      do_action()-based router keyed off a request parameter and an in_array()
+      allow-list of action names — any visitor who can obtain the nonce
+      (including an anonymous UID-0 nonce shared by every logged-out visitor,
+      when the triggering form is rendered on a public page) can trigger the
+      export regardless of role.
+
+      TRIAGE REQUIRED — reachability determines exploitability:
+      1. Trace how this function is registered/dispatched. If it is only ever
+         invoked from a hook or menu page already gated by manage_options/
+         edit_others_posts (e.g. rendered solely inside an admin settings
+         page), the nonce is effectively admin-scoped and this is lower
+         priority.
+      2. If reachable via init/wp_loaded/parse_request/template_redirect, or a
+         custom action-name dispatcher gated only by an in_array() allow-list
+         (the allow-list restricts WHICH hook fires, not WHO may trigger it),
+         the function is exploitable pre-authentication.
+      3. Assess the sensitivity of the exported content (server/environment
+         configuration, database credentials, installed-plugin/theme list,
+         debug or error logs) to size CIA impact.
+
+      Remediation: add current_user_can() (or, at minimum, is_user_logged_in())
+      alongside the nonce check, before generating the download.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-287: Improper Authentication"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://cwe.mitre.org/data/definitions/287.html
+        - https://developer.wordpress.org/apis/security/nonces/
+        - https://developer.wordpress.org/apis/security/user-capabilities-and-roles/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                if (<... $WP_VERIFY(...) ...>) {
+                  ...
+                }
+                ...
+                header($HDR);
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $WP_VERIFY(...);
+                ...
+                header($HDR);
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $WP_VERIFY
+          regex: '.*(wp_verify_nonce|check_ajax_referer|check_admin_referer)$'
+      - metavariable-regex:
+          metavariable: $HDR
+          regex: '(?i).*content-disposition.*attachment.*'
+      # FP guard: the fix for the seeding class added a capability and/or
+      # login check alongside the nonce check — its presence anywhere in the
+      # function (bare call or if-condition) means the gap is closed.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can(...) ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            is_user_logged_in(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... is_user_logged_in(...) ...>) {
+              ...
+            }
+            ...
+          }

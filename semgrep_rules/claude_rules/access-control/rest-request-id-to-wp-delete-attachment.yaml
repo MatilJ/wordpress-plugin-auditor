@@ -1,0 +1,226 @@
+rules:
+  - id: claude.php.wordpress.access-control.rest-request-id-to-wp-delete-attachment
+    languages: [php]
+    severity: HIGH
+    message: |
+      wp_delete_attachment() is called inside a REST API handler that reads a
+      request parameter, without a prior per-resource ownership or capability
+      check (CWE-639 / CWE-862). Any user whose role satisfies the route's
+      permission_callback can permanently hard-delete any Media Library
+      attachment — including files owned by higher-privileged users.
+
+      wp_delete_attachment($id, true) removes both the wp_posts DB record
+      (post_type='attachment') and the physical file from wp-content/uploads/.
+      The deletion is irreversible without a backup.
+
+      Required fix — add one of the following before the deletion:
+        // Per-resource capability check (preferred):
+        if ( ! current_user_can( 'delete_post', $attachment_id ) ) {
+            return new WP_Error( 'rest_forbidden', '', [ 'status' => 403 ] );
+        }
+        // OR author equality check:
+        $post = get_post( $attachment_id );
+        if ( ! $post || (int) $post->post_author !== get_current_user_id() ) {
+            return new WP_Error( 'rest_forbidden', '', [ 'status' => 403 ] );
+        }
+    metadata:
+      category: security
+      cwe:
+        - "CWE-639: Authorization Bypass Through User-Controlled Key"
+        - "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Insecure Direct Object Reference (IDOR)"
+      technology: [php, wordpress]
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — no ownership check before deletion:
+      #   The handler calls wp_delete_attachment(...) where the attachment ID
+      #   originates from get_param() / get_json_params() / etc. and no
+      #   per-resource current_user_can($cap, $id) check appears in an if()
+      #   condition. Confirm auth floor: read the route's permission_callback
+      #   to determine the minimum role. If Contributor or Subscriber →
+      #   reportable (PR:L). If manage_options / administrator → PR:H → OOS.
+      #
+      # FALSE POSITIVE — author equality check (not suppressible by this rule):
+      #   Some plugins verify ownership via $post->post_author === get_current_user_id()
+      #   rather than current_user_can('delete_post', $id) in an if() condition.
+      #   The rule cannot match this pattern as an exclusion; it fires even when
+      #   the author check is present.
+      #   Triage: search for 'post_author' or 'get_current_user_id' in the same
+      #   function body. If found and the deletion is inside the verified branch,
+      #   this is a FP.
+      #
+      # FALSE POSITIVE — manage_options permission_callback:
+      #   If the REST route's permission_callback requires manage_options or
+      #   administrator role, the auth floor is PR:H (OOS for bounty).
+      #   This rule cannot trace interprocedural permission_callback calls —
+      #   verify the callback body before reporting.
+      #
+      # NOTE — scope of wp_delete_attachment():
+      #   This function operates exclusively on wp_posts rows with
+      #   post_type='attachment'. It cannot delete wp-config.php or other
+      #   arbitrary filesystem paths. Impact is limited to the Media Library
+      #   (files under wp-content/uploads/).
+      #
+      # VARIANT — bulk delete over a loop, not a single REST param:
+      #   A function iterating an array of IDs (foreach) and calling
+      #   wp_delete_attachment() on the loop variable, with no per-item
+      #   ownership/capability check in the loop body or enclosing function.
+      #   The ID array's origin does not need to be a $REQUEST object directly
+      #   — a classic AJAX dispatcher (wp_ajax_*) reading $_POST/$_REQUEST, or
+      #   a value relayed through a custom table one call removed from the
+      #   original request, both reach this same unchecked bulk-delete sink.
+      #   Confirm the enclosing dispatch chain requires no more than the
+      #   route's documented auth floor before treating this as reportable.
+      #
+      # VARIANT — hook-callback deletion sourced from persisted meta:
+      #   A function registered on a WP core action hook (delete_comment,
+      #   before_delete_post, trashed_post, etc.) that reads an attachment ID
+      #   back from get_comment_meta()/get_post_meta() and passes it to
+      #   wp_delete_attachment() with no ownership check. This is a
+      #   second-order shape: the meta value was written during an earlier,
+      #   separate request (commonly by an unauthenticated/low-privileged
+      #   content-submission endpoint that itself has no attachment-ownership
+      #   check), and the deletion fires automatically the next time the
+      #   associated comment/post is moderated — not on a request the
+      #   attacker sends directly. Confirm the meta key's write-side origin
+      #   before reporting: trace every add_comment_meta()/update_post_meta()
+      #   call using the same meta key back to its own auth floor.
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_delete_attachment/
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/
+    patterns:
+      # Anchor: wp_delete_attachment() call. The global-namespace form \wp_delete_attachment()
+      # is common in namespaced plugins — both forms must be listed.
+      - pattern-either:
+          - pattern: wp_delete_attachment(...)
+          - pattern: \wp_delete_attachment(...)
+      # Must be inside a function that also reads a WP REST API request parameter.
+      - pattern-inside:
+          pattern-either:
+            - pattern: |
+                function $FUNC($REQUEST, ...) {
+                  ...
+                  $REQUEST->get_param(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC($REQUEST, ...) {
+                  ...
+                  $REQUEST->get_json_params();
+                  ...
+                }
+            - pattern: |
+                function $FUNC($REQUEST, ...) {
+                  ...
+                  $REQUEST->get_params();
+                  ...
+                }
+            - pattern: |
+                function $FUNC($REQUEST, ...) {
+                  ...
+                  $REQUEST->get_body_params();
+                  ...
+                }
+            - pattern: |
+                function $FUNC($REQUEST, ...) {
+                  ...
+                  $REQUEST->get_body();
+                  ...
+                }
+            # Bulk-delete-in-loop variant: not tied to a REST $REQUEST-typed
+            # signature at all — a foreach over any ID array (AJAX dispatcher,
+            # DB query result relayed from an earlier request, etc.) that
+            # hard-deletes each item is the same missing-ownership-check shape.
+            - pattern: |
+                foreach ($ARR as $ID) {
+                  ...
+                  wp_delete_attachment($ID, ...);
+                  ...
+                }
+            - pattern: |
+                foreach ($ARR as $ID) {
+                  ...
+                  \wp_delete_attachment($ID, ...);
+                  ...
+                }
+            # Hook-callback variant: the attachment ID is read back from
+            # persisted comment/post meta (written during an earlier,
+            # unrelated request) rather than pulled from the current request
+            # object directly — the classic second-order shape for a
+            # callback registered on a WP core action hook (e.g.
+            # delete_comment, before_delete_post) that fires automatically
+            # during routine content moderation, not on a REST/AJAX dispatch
+            # the attacker directly controls. Deep-matched (<... ...>) since
+            # the meta read is commonly nested inside a loop over several
+            # meta keys, one or more levels removed from the function's own
+            # top-level statement sequence.
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  <... get_comment_meta(...) ...>;
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  <... get_post_meta(...) ...>;
+                  ...
+                }
+      # Exclude: function contains a per-resource current_user_can() check in an if
+      # condition (two-arg form: capability + resource ID). Single-arg calls like
+      # current_user_can('edit_posts') are global role checks, not ownership checks,
+      # and do NOT suppress the finding.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can($CAP, $ID) ...>) {
+              ...
+            }
+            ...
+          }
+      # Exclude (hook-callback/meta-sourced variant only): the get_post_meta()/
+      # get_comment_meta() call is itself the ownership/possession check — its
+      # return value is compared via strict equality against a caller-supplied
+      # value in the if() that guards the deletion — not merely the source of
+      # an unchecked ID. Common WP idiom: a random, unguessable per-attachment
+      # token is stored as meta at upload time, and the caller must present it
+      # back to prove possession before any deletion proceeds. Both operand
+      # orderings are covered since developers write the comparison either way.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... $KEY === get_post_meta(...) ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... get_post_meta(...) === $KEY ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... $KEY === get_comment_meta(...) ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... get_comment_meta(...) === $KEY ...>) {
+              ...
+            }
+            ...
+          }

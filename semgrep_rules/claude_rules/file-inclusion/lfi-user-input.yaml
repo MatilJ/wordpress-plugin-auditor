@@ -1,0 +1,183 @@
+rules:
+  - id: claude.php.wordpress.lfi.include-user-input
+    mode: taint
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      User-controlled input flows into include/require. Any value that
+      resolves to a PHP file path is executed in the current interpreter,
+      producing RCE. Even when limited to .php files, path traversal can
+      reach attacker-writable locations (session files, uploaded media,
+      log files) (CWE-98 / CWE-22).
+      Resolve the path with realpath() and verify the prefix against a
+      known base directory before inclusion.
+      The same risk exists one call-frame removed: handing the unsanitized
+      selector to a "load/get/render/include ...template..."-named
+      dispatcher — a same-class method OR a plain (non-method) function
+      under the plugin's own naming prefix — is itself the LFI-enabling
+      handoff, because that naming convention overwhelmingly marks a
+      dispatcher that builds $dir . $selector . '.php' internally and
+      guards only with file_exists()/is_file() — a check invisible to
+      per-function taint analysis, so the call boundary itself must be
+      treated as the sink.
+      Fix it by validating the selector against a fixed, known list
+      (in_array($value, $allowed, true)) before it is ever passed onward,
+      not only by narrowing its character set.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program ('PHP Remote File Inclusion')"
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+          # WP REST API request parameters — CVE-2025-1661 (HUSKY) demonstrated
+          # LFI via REST/AJAX template parameter flowing to include().
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: $REQUEST->get_body()
+    pattern-propagators:
+      # wp_parse_args() merges user-supplied array with defaults; taint persists
+      # through the merged output. Common in AJAX callback parameter handling.
+      - pattern: wp_parse_args($INPUT, ...)
+        from: $INPUT
+        to: return
+      # shortcode_atts() filters attribute KEYS to those in $DEFAULTS but
+      # attribute VALUES remain user-controlled. Taint propagates through return.
+      - pattern: shortcode_atts($DEFAULTS, $INPUT, ...)
+        from: $INPUT
+        to: return
+    pattern-sinks:
+      - pattern-either:
+          - pattern: include $X;
+          - pattern: include($X);
+          - pattern: include_once $X;
+          - pattern: include_once($X);
+          - pattern: require $X;
+          - pattern: require($X);
+          - pattern: require_once $X;
+          - pattern: require_once($X);
+          # load_template() is a direct require/require_once wrapper with
+          # ZERO path validation (WP Core template.php:782).
+          - pattern: load_template($X, ...)
+          # Passing the tainted selector into a same-class "load/get/
+          # render/include/display ...template..." method: the callee
+          # conventionally does $dir . $selector . '.php' with only a
+          # file_exists()/is_file() guard, which per-function taint
+          # analysis cannot see across the call boundary — treat the call
+          # site itself as the sink.
+          - patterns:
+              - pattern: $THIS->$METHOD(..., $X, ...)
+              - metavariable-regex:
+                  metavariable: $METHOD
+                  regex: (?i)^(load|get|render|include|display|print|output)_.*template$
+              # Semgrep's $THIS->$METHOD(...) pattern also binds across a
+              # static-call callee (Class::method(...)) — its captured text
+              # is the bare class name with no "$" sigil, unlike a genuine
+              # $this/$obj instance receiver. A static factory/constructor
+              # method returning an object (e.g. a CF7-core "get_template()"
+              # building a new form object) is not the same-class
+              # file-path-selector dispatcher this branch targets.
+              - metavariable-regex:
+                  metavariable: $THIS
+                  regex: '^\$'
+          # Free-function equivalent of the same handoff: the plugin
+          # exposes its template-loading wrapper as a plain function under
+          # its own naming prefix (e.g. "xyz_get_template($name, $args)")
+          # rather than a class method, and calls it directly with a
+          # selector built from the tainted value. Same naming convention,
+          # widened to allow an arbitrary prefix/suffix around the verb +
+          # "template/view/partial/layout" noun (matches the sibling
+          # pattern-mode rule's custom-wrapper regex in this same
+          # category), since free-function wrapper names are almost always
+          # prefixed with the plugin's own slug rather than starting bare
+          # with "get_"/"load_". Anchored to the FIRST argument via
+          # focus-metavariable — these wrappers conventionally take the
+          # template name/path first and a data array of arbitrary render
+          # variables second; without the focus, Semgrep's taint checker
+          # treats the WHOLE matched call (all arguments) as the sink
+          # region, so a tainted value anywhere in that second data array
+          # (e.g. a $_COOKIE-derived value merely passed through for the
+          # template to render) would false-positive as if it were the
+          # path, which it is not.
+          - patterns:
+              - pattern: $FUNC($X, ...)
+              - focus-metavariable: $X
+              # Semgrep's bare $FUNC(...) callee metavariable also binds
+              # across a static-call qualifier (Class::method), giving $FUNC
+              # a value like "WPCF7_ContactForm::get_template" — the leading
+              # "(?!.*::)" excludes that shape. A static factory/constructor
+              # method returning an object (e.g. a CF7-core "get_template()"
+              # that builds a new form object) is not the file-path-selector
+              # dispatcher this naming heuristic targets; that instance-method
+              # shape is already covered separately by the $THIS->$METHOD(...)
+              # branch above.
+              - metavariable-regex:
+                  metavariable: $FUNC
+                  regex: '(?i)^(?!.*::).*(?:get_|load_|include_|render_|locate_)(?:template|view|partial|layout)\w*$'
+    # TRIAGE GUIDANCE — Sanitizer hidden inside a resolver function (common FP):
+    #
+    # Pattern: $name = some_get_template_by_x($tainted); some_get_template($name, ...);
+    # If the intermediate resolver function itself applies sanitize_file_name()/
+    # basename()/an allow-list to the tainted argument before returning, the
+    # SECOND call is safe even though the first call's return value still
+    # shows up as "tainted" here — per-function taint analysis cannot see a
+    # sanitizer applied inside a called function's body. Read the resolver's
+    # source before reporting.
+    #
+    # TRIAGE GUIDANCE — Switch/case template resolvers (common FP):
+    #
+    # Pattern: $path = ClassName::resolve_template($user_input); include $path;
+    # If the resolver function uses switch/case with only hardcoded return values and
+    # a safe default case, user input cannot influence which file is included.
+    # Semgrep fires because taint propagates through the function-call return value
+    # without modeling the switch/case allowlist inside the called function.
+    #
+    # Confirm it is a FP by reading the resolver function source:
+    #   1. All case branches return plugin-internal hardcoded paths (BSR_PATH/ABSPATH prefix).
+    #   2. The default branch returns a safe fallback — NOT a path that includes user input.
+    #   3. No dynamic string concatenation of user input occurs inside the function.
+    # When all three are true → FP; no path traversal is possible.
+    # Seen in: better-search-replace 1.4.10 — BSR_Templates_Helper::get_tab_template()
+    #          routing $_GET['tab'] to one of three hardcoded template paths.
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_file_name(...)
+          - pattern: basename(...)
+          # sanitize_key() output is [a-z0-9_-] only — no dots or slashes,
+          # so path traversal and file extension manipulation are impossible.
+          - pattern: sanitize_key(...)
+          # realpath() resolves .. and symlinks — canonical traversal prevention
+          - pattern: realpath(...)
+          # Integer values cannot be file paths
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          # sanitize_title() → [a-z0-9%-_] — no dots or slashes
+          - pattern: sanitize_title(...)
+          # sanitize_html_class() → [A-Za-z0-9_-] — no path separators
+          - pattern: sanitize_html_class(...)
+          # validate_file() returns 0=valid, 1/2/3=invalid. Effective when
+          # checked. Ignored-result cases caught by dedicated rule.
+          - pattern: validate_file(...)
+          # Value confirmed to be a member of a fixed, known set before use
+          # — it can no longer select an arbitrary path even though its
+          # raw character set was never restricted.
+          - pattern: "in_array($X, $ARR, true) ? $X : $DEFAULT"

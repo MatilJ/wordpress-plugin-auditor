@@ -1,0 +1,77 @@
+rules:
+  - id: claude.php.wordpress.access.get-request-nonce-bypass
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function with an authorization or nonce-validation verb in its name checks
+      for nonces or capabilities only inside a POST-method conditional, then
+      unconditionally returns true for all other HTTP methods (GET, PUT, DELETE, etc.).
+      When this function is used as the authorization gate for a nopriv AJAX handler
+      or REST endpoint, unauthenticated visitors can invoke state-changing operations
+      via non-POST requests without any nonce or capability verification (CWE-862).
+      Ensure nonce or capability checks apply to every HTTP method the endpoint accepts,
+      or explicitly reject non-POST requests if only POST is expected.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      # TRIAGE GUIDANCE:
+      #
+      # This rule fires on auth-named functions with this structure:
+      #   if (method === 'POST') { <nonce/auth check> }
+      #   return true;   ← GET/PUT/DELETE bypass this block and always pass
+      #
+      # MANDATORY VERIFICATION (two conditions must both be true):
+      # 1. The function is used as the auth gate for an endpoint accessible to
+      #    unauthenticated or low-privilege users (wp_ajax_nopriv_, __return_true
+      #    REST callback, or Slim/FastRoute router used inside a nopriv handler).
+      # 2. The endpoint performs state-changing operations (DB writes, email sends,
+      #    file operations). GET requests to read-only endpoints do not require nonces.
+      #
+      # FALSE POSITIVE — read-only GET endpoint:
+      #   The function gates a GET endpoint that only reads/returns data.
+      #   No state change possible → no exploitable vulnerability.
+      #
+      # FALSE POSITIVE — POST-only endpoint:
+      #   The endpoint is only reachable via POST in practice (e.g., form submit).
+      #   Verify by checking the route registration or AJAX action handler.
+      #
+      # TRUE POSITIVE — state-changing GET via Slim/router framework:
+      #   Plugin registers wp_ajax_nopriv_ dispatcher → dispatches to a Slim/FastRoute
+      #   router → GET route handler performs state-changing operations. This function
+      #   serves as the middleware auth gate and returns true for GET, bypassing checks.
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_verify_nonce/
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+    patterns:
+      # Match auth-named functions that check POST method, then return true unconditionally.
+      # The deep expression <... "POST" ...> catches getMethod() === 'POST',
+      # $_SERVER['REQUEST_METHOD'] === 'POST', strtoupper(...) === 'POST', etc.
+      - pattern: |
+          function $FUNC(...) {
+            ...
+            if (<... "POST" ...>) {
+              ...
+            }
+            ...
+            return true;
+          }
+      # Exclude functions with an unconditional capability check — auth gate is present.
+      - pattern-not: |
+          function $FUNC(...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      # Restrict to functions with authorization-related names to reduce FP noise.
+      # Functions named "nonce", "validate", "verify", "auth", "check", "permission",
+      # "authorize", or "access" imply they are intended as authorization gates.
+      - metavariable-regex:
+          metavariable: $FUNC
+          regex: '(?i).*(nonce|validate|verify|auth|check|permission|authorize|access).*'

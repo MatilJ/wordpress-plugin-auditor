@@ -1,0 +1,71 @@
+rules:
+  - id: claude.php.wordpress.access-control.openssl-verify-loose-check
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      The tri-state return value of openssl_verify() — or a "verify"-style
+      wrapper method on a signature/DSig object that directly forwards that
+      return value — is checked with plain boolean negation or a loose
+      equality-to-zero test instead of a strict comparison to 1.
+      openssl_verify() returns 1 on a valid signature, 0 on an invalid one,
+      and -1 on a processing error; -1 evaluates as truthy in PHP, so
+      `if (!$result)` (or `if ($result == 0)`) silently treats a
+      verification ERROR the same as a successful signature check
+      (CWE-347), which can let a forged or malformed signed payload be
+      accepted as authentic (CWE-287). Always compare the result strictly
+      against the success value, e.g. `if (1 !== $result) { /* reject */ }`.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-287: Improper Authentication"
+        - "CWE-347: Improper Verification of Cryptographic Signature"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/287.html
+        - https://cwe.mitre.org/data/definitions/347.html
+        - https://www.php.net/manual/en/function.openssl-verify.php
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-either:
+                  - pattern: if (! openssl_verify(...)) { ... }
+                  - pattern: |
+                      $RESULT = openssl_verify(...);
+                      ...
+                      if (! $RESULT) { ... }
+                  - pattern: |
+                      $RESULT = openssl_verify(...);
+                      ...
+                      if ($RESULT == 0) { ... }
+              - pattern-not: |
+                  $RESULT = openssl_verify(...);
+                  ...
+                  if (1 === $RESULT) { ... }
+              - pattern-not: |
+                  $RESULT = openssl_verify(...);
+                  ...
+                  if (1 !== $RESULT) { ... }
+          - patterns:
+              - pattern-either:
+                  - pattern: if (! $SIG->verify(...)) { ... }
+                  - pattern: |
+                      $RESULT = $SIG->verify(...);
+                      ...
+                      if (! $RESULT) { ... }
+              - metavariable-regex:
+                  metavariable: $SIG
+                  regex: (?i).*sig.*
+              - pattern-not: |
+                  $RESULT = $SIG->verify(...);
+                  ...
+                  if (1 === $RESULT) { ... }
+              - pattern-not: |
+                  $RESULT = $SIG->verify(...);
+                  ...
+                  if (1 !== $RESULT) { ... }

@@ -1,0 +1,75 @@
+rules:
+  - id: claude.php.wordpress.csrf.file-write-capability-only-no-nonce
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function performs a file-write operation (raw file move/copy/write, a
+      wp_handle_upload() call, or an uploader/replacer object constructed
+      directly from $_FILES data) and checks a capability with
+      current_user_can() but does NOT verify a nonce (wp_verify_nonce /
+      check_admin_referer / check_ajax_referer) anywhere in the function. A
+      capability check confirms the caller's ROLE but not the caller's INTENT:
+      a forged cross-site request rides an already-authenticated victim's
+      session straight through the capability check, letting an
+      unauthenticated attacker overwrite an existing file with
+      attacker-supplied content (CWE-352).
+
+      This is the same root cause as CVE-2026-11784 (Optimole): an AJAX
+      handler wired only to wp_ajax_<action> (not _nopriv, so a logged-in
+      victim is still required) checked current_user_can('edit_post', $id)
+      before replacing an attachment's file with $_FILES data, with no CSRF
+      token verified anywhere in the handler.
+
+      TRIAGE: this rule flags at the current_user_can() call and cannot see a
+      nonce verified in a calling function, dispatcher, or wrapper/trait
+      method. Confirm no nonce is verified anywhere on the actual request path
+      before reporting.
+    metadata:
+      category: security
+      cwe: "CWE-352: Cross-Site Request Forgery (CSRF)"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Request Forgery"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/nonces/
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/
+        - https://cwe.mitre.org/data/definitions/352.html
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern: current_user_can(...)
+      - pattern-inside:
+          pattern-either:
+            - pattern: |
+                function $FUNC(...) { ... <... move_uploaded_file(...) ...>; ... }
+            - pattern: |
+                function $FUNC(...) { ... <... copy(...) ...>; ... }
+            - pattern: |
+                function $FUNC(...) { ... <... rename(...) ...>; ... }
+            - pattern: |
+                function $FUNC(...) { ... <... file_put_contents(...) ...>; ... }
+            - pattern: |
+                function $FUNC(...) { ... <... $FS->put_contents(...) ...>; ... }
+            - pattern: |
+                function $FUNC(...) { ... <... wp_handle_upload(...) ...>; ... }
+            - pattern: |
+                function $FUNC(...) { ... <... new $CLASS(..., $_FILES[$KEY], ...) ...>; ... }
+      - pattern-not-inside: |
+          function $FUNC(...) { ... wp_verify_nonce(...); ... }
+      - pattern-not-inside: |
+          function $FUNC(...) { ... check_admin_referer(...); ... }
+      - pattern-not-inside: |
+          function $FUNC(...) { ... check_ajax_referer(...); ... }
+      - pattern-not-inside: |
+          function $FUNC(...) { ... if (<... wp_verify_nonce(...) ...>) { ... } ... }
+      - pattern-not-inside: |
+          function $FUNC(...) { ... if (<... check_admin_referer(...) ...>) { ... } ... }
+      - pattern-not-inside: |
+          function $FUNC(...) { ... if (<... check_ajax_referer(...) ...>) { ... } ... }

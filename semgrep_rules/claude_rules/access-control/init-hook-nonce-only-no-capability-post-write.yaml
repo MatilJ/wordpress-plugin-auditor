@@ -1,0 +1,155 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+  # The 'init' hook fires on every request — including unauthenticated visitors.
+  # wp_verify_nonce() and check_ajax_referer() confirm CSRF origin only; they do
+  # NOT authenticate the caller. For nonces embedded in public HTML forms (via
+  # wp_nonce_field()), unauthenticated users share the UID-0 nonce and can submit
+  # it validly — making this pattern effectively unauthenticated post creation/deletion.
+  # wp_insert_post() does NOT enforce CPT-specific capability restrictions
+  # (create_posts => do_not_allow is silently bypassed).
+
+  - id: claude.php.wordpress.access-control.init-hook-nonce-only-no-capability-post-write
+    mode: join
+    languages: [php]
+    severity: HIGH
+    message: |
+      A callback on the 'init' hook verifies a nonce but performs a post write
+      (wp_insert_post, wp_update_post, or wp_delete_post) without calling
+      current_user_can(). The 'init' hook fires for every request including
+      unauthenticated visitors. wp_verify_nonce() / check_ajax_referer() confirm
+      CSRF origin only — any visitor who can obtain the nonce can trigger the
+      write regardless of role or authentication state (CWE-862).
+
+      If the nonce action is rendered via wp_nonce_field() or wp_create_nonce()
+      on a public page, unauthenticated visitors share the same UID-0 nonce and
+      can submit it validly. wp_insert_post() does not enforce CPT-level capability
+      restrictions (e.g. create_posts => do_not_allow is silently bypassed).
+
+      TRIAGE REQUIRED — HIGH FP RATE:
+      1. Locate where wp_create_nonce('<action>') or wp_nonce_field('<action>') is
+         called. If only enqueued inside admin_menu / admin_enqueue_scripts without
+         a public fallback, the nonce is admin-gated (PR:H → OOS for bounty).
+      2. If the nonce is rendered on a public page (front-end review form, contact
+         form, member portal) — and unauthenticated visitors can view that page —
+         the endpoint is reachable PR:N.
+      3. Confirm the callback performs state-changing writes with parameters
+         derived from attacker-controlled $_POST/$_GET data.
+      4. CPT capability restrictions are not enforced by wp_insert_post(); if the
+         CPT has create_posts => do_not_allow, wp_insert_post() still succeeds.
+
+      Fix: add current_user_can() with the appropriate capability immediately after
+      the nonce check, returning early on failure.
+    join:
+      rules:
+        - id: init-hook-registration
+          languages: [php]
+          patterns:
+            - pattern-either:
+                # Array callback: add_action('init', [$this, 'method'])
+                - pattern: add_action('init', [..., '$CALLBACK'], ...);
+                # String callback: add_action('init', 'my_function')
+                - pattern: add_action('init', '$CALLBACK', ...);
+
+        - id: nonce-post-write-no-cap
+          languages: [php]
+          patterns:
+            # Must contain at least one post write operation
+            - pattern-either:
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_insert_post(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_update_post(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_delete_post(...);
+                      ...
+                    }
+                - pattern: |
+                    function $CALLBACK(...) {
+                      ...
+                      wp_trash_post(...);
+                      ...
+                    }
+            # Must contain a nonce verification (any common form)
+            - pattern-inside:
+                pattern-either:
+                  - pattern: |
+                      function $CALLBACK(...) {
+                        ...
+                        wp_verify_nonce(...);
+                        ...
+                      }
+                  - pattern: |
+                      function $CALLBACK(...) {
+                        ...
+                        if (<... wp_verify_nonce(...) ...>) {
+                          ...
+                        }
+                        ...
+                      }
+                  - pattern: |
+                      function $CALLBACK(...) {
+                        ...
+                        check_ajax_referer(...);
+                        ...
+                      }
+                  - pattern: |
+                      function $CALLBACK(...) {
+                        ...
+                        if (<... check_ajax_referer(...) ...>) {
+                          ...
+                        }
+                        ...
+                      }
+            # Must NOT call current_user_can() — that is the authorization gate
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $CALLBACK(...) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+
+      on:
+        - 'init-hook-registration.path == nonce-post-write-no-cap.path'
+        - 'init-hook-registration.$CALLBACK == nonce-post-write-no-cap.$CALLBACK'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/apis/security/nonces/
+        - https://developer.wordpress.org/reference/functions/wp_insert_post/
+        - https://developer.wordpress.org/reference/functions/current_user_can/

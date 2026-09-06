@@ -1,0 +1,120 @@
+rules:
+  - id: claude.php.wordpress.access-control.rest-permission-callback-option-sentinel-no-login-check
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A REST/AJAX permission-check function reads a plugin option/setting via
+      a getter method, compares the value to a string sentinel (e.g. "-", "",
+      "any" — the plugin's own "no restriction configured" marker), and
+      returns true on that branch — while the function as a whole never
+      calls is_user_logged_in() or current_user_can() anywhere (CWE-862 /
+      CWE-287). Because the sentinel represents "role restriction disabled"
+      in the plugin's own settings UI, a site left at that (often default)
+      configuration makes the permission gate unconditionally pass for
+      EVERY caller, including fully unauthenticated visitors — the
+      developer intended "any logged-in user" but never actually checked
+      that the caller is logged in at all.
+
+      Confirmed pattern (event-tickets-with-ticket-scanner <= 2.8.5,
+      CVE-2025-68015): a REST permission_callback read a
+      "scanner allowed roles" option, and when it equalled the plugin's
+      "no restriction" sentinel, returned true immediately with no
+      is_user_logged_in() check anywhere in the function. The callback
+      gated a route that, in turn, dispatched a raw request "action"
+      parameter to an internal command router exposing dozens of
+      privileged operations (including an arbitrary-option-write action),
+      chaining to unauthenticated Remote Code Execution.
+
+      TRIAGE REQUIRED (this is a config-dependent gap, not always-vulnerable):
+      1. Confirm the enclosing function is actually wired as a
+         permission_callback (register_rest_route()) or an AJAX/REST access
+         gate — grep for its name in permission_callback / callback wiring.
+      2. Confirm the option really can equal the compared sentinel on a
+         default or realistic configuration (read the option's registered
+         default value) — if the default is a restrictive role and the
+         sentinel is unreachable without an admin explicitly clearing it,
+         severity is lower but the code path is still incorrect.
+      3. Read what the gated route/handler does. A read-only, low-impact
+         response is a lower-priority audit note; a state-changing or
+         command-dispatch handler reachable this way is the vulnerable
+         combination that made the seeding CVE unauthenticated RCE.
+
+      Fix: check is_user_logged_in() (and the intended current_user_can()/
+      role check) unconditionally, BEFORE any option-driven "no restriction"
+      branch is allowed to short-circuit to true.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-287: Improper Authentication"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://cwe.mitre.org/data/definitions/287.html
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/#permissions-callback
+        - https://developer.wordpress.org/reference/functions/is_user_logged_in/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $FUNC($REQ) {
+                ...
+                $VAR = $OBJ->$GETTER(...);
+                ...
+                if (<... $VAR == $SENTINEL ...>) return true;
+                ...
+              }
+          - pattern: |
+              function $FUNC($REQ) {
+                ...
+                $VAR = $OBJ->$GETTER(...);
+                ...
+                if (<... $VAR == $SENTINEL ...>) {
+                  ...
+                  return true;
+                  ...
+                }
+                ...
+              }
+      - metavariable-regex:
+          metavariable: $GETTER
+          regex: "(?i).*(option|setting|config).*"
+      - metavariable-regex:
+          metavariable: $SENTINEL
+          regex: "^['\"][^'\"]{0,20}['\"]$"
+      # FP guard grounded in the real fix: the CVE-2025-68015 patch's first
+      # change inside the vulnerable branch was adding an unconditional
+      # is_user_logged_in() check before the option-driven return; a
+      # current_user_can() gate anywhere in the function is equally
+      # sufficient and equally excluded.
+      - pattern-not: |
+          function $FUNC($REQ) {
+            ...
+            is_user_logged_in(...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC($REQ) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC($REQ) {
+            ...
+            return current_user_can(...);
+            ...
+          }
+      - pattern-not: |
+          function $FUNC($REQ) {
+            ...
+            if (<... current_user_can(...) ...>) {
+              ...
+            }
+            ...
+          }

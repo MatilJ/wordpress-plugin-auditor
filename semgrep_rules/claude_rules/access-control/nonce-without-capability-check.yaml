@@ -1,0 +1,807 @@
+rules:
+  - id: claude.php.wordpress.auth.nonce-without-capability-check
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A function verifies a nonce but does not call current_user_can().
+      Nonces confirm request intent (CSRF protection) but do NOT verify
+      the caller's privilege level — any user who can obtain the nonce
+      can trigger this state-changing action regardless of their role,
+      enabling IDOR and privilege-escalation attacks (CWE-862).
+
+      TRIAGE REQUIRED: The rule cannot see capability checks performed at
+      hook-registration time or inside wrapper methods (e.g.
+      validate_access_rights(), check_admin_access()). Hits in functions
+      whose caller already gates on current_user_can() are false positives.
+      Confirm that no capability check exists in the call chain before
+      reporting.
+
+      Known FP — static self::check_edit_others_caps() wrapper: if the
+      function contains a call to self::check_edit_others_caps() (or
+      static::check_edit_others_caps()), that is an internal plugin wrapper
+      that calls current_user_can($post_type_object->cap->edit_others_posts).
+      This pattern is NOT suppressible via pattern-not-inside in Semgrep PHP
+      because self::/static:: are PHP keywords that cannot be matched as class
+      qualifiers in nested function body patterns. Confirm the wrapper exists
+      and calls current_user_can() before dismissing.
+      Confirmed FP: simple-page-ordering 2.7.4
+      class-simple-page-ordering.php:527 (ajax_reset_simple_page_ordering).
+
+      Known FP — Customizer-scoped nonces: nonces created inside
+      customize_controls_enqueue_scripts (or any hook that only fires inside
+      the WP Customizer) require edit_theme_options to reach. Functions
+      verifying these nonces are effectively admin-only even without an
+      explicit current_user_can() in the body. To triage: find where
+      wp_create_nonce('<action>') is called — if it is inside
+      customize_controls_enqueue_scripts the hit is a FP (PR:H → OOS).
+      Confirmed FP: everest-forms 3.0.9.4 addons/StyleCustomizer/.../
+      class-evf-style-customizer-ajax.php lines 34, 74, 137.
+
+      Known pattern — outbound HTTP proxy (credential abuse): A nonce-only
+      AJAX handler that calls wp_remote_post() / wp_remote_get() /
+      wp_remote_request() may proxy the site's stored API credentials
+      (OAuth Bearer token, API key) to an external service on behalf of
+      any authenticated user. Triage: check whether the handler passes a
+      stored credential (Authorization header, api_key parameter, transient
+      value) to the outbound request. If so, any subscriber+ can consume
+      the site's external API quota or read/write data on the external account.
+      Confirmed TP: nonce-only AJAX handler forwarding stored Bearer token
+      to external GraphQL API — subscriber obtained nonce from post edit
+      page and proxied arbitrary queries against site's Pro API account.
+
+      Known FP — REST permission_callback in separate named method: when a
+      function is registered as a WordPress REST route callback via
+      register_rest_route() with a named permission_callback, WordPress enforces
+      that method before the callback executes. If current_user_can() lives inside
+      permission_callback() rather than the callback body itself, this rule fires
+      because Semgrep cannot trace cross-method auth. To triage: find the
+      register_rest_route() call for this handler and confirm that permission_callback
+      is not __return_true and that the referenced method calls current_user_can().
+      If so, this is a FP (PR:H → OOS if manage_options; classify by actual
+      capability otherwise).
+      Confirmed FP: uk-cookie-consent 3.3.1 class-banner-settings-controller.php:231
+      (handle_consent_toggle — permission_callback is consent_toggle_permissions()
+      returning current_user_can('manage_options')).
+
+      Known FP — admin-gated notice dismiss: A handler that writes a hardcoded
+      option value (e.g., update_option('plugin_reviewed', 'yes')) may use a
+      nonce that is only created inside an admin_notices callback guarded by
+      current_user_can('update_plugins' / 'manage_options'). The nonce is
+      unreachable by non-admin users, making the handler effectively admin-only
+      (PR:H → OOS). To triage: find where wp_create_nonce('<action>') is called
+      — if it is inside a function that first checks current_user_can(), the hit
+      is a FP.
+
+      Known FP — hardcoded-value notice dismiss: A handler verifies a nonce and
+      calls update_option() with a value array built from switch/case on user input,
+      but every possible stored value is a hardcoded string (e.g., 'later'/'now'/'never')
+      or a timestamp — no raw user-supplied data reaches the stored value. CIA impact
+      is negligible (toggling a preference between predefined states). To triage:
+      confirm no user-controlled string appears directly in the array written to
+      update_option() — if only hardcoded labels/dates are stored, this is a FP.
+      Confirmed FP: pisol-sales-notification includes/review.php:180 savePreference()
+      — update_option() stores {preference: 'later'|'now'|'never', update_at: date}.
+
+      Known FP — admin-menu page-render method (capability gate at hook-registration
+      time via add_submenu_page()/add_menu_page()): A method that verifies a nonce
+      via check_admin_referer() but has no in-body current_user_can() is nonetheless
+      admin-only (PR:H → OOS) if it is invoked ONLY as part of rendering a page
+      registered through add_menu_page()/add_submenu_page(), where WordPress core
+      itself (wp-admin/admin.php, user_can_access_admin_page()) enforces the
+      capability argument of that registration call BEFORE the page callback (or
+      any method it calls, directly or via a switch/dispatch on the current tab)
+      ever executes. This is the single most common source of this rule's
+      "admin_only" false positives — a save-on-page-load settings-tab handler that
+      trusts the enclosing page's registration-time capability instead of repeating
+      the check locally. To triage: find the add_menu_page()/add_submenu_page() call
+      whose callback (directly, or via a thin dispatcher method) reaches this
+      function, and confirm its capability argument is a privileged capability
+      (not empty/read). If so, this is a FP (PR:H → OOS). Distinct from the
+      Customizer-scoped and REST permission_callback entries above only in which
+      WordPress subsystem performs the pre-callback capability enforcement.
+      Confirmed FP: https-redirection 2.0.1 admin/ehssl-settings-menu.php:66,113,382
+      (render_general_tab/render_mixed_content_tab, reached only via
+      handle_settings_menu_rendering(), registered with EHSSL_MANAGEMENT_PERMISSION
+      = 'add_users') and admin/ehssl-certificate-expiry-menu.php:174
+      (render_email_notification_tab(), same registration pattern).
+
+      Known miss — delegated writes: This rule only fires when a write operation
+      (update_post_meta, update_option, etc.) appears DIRECTLY in the handler
+      function body. If the handler delegates all work to a called method (e.g.,
+      ClassName::run_migration() → migrate() → update_post_meta()), this rule
+      will not fire. Manually review any callback body that contains only a nonce
+      check plus a single static or instance method call — the called method may
+      perform writes without capability verification.
+
+      Delegated-dispatch variant (partially closes the miss above): a handler
+      assigns the return value of a same-class self::/static:: method call, OR
+      an instance method call on a helper/provider object, to a variable and
+      then streams that variable straight back via wp_send_json()/
+      wp_send_json_success() — without ever performing the sensitive action
+      (outbound API call, DB schema introspection, config toggle) inline. The
+      delegate is exploitable by any authenticated role because the outer
+      handler's only gate is the nonce. A plugin-authored capability-wrapper
+      method (any name containing require_capability/check_capability/
+      has_capability/verify_capability/is_allowed/has_access/has_permission/
+      check_permission, called statically or on an instance, bare or inside an
+      if-condition) is treated as a valid gate and suppresses this variant.
+
+      TRIAGE for the delegated-dispatch variant: confirm the delegate method
+      genuinely performs a privileged action (not a self-scoped read of the
+      current user's own data) before reporting — a helper that only looks up
+      the caller's own account/profile needs no additional capability check.
+
+      Known FP — view/report-tier capability-gate wrapper (naming convention:
+      *view_capability*, *can_view*): a helper that resolves and checks the
+      caller's required read-tier capability internally, guarded by the
+      early-return shape `if (!self::wrapper()) { return; }`. The nonce-plus-
+      wrapper combination IS a real gate from this rule's perspective (missing
+      current_user_can()) even if the wrapper's own internal comparison logic
+      is separately flawed — that is a different defect class (an incorrect
+      allowlist/membership check inside the wrapper itself), not an absent
+      capability check, and is out of this rule's scope.
+
+      Remediation: add current_user_can('appropriate_capability') (or the
+      plugin's wrapper for it) immediately after the nonce check. Use
+      wp_die() / return on failure.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization / IDOR"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/nonces/
+        - https://developer.wordpress.org/apis/security/user-capabilities-and-roles/
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/
+    patterns:
+      # Anchor: the nonce verification call — hit is reported here.
+      # Covers return-value, AJAX die-on-fail, and admin form referer variants.
+      - pattern-either:
+          - pattern: wp_verify_nonce(...)
+          - pattern: check_ajax_referer(...)
+          # check_admin_referer() verifies a nonce embedded in admin form submissions.
+          # Same CWE-862 pattern: nonce confirms intent but not privilege level.
+          - pattern: check_admin_referer(...)
+      # Must be inside a function that performs a state-changing write so
+      # pure read-only endpoints (information disclosure) are a separate rule.
+      - pattern-inside:
+          pattern-either:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  $wpdb->insert(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  $wpdb->update(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  $wpdb->replace(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  $wpdb->delete(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  update_post_meta(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  update_user_meta(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  update_option(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  update_site_option(...);
+                  ...
+                }
+            # Destructive operations: file/attachment/post deletion. Nonce-only
+            # guard without current_user_can() enables IDOR file deletion.
+            # Confirmed missed TP: meta-box 5.12.0 ajax_delete_file() —
+            # check_ajax_referer() only, no current_user_can(), wp_delete_attachment()
+            # with attacker-controlled object_id.
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  wp_delete_attachment(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  wp_delete_post(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  unlink(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  wp_delete_user(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  wp_delete_term(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  wp_delete_comment(...);
+                  ...
+                }
+            # Transient writes: set_site_transient() / set_transient() are state-changing
+            # DB operations (wp_options/_site_option tables) and carry real integrity
+            # impact when an attacker can write arbitrary keys — e.g. overwriting
+            # update_plugins/update_core to suppress security notifications.
+            # Confirmed missed TP: wps-hide-login 1.9.18 dismiss_admin_notice() —
+            # check_ajax_referer() only, no current_user_can(), set_site_transient()
+            # with fully attacker-controlled key.
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  set_site_transient(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  set_transient(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  wp_insert_post(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  wp_update_post(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  wp_schedule_event(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  wp_schedule_single_event(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  wp_insert_user(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  wp_update_user(...);
+                  ...
+                }
+            # delete_option() is a destructive state-changing operation that removes
+            # plugin configuration. Nonce-only handlers calling delete_option() allow
+            # any authenticated user to wipe plugin settings/data.
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  delete_option(...);
+                  ...
+                }
+            # Outbound HTTP proxy: nonce-only handlers forwarding stored credentials
+            # (Bearer tokens, API keys) to external services — any authenticated user
+            # can abuse the site's external API account.
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  wp_remote_post(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  wp_remote_get(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  wp_remote_request(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  wp_safe_remote_post(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  wp_safe_remote_get(...);
+                  ...
+                }
+            # Delegated-dispatch variant: the handler never performs the
+            # privileged action inline — it hands off to a helper/provider
+            # object (often instantiated from a resolved class name, e.g. a
+            # "connection type"/"provider" abstraction) or a same-class
+            # self::/static:: method, then streams that call's result straight
+            # back to the client. The nonce-only guard is just as bypassable
+            # here as for a direct write; the delegate itself performs the
+            # sensitive action (an outbound API request, a DB introspection
+            # query, a config toggle) one call away from the handler body.
+            # Closes part of the "Known miss — delegated writes" gap below.
+            # $OBJ is constrained to exclude $wpdb (and its bare getter methods)
+            # so a direct, un-delegated $wpdb read — already explicitly out of
+            # scope ("pure read-only endpoints are a separate rule", above) —
+            # is not swept in as a false "delegate" just because $wpdb happens
+            # to satisfy the generic $OBJ->$METHOD(...) shape.
+            - patterns:
+                - pattern: |
+                    function $FUNC(...) {
+                      ...
+                      $RESULT = $OBJ->$DMETHOD(...);
+                      ...
+                      wp_send_json_success(...);
+                      ...
+                    }
+                - metavariable-regex:
+                    metavariable: $OBJ
+                    regex: ^(?!\$wpdb$).+$
+                - metavariable-regex:
+                    metavariable: $DMETHOD
+                    regex: (?i)^(?!get_results$|get_row$|get_var$|get_col$).+$
+            - patterns:
+                - pattern: |
+                    function $FUNC(...) {
+                      ...
+                      $RESULT = $OBJ->$DMETHOD(...);
+                      ...
+                      wp_send_json(...);
+                      ...
+                    }
+                - metavariable-regex:
+                    metavariable: $OBJ
+                    regex: ^(?!\$wpdb$).+$
+                - metavariable-regex:
+                    metavariable: $DMETHOD
+                    regex: (?i)^(?!get_results$|get_row$|get_var$|get_col$).+$
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  $RESULT = self::$DMETHOD(...);
+                  ...
+                  wp_send_json_success(...);
+                  ...
+                }
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  $RESULT = self::$DMETHOD(...);
+                  ...
+                  wp_send_json(...);
+                  ...
+                }
+      # Exclude: function already calls current_user_can() — safe
+      # (also covers if (!current_user_can(...)) { wp_die(...); } pattern)
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can(...) ...>) {
+              ...
+            }
+            ...
+          }
+      # Exclude: plugin-specific capability wrappers that call
+      # current_user_can() internally — add more as encountered
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $this->validate_access_rights(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $this->check_permissions(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $this->check_admin_access(...);
+            ...
+          }
+      # has_access() is a widely-used plugin wrapper for current_user_can() checks.
+      # Confirmed FP source: MonsterInsights notifications.php dismiss() — has_access()
+      # internally calls current_user_can('monsterinsights_view_dashboard').
+      # Two variants: standalone call and the common if-condition guard form.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $this->has_access(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... $this->has_access(...) ...>) {
+              ...
+            }
+            ...
+          }
+      # sbi_current_user_can() is the Smash Balloon shared-framework capability
+      # wrapper (used across instagram-feed, facebook-feed, youtube-feed, etc.).
+      # It always resolves to manage_instagram_feed_options or manage_options —
+      # both are admin-only. Functions calling it are admin-gated (PR:H → OOS).
+      # Confirmed FP source: instagram-feed 6.10.1 SBI_Global_Settings.php (14 hits).
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            sbi_current_user_can(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... sbi_current_user_can(...) ...>) {
+              ...
+            }
+            ...
+          }
+      # Helper::is_user_allowed() is the Smush (wp-smushit) plugin's static
+      # capability wrapper — calls current_user_can(apply_filters(
+      # 'wp_smush_admin_cap', $capability)), always resolving to manage_options
+      # or upload_files. Every AJAX handler in app/class-ajax.php uses this.
+      # Confirmed FP source: wp-smushit 4.0.2 (12 hits).
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            Helper::is_user_allowed(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... Helper::is_user_allowed(...) ...>) {
+              ...
+            }
+            ...
+          }
+      # Helper::is_current_user_allowed() — AdTribes/Rymera capability wrapper
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            Helper::is_current_user_allowed(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... Helper::is_current_user_allowed(...) ...>) {
+              ...
+            }
+            ...
+          }
+      # Generic hasCapability() static/instance wrapper — wraps current_user_can() with exit handling.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $CLASS::hasCapability(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $OBJ->hasCapability(...);
+            ...
+          }
+      # Generalized capability-wrapper naming convention: a static or instance
+      # method whose own name denotes a capability/permission/access gate
+      # (require_capability, check_capability, has_capability, verify_capability,
+      # is_allowed, has_access, has_permission, check_permission, can_access, ...)
+      # — covers plugin-authored wrappers around current_user_can() without
+      # needing to hardcode every plugin's own wrapper name. Both the bare-call
+      # and the if-condition guard forms are excluded, for static and instance
+      # receivers.
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  $CLASS::$WRAP(...);
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $WRAP
+                regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access).*
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  if (<... $CLASS::$WRAP(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $WRAP
+                regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access).*
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  $OBJ->$WRAP(...);
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $WRAP
+                regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access).*
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  if (<... $OBJ->$WRAP(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $WRAP
+                regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access).*
+      # Generalized bare-function capability-wrapper naming convention: a standalone
+      # (non-OOP) global function whose own name denotes a capability/permission/access
+      # gate — same naming convention as the $OBJ->/$CLASS:: wrappers above, but for
+      # plugins that implement the wrapper as a plain function instead of a class method.
+      # Confirmed FP source: advanced-cf7-db 2.1.3 cf7_check_capability($cap) — a global
+      # function wrapping current_user_can()-equivalent role/capability lookup, called
+      # immediately after wp_verify_nonce() in 6 handler functions.
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  $WRAP(...);
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $WRAP
+                regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access).*
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  if (<... $WRAP(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $WRAP
+                regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access).*
+      # Assign-then-check variant: the wrapper's result is stored in a
+      # variable first, then that variable is negate-checked in a separate
+      # if-statement (`$can_access = $CLASS::can_access(...); if (!$can_access)
+      # { return; }`) rather than being called bare or inlined in the
+      # if-condition itself — a very common WP-plugin coding style not
+      # covered by the two call-shape variants above. Same wrapper-name
+      # convention as the generalized regex already in use; covers static,
+      # instance, and bare-function receivers.
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  $GATEVAR = $CLASS::$WRAP(...);
+                  ...
+                  if (! $GATEVAR) {
+                    ...
+                  }
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $WRAP
+                regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access).*
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  $GATEVAR = $OBJ->$WRAP(...);
+                  ...
+                  if (! $GATEVAR) {
+                    ...
+                  }
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $WRAP
+                regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access).*
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  $GATEVAR = $WRAP(...);
+                  ...
+                  if (! $GATEVAR) {
+                    ...
+                  }
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $WRAP
+                regex: (?i).*(require_cap|check_cap|has_cap|verify_cap|is_allowed|has_access|has_permission|check_permission|can_access).*
+      # in_array('administrator', $user->roles) used to gate a write — equivalent
+      # to current_user_can('administrator'). The write must be INSIDE the if-block
+      # for this exclusion to apply; a write outside the block is still a TP.
+      # Patterns cover option writes (the most common case) with and without (array) cast.
+      # Confirmed FP source: check-email 2.0.13.2 helper-function.php
+      # checkmail_save_admin_fcm_token() — wp_verify_nonce() + in_array check on
+      # wp_get_current_user()->roles + update_option() inside the if-block.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (in_array('administrator', (array) $USER->roles)) {
+              ...
+              update_option(...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (in_array('administrator', $USER->roles)) {
+              ...
+              update_option(...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (in_array('administrator', (array) $USER->roles)) {
+              ...
+              update_site_option(...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (in_array('administrator', $USER->roles)) {
+              ...
+              update_site_option(...);
+              ...
+            }
+            ...
+          }
+      # REST route callbacks verifying the standard 'wp_rest' nonce via the request
+      # header. WordPress REST routes enforce authorization via a separate
+      # permission_callback method before the callback executes. Semgrep cannot
+      # trace cross-method registration, so the capability check in
+      # permission_callback is invisible. The 'wp_rest' nonce action string is
+      # WordPress's built-in REST CSRF nonce — its presence in a function body
+      # reliably identifies a REST route callback (AJAX handlers use action-specific
+      # nonce strings, never 'wp_rest').
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            wp_verify_nonce($NONCE, 'wp_rest');
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... wp_verify_nonce($NONCE, 'wp_rest') ...>) {
+              ...
+            }
+            ...
+          }
+      # Public endpoint using wp_remote_get/post() with a hardcoded string literal
+      # URL — the destination is developer-controlled so no stored credential can be
+      # exfiltrated to an attacker-supplied host (e.g. reCAPTCHA / payment verify).
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            wp_remote_get("...", ...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            wp_safe_remote_get("...", ...);
+            ...
+          }
+      # View/report-tier capability-gate wrapper naming convention: a static or
+      # instance method whose name denotes a read-access capability resolution
+      # (check_ajax_view_capability, can_view, has_view_capability, ...) — the
+      # early-return-on-falsy shape (if (!$WRAP(...)) { return; }) is the common
+      # form for this convention alongside the bare/if-condition-guard forms
+      # already covered by the generalized wrapper regex above.
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  self::$WRAP(...);
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $WRAP
+                regex: (?i).*(view_capability|can_view).*
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  if (<... self::$WRAP(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $WRAP
+                regex: (?i).*(view_capability|can_view).*
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  if (<... $OBJ->$WRAP(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $WRAP
+                regex: (?i).*(view_capability|can_view).*

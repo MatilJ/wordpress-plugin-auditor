@@ -1,0 +1,96 @@
+rules:
+  - id: claude.js.wordpress.xss.location-hash-unvalidated-dispatch
+    languages: [js, typescript]
+    severity: MEDIUM
+    message: |
+      The browser Location object's hash fragment (location.hash, or an
+      equivalent window.location.hash / document.location.hash alias) is
+      passed directly, unmodified, as an argument to a function call — with
+      no prior check that the fragment matches an element or value already
+      present in the page. Because the URL fragment is fully attacker-
+      controlled (a victim only has to open a crafted link — no server
+      round-trip, no stored component required), any handler that treats it
+      as a command, a JSON/base64-encoded settings blob, or a jQuery selector
+      is a DOM-based XSS entry point (CWE-79).
+
+      TRIAGE:
+        - Confirm the callee ultimately reaches a DOM-affecting sink: HTML
+          insertion (.html()/.append()/innerHTML), code execution
+          (eval()/new Function()), a jQuery selector `$(str)` (a string
+          starting with "<" is parsed as HTML to create rather than matched
+          as a selector — the classic $(location.hash) gadget), or attribute
+          construction from a decoded object's own keys (e.g. `$('<video>',
+          options)` where an attacker-supplied key such as onerror/onload
+          becomes an executable HTML event-handler attribute). A callee that
+          only logs, tracks analytics, or does numeric/date parsing is not
+          exploitable — dismiss.
+        - Base64/JSON decoding of the fragment (JSON.parse(atob(...)) or
+          similar) before dispatch is a strong signal: it indicates the hash
+          is meant to carry a structured, attacker-shaped settings object
+          rather than a simple anchor name.
+        - An exact-equality or allow-listed comparison before use (e.g.
+          `location.hash === '#foo'`, or a switch over a fixed set of
+          literal fragment values) is not vulnerable — that is a safe
+          allow-list check, not a pass-through. Dismiss.
+        - The fix for this class is to validate the fragment against the
+          DOM (e.g. `document.querySelector`/`getElementById` using the
+          fragment as a selector) BEFORE using it, and to forward only a
+          value read back off the matched element — never the raw fragment
+          itself — to the handler. Code already following that shape is
+          excluded by this rule's negative clauses; verify the guard
+          actually gates the call before dismissing as a duplicate of an
+          already-fixed pattern.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [javascript, jquery, wordpress]
+      references:
+        - https://cheatsheetseries.owasp.org/cheatsheets/DOM_based_XSS_Prevention_Cheat_Sheet.html
+        - https://owasp.org/www-community/attacks/DOM_Based_XSS
+    # Same rationale as the sibling XSS JS rules: minified files collapse to
+    # one line and are not reliably matchable, and vendor/bundled libraries
+    # are not plugin-authored code.
+    paths:
+      exclude:
+        - "jquery.*.js"
+        - "*.min.js"
+        - "*-min.js"
+        - "**/inc/**"
+        - "**/min/**"
+        - "**/select2/**"
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          # Raw hash forwarded as the sole argument — e.g. runAction(location.hash),
+          # or the classic $(location.hash) jQuery-selector-as-HTML gadget.
+          - pattern: $FN($LOC.hash)
+          # Hash forwarded alongside one or two extra arguments — e.g.
+          # runAction(location.hash, event).
+          - pattern: $FN($LOC.hash, $ARG)
+          - pattern: $FN($LOC.hash, $ARG1, $ARG2)
+      # Restrict $LOC to the actual browser Location object (and its common
+      # window/document/self aliases) — without this, $LOC.hash would match
+      # any unrelated object's own "hash" property (checksums, router state,
+      # etc.), which is not this vulnerability class at all.
+      - metavariable-regex:
+          metavariable: $LOC
+          regex: '^(location|window\.location|document\.location|self\.location)$'
+      # Safe idiom the real-world fix for this class follows: validate the
+      # fragment against the DOM before trusting it. Excludes cases where the
+      # same call is already gated behind an existence/allow-list check.
+      - pattern-not-inside: |
+          if ($LOC.hash === $STR) { ... }
+      - pattern-not-inside: |
+          if (document.querySelector($LOC.hash)) { ... }
+      - pattern-not-inside: |
+          if (document.getElementById($LOC.hash.substring(...))) { ... }
+      - pattern-not-inside: |
+          if (document.getElementById($LOC.hash.slice(...))) { ... }

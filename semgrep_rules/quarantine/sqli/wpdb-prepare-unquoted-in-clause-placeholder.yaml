@@ -1,0 +1,144 @@
+rules:
+  - id: claude.php.wordpress.sqli.wpdb-prepare-unquoted-in-clause-placeholder
+    languages: [php]
+    severity: HIGH
+    message: |
+      $wpdb->prepare()'s format-string argument builds an IN() clause with a
+      bare %s placeholder — no quote characters immediately surrounding it in
+      the query template. On wpdb implementations that do not auto-quote a
+      bare %s, prepare() only escapes quote/backslash characters inside the
+      substituted value; it does not itself add the enclosing quotes the
+      template omitted. When that value is a comma-joined implode() of array
+      elements that were never cast to int/float, the entire list is spliced
+      into the query as one long, only-partially-escaped token: parentheses,
+      boolean keywords, and comment sequences inside any element still reach
+      the query as live SQL syntax (CWE-89) — the classic single-%s-for-a-
+      multi-value-IN()-list footgun.
+
+      Fix: cast every element to an integer before implode()
+      (array_map('absint'/'intval', $ids)), or build one placeholder per
+      element (implode(',', array_fill(0, count($ids), '%d')) with the ids
+      spread as separate prepare() arguments) — never collapse a multi-value
+      list into a single %s.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+      # DETECTION RATIONALE
+      # ─────────────────────────────────────────────────────────────────────
+      # Newer wpdb::prepare() implementations auto-quote/auto-strip a bare %s
+      # regardless of template quoting, which closes this exact vector on
+      # up-to-date cores. The finding still recurs and remains worth flagging
+      # because (a) many production sites run older cores, and (b) collapsing
+      # a multi-value id list into ONE %s placeholder is an anti-pattern
+      # independent of that mitigation — it silently truncates/mishandles the
+      # list even where it can no longer be broken out of.
+      #
+      # TRIAGE GUIDANCE
+      # ─────────────────────────────────────────────────────────────────────
+      # TRUE POSITIVE — $Q contains "IN (%s)" / "IN ( %s )" with no quote mark
+      # immediately touching the %s, and the corresponding argument is built
+      # from request-controlled or DB-stored values with only
+      # sanitize_text_field()-level (or no) sanitization before implode().
+      #
+      # FALSE POSITIVE — the argument passed for that placeholder is already
+      # an implode() of array_map('intval'/'absint'/'floatval'/'sanitize_key',
+      # ...) or wp_parse_id_list() (integers/keys cannot carry SQL syntax
+      # regardless of quoting), or the enclosing function gates execution
+      # behind ANY current_user_can() capability check before this call is
+      # reached (the observed real-world fix for the seeding case gated the
+      # handler this way rather than fixing the query; a low-privilege
+      # capability there may still leave a Subscriber-reachable duplicate
+      # worth a manual look).
+      #
+      # QUARANTINED — NOT auto-scanned by --config claude_rules/.
+      # ─────────────────────────────────────────────────────────────────────
+      # Seeding CVE-2022-0657 (5-stars-rating-funnel <= 1.2.53, rrtngg_delete_leads
+      # AJAX action). The CVE record's stated "patched: 1.2.54" is INCORRECT —
+      # verified empirically: RRTNGG_Ajax.php and RRTNGG_Leads_Model.php are
+      # byte-identical (same md5) between 1.2.53 and 1.2.54. The actual first
+      # code change at this sink appears in 1.3.02 (readme.txt: "Fixed:
+      # security issues thanks patchstack"), and that change is an
+      # authorization-boundary fix in a DIFFERENT function/file
+      # (RRTNGG_Ajax::delete_leads() gained an
+      # is_user_logged_in()+current_user_can('manage_options')+
+      # check_ajax_referer() gate) — the vulnerable
+      # $wpdb->prepare("... IN (%s)", $ids_in) call pinned in
+      # RRTNGG_Leads_Model::delete() is UNCHANGED through the current 1.4.01
+      # release. Because the real fix lives in the caller, not the sink, and
+      # pattern-mode Semgrep has no call-graph/interprocedural visibility,
+      # this rule (correctly, by design) still fires at the same file:line in
+      # EVERY available "patched" tree (1.2.54, 1.3.02, 1.4.01) — Phase-4 TP
+      # oracle passes (fires on 1.2.53) but the FP oracle (silent on patched)
+      # cannot be satisfied against any real on-disk version, per the Hard
+      # Constraint against shipping a rule with no genuine patched-tree
+      # silence. Preserved here for reference on this oracle-failure mode
+      # (auth-only vendor patch leaving the vulnerable code shape byte-
+      # identical) — same class of failure as
+      # claude.php.wordpress.sqli.raw-table-identifier-concat-unprepared-query
+      # (CVE-2024-1981, wpvivid-backuprestore). The int-cast / capability-gate
+      # negative clauses above are still logically sound and validated via
+      # semgrep --test (4/4 pass); they simply describe a fix shape this
+      # specific vendor never applied at the sink.
+    patterns:
+      - pattern: $wpdb->prepare($Q, $LIST, ...)
+      - metavariable-regex:
+          metavariable: $Q
+          regex: "(?is).*\\bIN\\s*\\(\\s*%s\\s*\\).*"
+      # Already-safe integer/key lists — %s cannot carry injected syntax.
+      # Inline form: implode(array_map(...)) built directly at the call site.
+      - pattern-not: $wpdb->prepare($Q, implode($SEP, array_map('intval', $ARR)), ...)
+      - pattern-not: $wpdb->prepare($Q, implode($SEP, array_map('absint', $ARR)), ...)
+      - pattern-not: $wpdb->prepare($Q, implode($SEP, array_map('floatval', $ARR)), ...)
+      - pattern-not: $wpdb->prepare($Q, implode($SEP, array_map('sanitize_key', $ARR)), ...)
+      - pattern-not: $wpdb->prepare($Q, implode($SEP, wp_parse_id_list($ARR)), ...)
+      - pattern-not: $wpdb->prepare($Q, implode($SEP, array_fill(...)), ...)
+      # Two-statement form: $LIST built from implode(int-cast array) earlier in
+      # the same function (the shape the seeding CVE's own code uses — the
+      # int-cast is what would have actually fixed the query, even though the
+      # real-world patch took the access-control route below instead).
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $LIST = implode($SEP, array_map('intval', $ARR));
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $LIST = implode($SEP, array_map('absint', $ARR));
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $ARR2 = array_map('intval', $ARR);
+            ...
+            $LIST = implode($SEP, $ARR2);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $ARR2 = array_map('absint', $ARR);
+            ...
+            $LIST = implode($SEP, $ARR2);
+            ...
+          }
+      # Gated behind a capability check anywhere in the enclosing function —
+      # mirrors the seeding CVE's actual (access-control, not SQL-level) fix.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can($CAP) ...>) { ... }
+            ...
+          }

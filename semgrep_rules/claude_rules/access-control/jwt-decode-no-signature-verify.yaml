@@ -1,0 +1,81 @@
+rules:
+  - id: claude.php.wordpress.access-control.jwt-decode-no-signature-verify
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      A JWT is manually parsed by splitting on ".", base64-decoding a segment, and
+      JSON-decoding the result — without any cryptographic signature verification
+      (hash_hmac or openssl_verify) between the split and the decode. An attacker
+      can forge arbitrary JWT payloads (user ID, role, email) and the application
+      will trust the claims without verifying the signature (CWE-345). Use a
+      vetted JWT library (e.g., firebase/php-jwt) with proper key verification,
+      or add hash_hmac()/openssl_verify() signature checking before trusting
+      the decoded payload.
+    metadata:
+      category: security
+      cwe: "CWE-345: Insufficient Verification of Data Authenticity"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/345.html
+        - https://auth0.com/blog/critical-vulnerabilities-in-json-web-token-libraries/
+    patterns:
+      - pattern: |
+          $PARTS = explode(".", $JWT);
+          ...
+          $PAYLOAD = base64_decode($PARTS[$IDX]);
+          ...
+          $DATA = json_decode($PAYLOAD, ...);
+      - pattern-not: |
+          $PARTS = explode(".", $JWT);
+          ...
+          hash_hmac(...);
+          ...
+          $PAYLOAD = base64_decode($PARTS[$IDX]);
+          ...
+          $DATA = json_decode($PAYLOAD, ...);
+      - pattern-not: |
+          $PARTS = explode(".", $JWT);
+          ...
+          openssl_verify(...);
+          ...
+          $PAYLOAD = base64_decode($PARTS[$IDX]);
+          ...
+          $DATA = json_decode($PAYLOAD, ...);
+      - pattern-not: |
+          $PARTS = explode(".", $JWT);
+          ...
+          $PAYLOAD = base64_decode($PARTS[$IDX]);
+          ...
+          hash_hmac(...);
+          ...
+          $DATA = json_decode($PAYLOAD, ...);
+      - pattern-not: |
+          $PARTS = explode(".", $JWT);
+          ...
+          $PAYLOAD = base64_decode($PARTS[$IDX]);
+          ...
+          openssl_verify(...);
+          ...
+          $DATA = json_decode($PAYLOAD, ...);
+      - pattern-not: |
+          $PARTS = explode(".", $JWT);
+          ...
+          $PAYLOAD = base64_decode($PARTS[$IDX]);
+          ...
+          $DATA = json_decode($PAYLOAD, ...);
+          ...
+          hash_hmac(...);
+      - pattern-not: |
+          $PARTS = explode(".", $JWT);
+          ...
+          $PAYLOAD = base64_decode($PARTS[$IDX]);
+          ...
+          $DATA = json_decode($PAYLOAD, ...);
+          ...
+          openssl_verify(...);

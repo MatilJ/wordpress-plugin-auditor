@@ -1,0 +1,171 @@
+rules:
+  - id: claude.php.wordpress.access-control.moderation-only-gate-role-write-missing-enable-toggle
+    languages: [php]
+    severity: HIGH
+    message: |
+      A self-registration / account-role-elevation handler grants a
+      hardcoded, non-default WordPress role via wp_update_user()/
+      wp_insert_user(), triggered by a request-derived flag on the
+      function's own data parameter, and gated solely by a single
+      admin-configurable "premoderation/approval" option — with no
+      separate "is this self-service role registration feature enabled at
+      all" option checked in the same gating condition (CWE-269 —
+      Improper Privilege Management).
+
+      Plugins that let visitors self-register into a non-default role
+      (vendor, instructor, author, etc.) commonly expose two independent
+      admin settings: a master ENABLE toggle (is the feature turned on at
+      all) and a PREMODERATION toggle (must a human approve each request
+      first). Checking only the premoderation flag while never checking
+      the master enable flag lets a requester who simply supplies the
+      triggering request field still be promoted directly to the
+      privileged role — even on installs where the admin has fully
+      disabled the self-service registration path — whenever
+      premoderation also happens to default to off.
+
+      Fix: require BOTH the feature-enabled option AND the negated
+      premoderation option in the same gating condition before the role
+      write (e.g. `if ($enabled && !$premoderation) { ... }`), not the
+      premoderation check alone.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-269: Improper Privilege Management"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/269.html
+        - https://developer.wordpress.org/reference/functions/wp_update_user/
+        - https://developer.wordpress.org/reference/functions/wp_insert_user/
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $FUNC($USER, $DATA) {
+                ...
+                if (<... !empty($DATA[$FLAGKEY]) ...>) {
+                  ...
+                  $MODFLAG = get_option(...);
+                  ...
+                  if ( ! $MODFLAG ) {
+                    ...
+                    wp_update_user(array(..., "role" => $ROLE, ...));
+                    ...
+                  }
+                  ...
+                }
+              }
+          - pattern: |
+              function $FUNC($USER, $DATA) {
+                ...
+                if (<... !empty($DATA[$FLAGKEY]) ...>) {
+                  ...
+                  $MODFLAG = $OPTS::get_option(...);
+                  ...
+                  if ( ! $MODFLAG ) {
+                    ...
+                    wp_update_user(array(..., "role" => $ROLE, ...));
+                    ...
+                  }
+                  ...
+                }
+              }
+          - pattern: |
+              function $FUNC($USER, $DATA) {
+                ...
+                if (<... !empty($DATA[$FLAGKEY]) ...>) {
+                  ...
+                  $MODFLAG = get_option(...);
+                  ...
+                  if ( empty($MODFLAG) ) {
+                    ...
+                    wp_update_user(array(..., "role" => $ROLE, ...));
+                    ...
+                  }
+                  ...
+                }
+              }
+          - pattern: |
+              function $FUNC($USER, $DATA) {
+                ...
+                if (<... !empty($DATA[$FLAGKEY]) ...>) {
+                  ...
+                  $MODFLAG = $OPTS::get_option(...);
+                  ...
+                  if ( empty($MODFLAG) ) {
+                    ...
+                    wp_update_user(array(..., "role" => $ROLE, ...));
+                    ...
+                  }
+                  ...
+                }
+              }
+          - pattern: |
+              function $FUNC($USER, $DATA) {
+                ...
+                if (<... !empty($DATA[$FLAGKEY]) ...>) {
+                  ...
+                  $MODFLAG = get_option(...);
+                  ...
+                  if ( ! $MODFLAG ) {
+                    ...
+                    wp_insert_user(array(..., "role" => $ROLE, ...));
+                    ...
+                  }
+                  ...
+                }
+              }
+          - pattern: |
+              function $FUNC($USER, $DATA) {
+                ...
+                if (<... !empty($DATA[$FLAGKEY]) ...>) {
+                  ...
+                  $MODFLAG = $OPTS::get_option(...);
+                  ...
+                  if ( ! $MODFLAG ) {
+                    ...
+                    wp_insert_user(array(..., "role" => $ROLE, ...));
+                    ...
+                  }
+                  ...
+                }
+              }
+          - pattern: |
+              function $FUNC($USER, $DATA) {
+                ...
+                if (<... !empty($DATA[$FLAGKEY]) ...>) {
+                  ...
+                  $MODFLAG = get_option(...);
+                  ...
+                  if ( empty($MODFLAG) ) {
+                    ...
+                    wp_insert_user(array(..., "role" => $ROLE, ...));
+                    ...
+                  }
+                  ...
+                }
+              }
+          - pattern: |
+              function $FUNC($USER, $DATA) {
+                ...
+                if (<... !empty($DATA[$FLAGKEY]) ...>) {
+                  ...
+                  $MODFLAG = $OPTS::get_option(...);
+                  ...
+                  if ( empty($MODFLAG) ) {
+                    ...
+                    wp_insert_user(array(..., "role" => $ROLE, ...));
+                    ...
+                  }
+                  ...
+                }
+              }
+      # Excludes the two conventionally low-risk, commonly-public
+      # self-registration roles.
+      - metavariable-regex:
+          metavariable: $ROLE
+          regex: (?i)^(?!['"](subscriber|customer)['"]$).*$

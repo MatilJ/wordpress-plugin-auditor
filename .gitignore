@@ -1,0 +1,40 @@
+# Secrets
+.env
+
+# Downloaded plugin source (third-party GPL code — not part of this repo)
+plugins/
+
+# Per-plugin audit output (your own research state)
+audit/
+
+# WordPress core reference source (large; download per README instructions)
+wp-core/*/
+!wp-core/VERSIONS.md
+
+# Local databases, caches, and ledgers (built locally per README).
+# Ignore every file in databases/ (any name) so nothing can leak; keep only
+# the placeholder that documents the directory in a fresh clone. Uses
+# databases/* (not databases/) so git still descends and honors the negation.
+databases/*
+!databases/.gitkeep
+pattern_accumulator.db
+pattern_accumulator.db.bak*
+
+# Generated leads / working-state lists (regenerate locally)
+targets.md
+vuln-registry.md
+
+# Personal Claude Code config (machine-specific permission history)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/worktrees/
+
+# Live-validation lock forensics
+live-validation.lock*
+live-validation.lock.stale.*
+
+# Python
+__pycache__/
+*.pyc
+
+# Docker volumes are named volumes (not bind-mounted), nothing to ignore here

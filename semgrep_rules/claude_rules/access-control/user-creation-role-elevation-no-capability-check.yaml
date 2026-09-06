@@ -1,0 +1,133 @@
+rules:
+  - id: claude.php.wordpress.access-control.user-creation-role-elevation-no-capability-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      A function creates a new WordPress account (wp_create_user()/wp_insert_user())
+      or promotes an existing one (wp_update_user()) and assigns it a non-default
+      role (anything other than 'subscriber'/'customer') via set_role() or the
+      'role' array key, with no current_user_can() call anywhere in the enclosing
+      function (CWE-269 — Improper Privilege Management / CWE-862 — Missing
+      Authorization).
+
+      Many plugins register this kind of handler as a REST route or wp_ajax_*
+      action and rely entirely on a route-level permission_callback (or a
+      separately-named wrapper method) for authorization. If that
+      permission_callback checks a plugin-defined CUSTOM capability (not a WP
+      core capability like 'manage_options'/'promote_users'/'create_users'),
+      and that same custom capability is ALSO granted to a low-privilege role
+      reachable via public/self-service registration (see the sibling rule
+      custom-role-admin-capability-parity for that registration-site pattern),
+      a low-privileged or newly self-registered account can call this handler to
+      create or promote OTHER accounts into the same or an equally-privileged
+      role — a real vertical/horizontal privilege escalation, not merely a
+      theoretical gap.
+
+      Confirmed TP class: hydra-booking <= 1.1.32 (CVE-2025-68027) —
+      HostsController::CreateHosts() created a new wp_create_user() account and
+      called $user->set_role('tfhb_host') gated only by a REST permission_callback
+      checking a custom 'tfhb_manage_options' capability that was also granted to
+      the self-registerable 'tfhb_host' role itself (front-end signup shortcode,
+      wp_ajax_nopriv_ hook, wp_insert_user() with a hardcoded role). The vendor's
+      fix added an explicit current_user_can('manage_options') check inside the
+      handler itself rather than fixing the underlying capability-parity grant.
+
+      TRIAGE — this is a REST-callback / wrapper-method blind spot rule, expect a
+      high rate of hits with a correctly-locked-down permission_callback:
+      1. Find the register_rest_route()/add_action('wp_ajax_*', ...) registration
+         for this handler and read its permission_callback / hook target.
+      2. If permission_callback checks a WP core capability
+         ('manage_options', 'promote_users', 'create_users', 'edit_users') via
+         current_user_can(), this is a FALSE POSITIVE — the route is admin-only.
+      3. If permission_callback checks a plugin-defined CUSTOM capability string,
+         find where that capability is granted (add_role()/add_cap()) and confirm
+         whether any non-administrator, publicly-reachable role also holds it.
+         Only report as a real finding if such a role exists and is reachable
+         without administrator involvement (self-registration, or a nopriv
+         handler with a hardcoded role assignment).
+
+      Fix: add current_user_can() with a WP core capability appropriate to the
+      action (e.g. 'create_users' or 'promote_users') immediately before the
+      user-creation/role-assignment call, returning early on failure — do not
+      rely solely on a custom capability that may be shared with a
+      lower-privileged role.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-269: Improper Privilege Management"
+        - "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/269.html
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/reference/functions/wp_create_user/
+        - https://developer.wordpress.org/reference/functions/wp_insert_user/
+        - https://developer.wordpress.org/reference/classes/wp_user/set_role/
+        - https://developer.wordpress.org/rest-api/extending-the-rest-api/adding-custom-endpoints/#permissions-callback
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $UID = wp_create_user(...);
+                ...
+                $USER->set_role($ROLE);
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                $UID = wp_insert_user(...);
+                ...
+                $USER->set_role($ROLE);
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                wp_insert_user(array(..., "role" => $ROLE, ...));
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                wp_insert_user(array(..., 'role' => $ROLE, ...));
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                wp_update_user(array(..., "role" => $ROLE, ...));
+                ...
+              }
+          - pattern: |
+              function $FUNC(...) {
+                ...
+                wp_update_user(array(..., 'role' => $ROLE, ...));
+                ...
+              }
+      # Exclude the two conventionally low-risk, commonly-public self-registration
+      # roles — a handler that only ever grants 'subscriber'/'customer' is not the
+      # privilege-escalation shape this rule targets.
+      - metavariable-regex:
+          metavariable: $ROLE
+          regex: (?i)^(?!['"](subscriber|customer)['"]$).*$
+      # Fix signature (also this CVE's actual patch): a current_user_can() call
+      # anywhere in the enclosing function — bare call, if-condition, or
+      # ternary-assignment form (deep-expression match finds all three).
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            <... current_user_can(...) ...>;
+            ...
+          }
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"

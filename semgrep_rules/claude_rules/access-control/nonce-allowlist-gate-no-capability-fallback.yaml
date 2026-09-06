@@ -1,0 +1,126 @@
+rules:
+  - id: claude.php.wordpress.access-control.nonce-allowlist-gate-no-capability-fallback
+    languages: [php]
+    severity: HIGH
+    message: |
+      A central permission/authorization function gates the CSRF nonce check
+      behind membership in a per-action allow-list array (in_array($action,
+      $list)) — i.e. the nonce is verified ONLY for the small subset of action
+      names present in that list — and the enclosing function never calls
+      current_user_can() (or an equivalent isAdmin()/hasCapability()-style
+      wrapper) anywhere. This is the "custom AJAX router" anti-pattern: a
+      plugin implements its own dispatcher/controller base class that decides
+      whether an action requires CSRF protection via an opt-in whitelist, but
+      never establishes a default-deny capability requirement for the
+      (usually much larger) set of actions NOT in that whitelist. Any action
+      outside the nonce whitelist executes with NEITHER CSRF protection NOR
+      any capability check — including via a wp_ajax_nopriv_ registration
+      reachable by unauthenticated visitors (CWE-266 / CWE-862).
+
+      This differs from the simpler "nonce present, no current_user_can()"
+      case (see nonce-without-capability-check): here the nonce requirement
+      itself is conditional and opt-in, and the missing default-deny/capability
+      branch spans the WHOLE dispatcher, not just the one matched action.
+
+      TRIAGE REQUIRED:
+      1. Confirm the dispatcher's return value / side effect actually gates
+         registration or execution of a WordPress action (add_action,
+         call_user_func, direct method invocation) — not just an internal flag.
+      2. Confirm the dispatched target(s) are reachable by low-privilege or
+         unauthenticated requests (check for a paired wp_ajax_nopriv_
+         registration, or any request-controlled dynamic action/hook name).
+      3. Confirm at least one action name NOT present in the nonce allow-list
+         performs a state-changing or privilege-relevant operation (option
+         write, role/capability change, user/post/content write).
+      4. If a capability check exists in a DIFFERENT function in the call
+         chain (e.g. a wrapper invoked before this dispatcher runs), this is a
+         false positive — Semgrep cannot see cross-function/cross-file gating.
+
+      Remediation: default to deny. Require current_user_can() (or the
+      plugin's capability wrapper) for every action not explicitly and
+      deliberately whitelisted as public, rather than only conditionally
+      requiring a nonce for an opt-in subset.
+    metadata:
+      category: security
+      cwe: "CWE-266: Incorrect Privilege Assignment"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Privilege Escalation / Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/266.html
+        - https://developer.wordpress.org/apis/security/nonces/
+        - https://developer.wordpress.org/apis/security/user-capabilities-and-roles/
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/
+    patterns:
+      # Anchor: nonce check conditioned on positive allow-list membership.
+      - pattern-either:
+          - pattern: |
+              if (<... in_array($ACTION, $LIST) ...>) {
+                ...
+                check_ajax_referer(...);
+                ...
+              }
+          - pattern: |
+              if (<... in_array($ACTION, $LIST) ...>) {
+                ...
+                wp_verify_nonce(...);
+                ...
+              }
+      - pattern-inside: |
+          function $FUNC(...) {
+            ...
+          }
+      # Exclude: enclosing function directly calls current_user_can() anywhere.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can(...) ...>) {
+              ...
+            }
+            ...
+          }
+      # Exclude: bare user_can() (per-user capability check) anywhere.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            user_can(...);
+            ...
+          }
+      # Exclude: a wrapper method whose name is a recognized capability/admin
+      # check convention (isAdmin(), has_access(), hasCapability(), etc.) —
+      # this is the exact shape the official fix for this bug class added
+      # (an isAdmin()-style wrapper around current_user_can()).
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  $OBJ->$CAPCHECK(...);
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $CAPCHECK
+                regex: '(?i)^(is[_]?admin(user)?|is_?current_?user_?admin|has[_]?capability|has[_]?access|check[_]?capability|is[_]?authorized|is[_]?authorised)$'
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  if (<... $OBJ->$CAPCHECK(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $CAPCHECK
+                regex: '(?i)^(is[_]?admin(user)?|is_?current_?user_?admin|has[_]?capability|has[_]?access|check[_]?capability|is[_]?authorized|is[_]?authorised)$'

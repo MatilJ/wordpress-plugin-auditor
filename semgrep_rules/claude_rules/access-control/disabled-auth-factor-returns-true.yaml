@@ -1,0 +1,91 @@
+rules:
+  - id: claude.php.wordpress.access-control.disabled-auth-factor-returns-true
+    languages: [php]
+    severity: HIGH
+    message: |
+      An if-statement gated on the negation of an admin-configurable auth-factor
+      toggle (a name containing enable/require/disab/active — e.g. "is password
+      authentication required for this connection") has a body that consists of
+      ONLY `return true;` — no password/token/signature comparison of any kind
+      (CWE-862: Missing Authorization). When a site operator disables the primary
+      auth factor (a legitimate, intentionally supported configuration — e.g. a
+      "passwordless" or "signature-optional" mode), this branch treats every
+      caller as already verified instead of falling back to a secondary secret
+      check (a stored unique ID, a signed token, a previously issued verify
+      code). An unauthenticated attacker who simply supplies a valid-looking
+      username/identifier reaches full trust with zero credentials.
+
+      This shape is characteristic of "bootstrap trust" handshakes — a plugin's
+      unauthenticated first-connect/register handler that is meant to require
+      SOME proof of identity, but whose implementation of an optional/legacy
+      auth-factor branch was never wired to a fallback secret check. Fix: the
+      disabled-factor branch must still validate a password, a previously
+      issued verify token, or a site-specific secret via hash_equals() (or an
+      equivalent constant-time comparison) before returning true — never a
+      bare unconditional pass.
+
+      TRIAGE:
+      TRUE POSITIVE indicators:
+        - The enclosing function's result gates a privileged sink (login/session
+          establishment, a state-changing write, an API-trust decision) reachable
+          without prior authentication.
+        - No secondary secret/token comparison exists anywhere else in the
+          disabled-factor branch (confirm by reading the full if-body — this rule
+          only fires when the body is exactly `return true;`, but verify the
+          surrounding function does not perform the check earlier via a shared
+          variable).
+        - The toggle is genuinely admin-configurable (a saved option/user-meta
+          flag), not a hardcoded build/environment constant.
+      FALSE POSITIVE indicators:
+        - The function's return value only affects a non-security decision (a
+          UI flag, a display preference, a non-authoritative default).
+        - The negated toggle is a capability/role check (current_user_can(),
+          is_admin()) rather than an optional auth-factor switch — a missing
+          capability check is a different, already-covered pattern class.
+        - A sibling branch/earlier statement in the SAME function already
+          performed an equivalent secret comparison before this point is
+          reached (rare, but confirm by reading the whole function).
+    metadata:
+      category: security
+      cwe:
+        - "CWE-862: Missing Authorization"
+        - "CWE-287: Improper Authentication"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://cwe.mitre.org/data/definitions/287.html
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              if (!$OBJ->$COND(...)) {
+                return true;
+              }
+          - pattern: |
+              if (!$COND(...)) {
+                return true;
+              }
+          - pattern: |
+              if (empty($OBJ->$COND(...))) {
+                return true;
+              }
+          - pattern: |
+              if (empty($COND(...))) {
+                return true;
+              }
+      - metavariable-regex:
+          metavariable: $COND
+          # Negative lookahead excludes is_plugin_active()/
+          # is_plugin_active_for_network() — a WordPress core companion-plugin
+          # presence check (env/config data), never an admin-configurable
+          # auth-factor toggle, despite containing the "active" substring.
+          regex: (?i)^(?!is_plugin_active$|is_plugin_active_for_network$).*(enable|disab|require|is_active|active|toggle).*

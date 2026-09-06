@@ -1,0 +1,104 @@
+rules:
+  - id: claude.php.wordpress.rce.shortcode-construction-injection
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      User-controlled input is concatenated into a shortcode string that is
+      passed to do_shortcode()/apply_shortcodes(). An attacker can inject ']'
+      to close the intended shortcode tag and append arbitrary shortcode
+      expressions (CWE-94). CVE-2024-10075 (Jetpack).
+      apply_shortcodes() is a WP Core alias for do_shortcode() (shortcodes.php:223).
+
+      sanitize_text_field() does NOT prevent this — ']', '[', '=', and quotes
+      all pass through unchanged, enabling full shortcode injection.
+
+      Mitigation: validate user input against an allowlist of expected values,
+      use intval()/absint() for numeric parameters, or sanitize_key() which
+      strips brackets and special characters.
+    metadata:
+      category: security
+      cwe: "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Arbitrary Shortcode Execution"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/do_shortcode/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $atts[$KEY]
+      # Attribute-value quote-breakout: a hardcoded '<attr>="' prefix literal
+      # concatenated with an unescaped value and a closing-quote literal, later
+      # folded into a shortcode string. The value need not be a superglobal at
+      # this exact call site — it commonly arrives one hop upstream via a
+      # stored/model property written by an earlier, separate low-privilege
+      # request (booking/order/profile data), so the concatenation shape itself
+      # — not a traceable superglobal — is the practical detection point.
+      # do_shortcode()/apply_shortcodes() parse '[' and ']' as tag delimiters
+      # regardless of quote-escaping, so an unescaped value can both break out
+      # of the attribute and inject a brand-new shortcode tag.
+      # CVE-2025-1119 (Simply Schedule Appointments <= 1.6.8.5):
+      # $appointment->customer_locale concatenated unescaped into
+      # ' ssa_locale="'.$customer_locale.'"' then echo do_shortcode($shortcode).
+      - patterns:
+          - pattern: $PREFIX . $VAL . $SUFFIX
+          - metavariable-regex:
+              metavariable: $PREFIX
+              regex: "^['\"](?!\\[).*=[\"'\\\\]+$"
+          - metavariable-regex:
+              metavariable: $SUFFIX
+              regex: "^['\"][\"'\\\\]*$"
+          - pattern-not: $PREFIX . esc_attr(...) . $SUFFIX
+          - pattern-not: $PREFIX . sanitize_key(...) . $SUFFIX
+          - pattern-not: $PREFIX . intval(...) . $SUFFIX
+          - pattern-not: $PREFIX . absint(...) . $SUFFIX
+          # Cast-operator form of the same int/float exclusions above —
+          # (int)/(float) is semantically identical to intval()/floatval()
+          # but is a distinct AST shape the earlier pattern-not entries don't
+          # cover.
+          - pattern-not: $PREFIX . (int) $ANYVAL . $SUFFIX
+          - pattern-not: $PREFIX . (float) $ANYVAL . $SUFFIX
+      # String-interpolation sibling of the concatenation shape above: a
+      # call to a function whose name contains "query_var" — WP Core's own
+      # get_query_var() reads $wp_query->query_vars, and plugins commonly
+      # name a custom request/rewrite-parameter getter wrapper the same way
+      # — with only the parameter-name argument (no explicit sanitize/type
+      # argument). A second call argument (an explicit sanitize/type
+      # parameter) excludes the match by arity, mirroring how this class of
+      # getter is commonly hardened after the fact.
+      # CVE-2024-11740 (Download Manager <= 3.3.03): $pid = wpdm_query_var(
+      # '__wpdmxp') interpolated into do_shortcode("[wpdm_package id='
+      # {$pid}']"); reachable unauthenticated on every front-end request.
+      # Fix added a second (sanitize-type) argument to the getter call.
+      - patterns:
+          - pattern: $FUNC($KEY)
+          - metavariable-regex:
+              metavariable: $FUNC
+              regex: "(?i).*query_var.*"
+    pattern-sinks:
+      - pattern-either:
+          - pattern: do_shortcode($X, ...)
+          - pattern: apply_shortcodes($X, ...)
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          - pattern: sanitize_key(...)
+          - pattern: in_array(...)
+          - pattern: strip_shortcodes(...)
+          - pattern: wp_strip_all_tags(...)
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"

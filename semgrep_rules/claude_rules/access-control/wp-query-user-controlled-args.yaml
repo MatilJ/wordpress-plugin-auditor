@@ -1,0 +1,253 @@
+rules:
+  # Rule 1 (structural): wrong wp_parse_args() argument order before WP_Query.
+  # Result variable == second arg means the first arg (potentially user-controlled) wins.
+  # This fires regardless of data source — manually verify first arg origin.
+  - id: claude.php.wordpress.access-control.wp-parse-args-user-wins-wp-query
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      wp_parse_args() is called with a variable as the first argument that also
+      appears as the second argument and result variable. This means the first
+      argument wins over the second. If the first argument (`$OTHER`) is user-
+      controlled and the second contains security-critical defaults such as
+      'post_status' => 'publish', attackers can override those defaults in the
+      merged result passed to WP_Query() (CWE-200).
+
+      wp_parse_args($a, $b) gives priority to $a. Wrong order example:
+        // Vulnerable: $user_query_args overrides defaults
+        $args = wp_parse_args( $user_query_args, $args );
+        new WP_Query( $args );
+
+        // Safe: $args (hardcoded defaults) override user input
+        $args = wp_parse_args( $args, $user_query_args );
+        new WP_Query( $args );
+
+      When an unauthenticated AJAX handler accepts 'post_status' => 'private' in the
+      user-supplied array, WP Core executes the query without capability checks,
+      returning titles, excerpts, and metadata of private/draft posts.
+
+      Fix: swap wp_parse_args() argument order so hardcoded defaults win, or
+      explicitly unset( $args['post_status'] ) after the merge.
+    metadata:
+      category: security
+      cwe: "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Information Disclosure"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/classes/wp_query/
+        - https://developer.wordpress.org/reference/functions/wp_parse_args/
+      # TRIAGE GUIDANCE:
+      # This rule fires on the specific code structure where $ARGS is overwritten
+      # by wp_parse_args($OTHER, $ARGS) — meaning $OTHER wins over the existing $ARGS.
+      # Manually verify: is $OTHER user-controlled? Does $ARGS contain security-critical
+      # defaults like post_status='publish' that the user can now override?
+      # Confirmed TP: auxin-elements 2.17.16 recent-posts-grid-carousel.php:944-946 —
+      # unauthenticated AJAX passes args[wp_query_args] as $OTHER, overriding
+      # post_status='publish'. CVSS 7.5 High, 90,000 installs.
+    patterns:
+      # Wrong-order merge: result variable ($ARGS) matches the SECOND argument,
+      # meaning the FIRST argument ($OTHER) wins over the existing $ARGS defaults.
+      # Safe order: $ARGS = wp_parse_args($ARGS, $OTHER) — first arg wins, second loses.
+      - pattern: $ARGS = wp_parse_args($OTHER, $ARGS)
+      # FP guard: $OTHER was itself assigned from get_option()/get_site_option()
+      # earlier in the same function — a stored plugin-settings merge (the
+      # single most common safe use of this argument order), not
+      # request-controlled data. get_option() return values are never
+      # attacker-influenced at the call site itself.
+      - pattern-not-inside: |
+          $OTHER = get_option(...);
+          ...
+          $ARGS = wp_parse_args($OTHER, $ARGS);
+      - pattern-not-inside: |
+          $OTHER = get_site_option(...);
+          ...
+          $ARGS = wp_parse_args($OTHER, $ARGS);
+      # FP guard: the first argument is a direct, inline get_option()/
+      # get_site_option() call rather than an intermediate variable — still a
+      # stored plugin-settings value, never attacker-influenced at the call site.
+      - pattern-not: $ARGS = wp_parse_args(get_option(...), $ARGS)
+      - pattern-not: $ARGS = wp_parse_args(get_site_option(...), $ARGS)
+
+  # Rule 2 (taint): catches direct single-function cases where user input
+  # flows to WP_Query without being reduced to safe scalar values.
+  - id: claude.php.wordpress.access-control.wp-query-user-controlled-args
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      User-controlled data flows into WP_Query(), get_posts(), or query_posts()
+      without the query arguments being reduced to safe scalar values (CWE-200).
+      If the user-controlled value is an array whose keys reach the query constructor,
+      an attacker may override security-critical defaults such as 'post_status' to
+      disclose private, draft, pending, or future posts.
+
+      Common vulnerable pattern — wrong wp_parse_args() argument order:
+        // Vulnerable: attacker array wins, overrides 'post_status' => 'publish' default
+        $q_args = wp_parse_args( $user_supplied_args, $defaults_with_publish );
+        new WP_Query( $q_args );
+
+        // Safe: hardcoded defaults win
+        $q_args = wp_parse_args( $defaults_with_publish, $user_supplied_args );
+        new WP_Query( $q_args );
+
+      wp_parse_args($a, $b) gives priority to $a. When the user-controlled array is
+      $a, any key it contains (e.g. 'post_status' => 'private') silently overrides
+      the corresponding key in the defaults $b.
+
+      Triage checklist:
+      1. Trace the path from the source to WP_Query. Does a user-controlled ARRAY
+         reach the constructor (not just a scalar like a search term)?
+      2. If wp_parse_args() is in the chain, which argument is user-controlled?
+         First arg wins (vulnerable). Second arg loses to the first (safe).
+      3. Is 'post_status' (or 'perm') explicitly hardcoded or unset AFTER the
+         wp_parse_args() merge? If yes, the bypass is closed.
+      4. Is the handler reachable unauthenticated (wp_ajax_nopriv_ or public REST)?
+         Note: a nonce embedded in public page HTML is not an authentication barrier.
+      5. What content types and post statuses exist on the site? Private posts and
+         draft posts are the most common sensitive targets.
+
+      Fix: swap wp_parse_args() argument order so hardcoded defaults win, or
+      explicitly unset $args['post_status'] and $args['perm'] before the query.
+    metadata:
+      category: security
+      cwe: "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Information Disclosure"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/classes/wp_query/
+        - https://developer.wordpress.org/reference/functions/wp_parse_args/
+        - https://developer.wordpress.org/reference/functions/get_posts/
+      # TRIAGE GUIDANCE:
+      #
+      # This rule fires when any user-controlled data flows (via any path including
+      # array propagation) to a WP_Query-family constructor. HIGH FALSE POSITIVE RATE —
+      # most plugins intentionally accept search terms, category slugs, pagination, etc.
+      #
+      # THE CRITICAL QUESTION: does the user input flow as an ARRAY whose keys reach
+      # the WP_Query args, or only as sanitized scalar values?
+      #
+      # TRUE POSITIVE INDICATORS:
+      #   1. A generic 'args' or 'query_args' or 'wp_query_args' POST parameter is
+      #      accepted as an array and merged with wp_parse_args($user_array, $defaults).
+      #   2. The merge order gives the user array priority (user is first arg).
+      #   3. Security-critical keys ('post_status', 'perm', 'author__in') are in the
+      #      defaults that can be overridden.
+      #   4. No explicit unset($args['post_status']) after the merge.
+      #
+      # FALSE POSITIVE INDICATORS:
+      #   1. User input is a scalar (search term, category ID, page number) placed
+      #      into a hardcoded-key args array by the plugin code.
+      #   2. wp_parse_args($hardcoded_defaults, $user_input) — defaults are first arg
+      #      and win (safe order).
+      #   3. The handler constructs the WP_Query args array itself, only accepting
+      #      specific sanitized values from the user for individual keys.
+      #
+      # CONFIRMED TP: auxin-elements 2.17.16 — load_more_element nopriv AJAX accepts
+      # args[wp_query_args] as a nested array and merges with wrong wp_parse_args order,
+      # allowing unauthenticated post_status override. CVSS 7.5, 90,000 installs.
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: $_FILES
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: $REQUEST->get_body()
+    pattern-sanitizers:
+      - pattern-either:
+          # Numeric casts — reduce to scalar; cannot produce a post_status string or array
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: (bool) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          # String scalar sanitizers — reduce an individual value to a cleaned scalar;
+          # an array passed through sanitize_text_field() becomes a single sanitized string,
+          # losing its array structure and cannot override WP_Query array keys.
+          - pattern: sanitize_key(...)
+          - pattern: sanitize_text_field(...)
+          - pattern: sanitize_textarea_field(...)
+          - pattern: sanitize_title(...)
+          - pattern: sanitize_html_class(...)
+          # wp_parse_id_list() returns array_map('absint', ...) — integer array only.
+          - pattern: wp_parse_id_list(...)
+          # DB reads — values from the database are not attacker-controlled request data
+          - pattern: $wpdb->get_results(...)
+          - pattern: $wpdb->get_row(...)
+          - pattern: $wpdb->get_var(...)
+          - pattern: $wpdb->get_col(...)
+          - pattern: get_option(...)
+          - pattern: get_post_meta(...)
+          - pattern: get_user_meta(...)
+          - pattern: get_transient(...)
+          - pattern: get_comment_meta(...)
+          - pattern: get_site_option(...)
+          # Sanitizing assignment: the args array is built as a literal with
+          # post_status hardcoded to the public 'publish' value — the disclosed
+          # content is already public regardless of which other (tainted) keys
+          # are present in the same literal, so this specific construction shape
+          # cannot be used to override post_status to a non-public value.
+          - pattern: $ARGS = array(..., 'post_status' => 'publish', ...)
+          - pattern: $ARGS = array(..., "post_status" => 'publish', ...)
+          - pattern: $ARGS = [..., 'post_status' => 'publish', ...]
+          - pattern: $ARGS = [..., "post_status" => 'publish', ...]
+          # Generalized form: post_status hardcoded to ANY plain string literal
+          # (not just 'publish') within the array literal reaching the sink —
+          # a developer-fixed literal value, whatever it is, cannot itself be
+          # overridden by a tainted sibling key in this direct-array-literal
+          # construction shape (distinct from the wp_parse_args()-wrong-order
+          # shape, where an attacker-controlled array can replace the whole
+          # key — that class is already caught by the dedicated companion rule
+          # above). Scoped to a quoted literal via metavariable-regex so a
+          # variable/expression value for post_status is never mistaken for a
+          # hardcoded one.
+          - patterns:
+              - pattern-either:
+                  - pattern: $ARGS = array(..., 'post_status' => $LIT, ...)
+                  - pattern: $ARGS = array(..., "post_status" => $LIT, ...)
+                  - pattern: $ARGS = [..., 'post_status' => $LIT, ...]
+                  - pattern: $ARGS = [..., "post_status" => $LIT, ...]
+              - metavariable-regex:
+                  metavariable: $LIT
+                  regex: "^(['\"]).*\\1$"
+          # Same hardcoded-literal reasoning, array_merge() shape: PHP's
+          # array_merge() gives a LATER array's value priority over an
+          # earlier one for string keys (the opposite of wp_parse_args(),
+          # where the FIRST argument wins) — so a hardcoded 'post_status'
+          # literal in the second (later) array always overrides whatever
+          # the first, potentially-tainted array supplied, regardless of
+          # what other keys that first array carries. Common WP idiom:
+          # apply_filters(...)-supplied extra args merged with a hardcoded
+          # security-critical defaults array placed second.
+          - patterns:
+              - pattern-either:
+                  - pattern: $ARGS = array_merge($OTHER, array(..., 'post_status' => $LIT, ...))
+                  - pattern: $ARGS = array_merge($OTHER, array(..., "post_status" => $LIT, ...))
+                  - pattern: $ARGS = array_merge($OTHER, [..., 'post_status' => $LIT, ...])
+                  - pattern: $ARGS = array_merge($OTHER, [..., "post_status" => $LIT, ...])
+              - metavariable-regex:
+                  metavariable: $LIT
+                  regex: "^(['\"]).*\\1$"
+    pattern-sinks:
+      - pattern-either:
+          - pattern: new WP_Query($ARGS)
+          - pattern: get_posts($ARGS)
+          - pattern: query_posts($ARGS)

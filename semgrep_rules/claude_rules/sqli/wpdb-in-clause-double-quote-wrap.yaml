@@ -1,0 +1,71 @@
+rules:
+  - id: claude.php.wordpress.sqli.wpdb-in-clause-double-quote-wrap
+    languages: [php]
+    severity: HIGH
+    message: |
+      A comma-separated IN() list that a helper already quoted/escaped per element
+      (e.g. $wpdb->prepare('%s', ...) or esc_sql() applied to each value, then
+      imploded) is concatenated into a raw $wpdb query string wrapped in an EXTRA,
+      redundant pair of literal single quotes: "... IN ('" . $LIST . "')". This
+      defeats the per-element escaping: the leading pair of adjacent quote
+      characters collapses into an empty-string SQL token, exposing the rest of the
+      first list element as unquoted, executable SQL — a boolean/UNION SQL
+      injection (CWE-89) despite every value having been individually escaped.
+
+      Fix: interpolate the already-quoted list WITHOUT the extra surrounding quotes
+      (e.g. "... IN ({$LIST})"), and/or cast every element to an integer before it
+      reaches the list builder (array_map('absint'/'intval', $arr)).
+
+      TRIAGE GUIDANCE
+      ───────────────────────────────────────────────────────────────────
+      TRUE POSITIVE indicators:
+        - $LIST is built from user-influenced or stored data (request parameters,
+          unserialized DB column values) without integer casting.
+        - The extra quote pair sits directly against the IN( / ) boundary on both
+          sides of the concatenation.
+
+      FALSE POSITIVE indicators:
+        - $LIST is exactly array_map('intval'/'absint', ...) or wp_parse_id_list()
+          — integers cannot carry injected quote/paren characters.
+        - The whole concatenation sits inside $wpdb->prepare(...).
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+        - https://cwe.mitre.org/data/definitions/89.html
+    patterns:
+      - pattern-either:
+          - pattern: $wpdb->query($A . $LIST . $B, ...)
+          - pattern: $wpdb->query($A . $LIST . $B)
+          - pattern: $wpdb->get_results($A . $LIST . $B, ...)
+          - pattern: $wpdb->get_results($A . $LIST . $B)
+          - pattern: $wpdb->get_row($A . $LIST . $B, ...)
+          - pattern: $wpdb->get_row($A . $LIST . $B)
+          - pattern: $wpdb->get_var($A . $LIST . $B, ...)
+          - pattern: $wpdb->get_var($A . $LIST . $B)
+          - pattern: $wpdb->get_col($A . $LIST . $B, ...)
+          - pattern: $wpdb->get_col($A . $LIST . $B)
+      # $A must end with an IN( boundary immediately followed by a redundant quote.
+      - metavariable-regex:
+          metavariable: $A
+          regex: "(?is).*\\bIN\\s*\\(\\s*'\"\\s*$"
+      # $B must open with the matching redundant quote right after the IN-list.
+      - metavariable-regex:
+          metavariable: $B
+          regex: "(?is)^\"\\s*'\\s*\\).*"
+      - pattern-not-inside: $wpdb->prepare(...)
+      # Exclude already integer-cast lists — cannot smuggle quote/paren characters.
+      - pattern-not: $wpdb->$METHOD($A . implode($SEP, array_map('intval', $SAFE)) . $B, ...)
+      - pattern-not: $wpdb->$METHOD($A . implode($SEP, array_map('absint', $SAFE)) . $B, ...)
+      - pattern-not: $wpdb->$METHOD($A . implode($SEP, array_map('intval', $SAFE)) . $B)
+      - pattern-not: $wpdb->$METHOD($A . implode($SEP, array_map('absint', $SAFE)) . $B)
+      - pattern-not: $wpdb->$METHOD($A . implode($SEP, wp_parse_id_list($SAFE)) . $B, ...)
+      - pattern-not: $wpdb->$METHOD($A . implode($SEP, wp_parse_id_list($SAFE)) . $B)

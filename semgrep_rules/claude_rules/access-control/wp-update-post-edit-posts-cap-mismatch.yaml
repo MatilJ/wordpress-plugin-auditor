@@ -1,0 +1,118 @@
+rules:
+  - id: claude.php.wordpress.access-control.wp-update-post-edit-posts-cap-mismatch
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      User-controlled input flows into wp_update_post() as the post 'ID', but the
+      enclosing function only verifies current_user_can('edit_posts') or a similarly
+      broad capability — not a per-resource ownership check or an elevated capability
+      such as edit_others_posts / edit_others_pages (CWE-862).
+
+      WordPress custom post types registered with capability_type set to 'page' (or a
+      custom capability array) require current_user_can('edit_others_pages') to edit
+      another user's post. wp_update_post() does NOT enforce CPT capability arrays
+      internally; the calling code must perform the ownership or elevated-capability
+      check. A function that gates wp_update_post() only on 'edit_posts' allows any
+      Contributor-level user to overwrite any post of that CPT regardless of ownership.
+
+      TRIAGE REQUIRED:
+      1. Identify the CPT(s) this handler targets. Check the CPT registration for
+         capability_type and map_meta_cap settings.
+         - capability_type: 'post' (default) → edit_others_posts required for cross-user edits.
+         - capability_type: 'page' → edit_others_pages required.
+         - capability_type: ['my_cpt', 'my_cpts'] → edit_others_my_cpts required.
+      2. Confirm that 'ID' is attacker-supplied (from $_POST, $_GET, $_REQUEST, etc.).
+         If $ID is always server-determined (result of a server-side query of the caller's
+         own posts), this is likely FP.
+      3. Check whether the handler calls current_user_can('edit_post', $id) for a
+         per-resource authorization check, or current_user_can('edit_others_*') before
+         the wp_update_post() call. If so, FP — this rule does not exclude those correctly
+         in all patterns; manual verification is required.
+      4. wp_update_post() does NOT check post ownership. Authorization must be implemented
+         by the calling code.
+
+      Remediation: before wp_update_post(), verify either:
+        (a) Per-resource: current_user_can('edit_post', $post_id) — grants access only to
+            the post's own author plus those with edit_others_* capability.
+        (b) Cross-resource: current_user_can('edit_others_pages') or equivalent CPT cap.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Insecure Direct Object Reference (IDOR)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_update_post/
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+        - https://owasp.org/www-project-top-ten/2021/A01_2021-Broken_Access_Control
+        - https://cwe.mitre.org/data/definitions/862.html
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_POST
+          - pattern: $_GET
+          - pattern: $_REQUEST
+    pattern-sinks:
+      - patterns:
+          # Match any wp_update_post() call receiving a tainted argument.
+          # Covers both inline array literals and pre-built array variables passed
+          # as the single argument (common in plugin code).
+          - pattern: wp_update_post($X)
+          # Exclude functions that call a per-resource capability check.
+          # current_user_can('edit_post', $id) verifies the caller can edit THIS specific
+          # post — covers both ownership (author edits own post) and elevated roles.
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                current_user_can('edit_post', ...);
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... current_user_can('edit_post', ...) ...>) { ... }
+                ...
+              }
+          # Exclude functions that check edit_others_posts — covers standard CPTs.
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                current_user_can('edit_others_posts');
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... current_user_can('edit_others_posts') ...>) { ... }
+                ...
+              }
+          # Exclude functions that check edit_others_pages — covers page-type CPTs.
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                current_user_can('edit_others_pages');
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... current_user_can('edit_others_pages') ...>) { ... }
+                ...
+              }
+          # Exclude admin-only gates (manage_options) — PR:H, out of bounty scope.
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... current_user_can('manage_options') ...>) { ... }
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                current_user_can('manage_options');
+                ...
+              }

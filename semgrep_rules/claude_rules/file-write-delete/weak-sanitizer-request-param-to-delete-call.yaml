@@ -1,0 +1,145 @@
+rules:
+  - id: claude.php.wordpress.file-write-delete.weak-sanitizer-request-param-to-delete-call
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A $_GET/$_POST/$_REQUEST value flows — directly, or through any
+      number of intermediate assignments/concatenations/wrapper-function
+      calls (e.g. sanitize_text_field(), sanitize_textarea_field(),
+      wc_clean(), a home-grown explode()+end()/array_pop() last-segment
+      extraction, or a "$dir = $BASE . '/' . $key;" path-build followed by
+      a further suffix such as "$dir . '_old'") — into a file/folder
+      deletion operation: unlink()/wp_delete_file()/rmdir(), or a
+      same-named instance ($obj->method()) or static (Class::method())
+      wrapper whose name indicates file/folder removal (e.g. *_delete_file,
+      delete_*_attachment, remove_upload, delete_folder, rrmdir). None of
+      the wrapper functions listed above strip '/', '\\', or '..'
+      sequences, so a value like "../../../../wp-config.php" survives them
+      unchanged and reaches the delete call intact. This is a
+      request-controlled path-traversal arbitrary file/folder deletion
+      primitive (CWE-22/CWE-73).
+
+      Tracked with taint (dataflow) analysis rather than a fixed pattern
+      shape because the number of intermediate hops and the exact wrapper
+      names are plugin-specific and unbounded — see CVE-2026-9725
+      (printcart-integration <= 2.5.2, nbd_upload_design_file()): the
+      sanitizer call sits inside an if/else "reup-or-fall-back-to-session-
+      default" branch, one level of nesting away from the sibling
+      $path_dir = NBDESIGNER_UPLOAD_DIR . '/' . $nbu_item_key; path-build
+      and the Nbdesigner_IO::delete_folder($path_dir . '_old') call two
+      statements later — a shape a same-block sequential AST pattern
+      cannot express, and a same-function deep-match AST pattern only
+      expresses at a severe (multi-minute, real-file-confirmed) scanning
+      cost. Taint mode tracks this in seconds because it is purpose-built
+      dataflow tracking rather than combinatorial AST-position matching.
+
+      TRIAGE:
+        1. Confirm the flagged value is actually used to build a filesystem
+           path before the delete call (not merely an unrelated ID looked up
+           in a DB/allow-list first — a numeric/allow-listed ID resolved via
+           a DB lookup before the delete call is a FP).
+        2. Confirm no sanitize_file_name(), basename(), wp_basename(),
+           sanitize_key(), realpath()+prefix check, or a same-function
+           call whose name reads as a key/filename/path validator (a
+           "sanitize_something_key()"-shaped helper, common in plugins
+           that define their own strict allow-list validator) applies to
+           the value anywhere between the request read and the delete call
+           — any of these neutralizes the traversal.
+        3. Confirm the delete call is reachable without a capability check
+           that would exclude ordinary/unauthenticated users (a nonce alone
+           does not count if the form embedding it is public-facing).
+    metadata:
+      category: security
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+        - "CWE-73: External Control of File Name or Path"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Arbitrary File Deletion"
+      technology: [php, wordpress]
+      references:
+        - "https://cwe.mitre.org/data/definitions/22.html"
+        - "https://cwe.mitre.org/data/definitions/73.html"
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_POST
+          - pattern: $_GET
+          - pattern: $_REQUEST
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $OBJ->$METHOD(...)
+              - pattern: $CLASS::$METHOD(...)
+              - pattern: $METHOD(...)
+          # Restrict the generic wrapper-call shape to method/function names
+          # that read as "delete a file/folder", to avoid flagging unrelated
+          # calls (delete_transient(), remove_role(), etc.) that happen to
+          # take a tainted value for a non-file reason.
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: (?i)^(?=.*(file|attachment|upload|temp|folder|dir))(?=.*(delete|remove|unlink|rmdir)).*$
+      - pattern: unlink(...)
+      - pattern: rmdir(...)
+      - pattern: wp_delete_file(...)
+    # No pattern-propagators needed: string concatenation and ordinary
+    # assignment already propagate taint by default, which is exactly what
+    # models "$dir = $BASE . '/' . $key;" then "$dir . '_old'" reaching the
+    # sink two hops and one block-boundary away from the source.
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_file_name(...)
+          - pattern: basename(...)
+          - pattern: wp_basename(...)
+          - pattern: realpath(...)
+          # sanitize_key() output is [a-z0-9_-] only — no dots or slashes,
+          # so path traversal is impossible.
+          - pattern: sanitize_key(...)
+          # Integer/float coercion — a numeric value cannot contain '/' or
+          # '..'. Required in practice, not just for completeness: confirmed
+          # against the real CVE-2026-9725 fix, where the taint dataflow
+          # trace otherwise reaches the sink through an UNRELATED
+          # $_POST['variation_id'] value that passes through absint() on an
+          # earlier line of the same function, on a code path the actual
+          # fix never touched (false positive without this clause).
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          # Naming-heuristic sanitizer for a same-plugin, custom, strict
+          # allow-list validator (e.g. "nbd_sanitize_item_key()", the
+          # CVE-2026-9725 fix): a function whose name combines a
+          # sanitize/validate/clean/safe verb with a key/name/slug/path
+          # noun is, by WordPress-plugin-ecosystem convention, exactly the
+          # kind of helper introduced to close this bug class. Broader than
+          # a fixed name list (this rule never names a specific plugin's
+          # function) and narrower than "any wrapper call", trading a small
+          # false-negative risk (a badly-named or badly-implemented
+          # "sanitize_*_key" helper that doesn't actually strip traversal)
+          # for avoiding a guaranteed false positive on every plugin that
+          # fixes this bug with its own validator instead of a WP/PHP
+          # builtin — confirmed necessary against the real CVE-2026-9725 fix.
+          - patterns:
+              - pattern: $SANFUNC(...)
+              - metavariable-regex:
+                  metavariable: $SANFUNC
+                  regex: (?i)^(?=.*(saniti[sz]e|valid|clean|safe))(?=.*(key|name|slug|folder|dir|file|path)).*$
+          # A request value used only as the opaque lookup KEY of a WordPress
+          # storage-read function — the returned value is developer-controlled
+          # data set earlier via the matching set_*()/update_*() call, never a
+          # reflection of the key's own content, so taint should not
+          # propagate from the key argument through the return value.
+          - pattern: get_transient(...)
+          - pattern: get_site_transient(...)
+          - pattern: get_option(...)
+          - pattern: get_post_meta(...)
+          - pattern: get_user_meta(...)
+          - pattern: get_comment_meta(...)

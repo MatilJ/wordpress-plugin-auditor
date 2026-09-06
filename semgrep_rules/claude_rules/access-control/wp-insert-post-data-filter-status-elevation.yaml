@@ -1,0 +1,86 @@
+rules:
+  - id: claude.php.wordpress.access-control.wp-insert-post-data-filter-status-elevation
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A filter callback on 'wp_insert_post_data' modifies post_status or
+      post_author without calling current_user_can(). The wp_insert_post_data
+      filter fires during wp_insert_post() and wp_update_post() — any user
+      with edit_posts capability (Contributor+) can trigger it by saving a
+      post. Modifying post_status to 'publish' without checking
+      current_user_can('publish_posts') allows Contributors to bypass the
+      editorial workflow (CWE-862).
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - Filter modifies $data['post_status'] to 'publish' unconditionally.
+        - Filter modifies $data['post_author'] to a different user ID.
+        - No current_user_can() check in the callback body.
+
+      FALSE POSITIVE indicators:
+        - Filter only modifies non-security fields (post_name, menu_order).
+        - Filter includes current_user_can('publish_posts') check.
+        - Filter only runs for a specific CPT with admin-only access.
+        - The status change is from one non-published status to another.
+
+      Fix: add capability check before modifying security-relevant fields:
+        if ( current_user_can( 'publish_posts' ) ) {
+            $data['post_status'] = 'publish';
+        }
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern: |
+                  function $FUNC($DATA, ...) {
+                    ...
+                    $DATA['post_status'] = $VAL;
+                    ...
+                  }
+              # Only flag assignment to a status that is itself security-relevant
+              # (visible/published). Assigning to any other status string —
+              # including a plugin-defined custom status such as a hidden
+              # "in-progress copy" status — is a de-escalation from whatever the
+              # post's prior status was, not a privilege-escalation vector.
+              - metavariable-regex:
+                  metavariable: $VAL
+                  regex: "^['\"](?:publish|future|private)['\"]$"
+          - pattern: |
+              function $FUNC($DATA, ...) {
+                ...
+                $DATA['post_author'] = $VAL;
+                ...
+              }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can(...) ...>) {
+              ...
+            }
+            ...
+          }
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Arbitrary Content Modification"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/hooks/wp_insert_post_data/
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+        - https://cwe.mitre.org/data/definitions/862.html

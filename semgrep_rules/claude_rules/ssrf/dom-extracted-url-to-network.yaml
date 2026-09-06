@@ -1,0 +1,66 @@
+rules:
+  - id: claude.php.wordpress.ssrf.dom-extracted-url-to-network
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      A URL extracted from a DOMDocument element attribute (getAttribute) flows into
+      a network-request function without host validation. An attacker who can influence
+      the remote HTML (e.g., by controlling a domain stored in plugin data that is later
+      fetched for scraping, favicon lookup, or link preview) can inject a <link>/<a> href
+      pointing to internal addresses (169.254.169.254, 192.168.x.x, 127.0.0.1), enabling
+      Server-Side Request Forgery (CWE-918). Validate the extracted URL with
+      wp_http_validate_url() before making the request, or use wp_safe_remote_get().
+    metadata:
+      category: security
+      cwe: "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp: "A10:2021 - Server-Side Request Forgery"
+      confidence: MEDIUM
+      likelihood: LOW
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Server-Side Request Forgery (SSRF)"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_http_validate_url/
+        - https://developer.wordpress.org/reference/functions/wp_safe_remote_get/
+    pattern-sources:
+      # URL extracted from a remote HTML page via DOMDocument attribute access.
+      # The HTML content originates from a user-influenced remote server, so the
+      # attribute value (href, src, action, data-*) is effectively attacker-controlled.
+      - pattern: $EL->getAttribute(...)
+    pattern-sanitizers:
+      - pattern-either:
+          # Validates URL and blocks requests to private/internal hosts in WP context
+          - pattern: wp_http_validate_url(...)
+          # URL-encoding prevents injection of scheme/host/port separators into a path
+          - pattern: urlencode(...)
+          - pattern: rawurlencode(...)
+          # Integer/float values cannot be URLs
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          # sanitize_key() output is [a-z0-9_-] — no colons, slashes, or dots;
+          # cannot form a valid URL scheme or host
+          - pattern: sanitize_key(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: curl_init($URL)
+              - pattern: curl_setopt($CH, CURLOPT_URL, $URL)
+          - focus-metavariable: $URL
+      - patterns:
+          - pattern: fsockopen($HOST, ...)
+          - focus-metavariable: $HOST
+      - patterns:
+          - pattern-either:
+              - pattern: wp_remote_get($URL, ...)
+              - pattern: wp_remote_post($URL, ...)
+              - pattern: wp_remote_request($URL, ...)
+              - pattern: wp_remote_head($URL, ...)
+          - focus-metavariable: $URL
+      - patterns:
+          - pattern: file_get_contents($URL, ...)
+          - focus-metavariable: $URL

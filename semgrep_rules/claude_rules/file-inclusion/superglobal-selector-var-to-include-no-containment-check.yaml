@@ -1,0 +1,115 @@
+rules:
+  - id: claude.php.wordpress.file-inclusion.superglobal-selector-var-to-include-no-containment-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      A local variable is populated directly from a raw superglobal
+      ($_GET/$_REQUEST/$_POST) via an isset()-ternary or null-coalescing
+      fallback — the idiom WordPress admin pages commonly use to pick a
+      "tab"/"section"/"view"/"step" without going through a formal function
+      parameter or a shortcode/widget extract() call — and the same function
+      later performs an include/require with no realpath()-based
+      containment check, filename sanitizer, or allow-list guard anywhere in
+      its body. Because the raw request value (even when still wrapped in a
+      fixed prefix/suffix, e.g. via double-quoted string interpolation)
+      selects the included file, an attacker can traverse outside the
+      intended directory to read or execute an arbitrary local .php file
+      (CWE-98 / CWE-22). Resolve the final path with realpath(), verify it
+      is still inside the intended base directory before the include/
+      require, or validate the selector against a fixed allow-list
+      (in_array($value, $allowed, true)) with a wp_die()/die() guard on
+      failure.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program ('PHP Remote File Inclusion')"
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Path Traversal"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/98.html
+        - https://cwe.mitre.org/data/definitions/22.html
+        - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+    patterns:
+      - pattern-either:
+          - pattern: include $X;
+          - pattern: include($X);
+          - pattern: include_once $X;
+          - pattern: include_once($X);
+          - pattern: require $X;
+          - pattern: require($X);
+          - pattern: require_once $X;
+          - pattern: require_once($X);
+      # Selector context: a scalar local variable assigned straight from a
+      # superglobal with a literal fallback, not a formal parameter — the
+      # deep/taint variants of this same check are unreliable on real-world
+      # files in this engine version, so the context is matched structurally
+      # instead of via cross-statement dataflow.
+      - pattern-either:
+          - pattern-inside: |
+              $PARAM = isset($_GET[$KEY]) ? $_GET[$KEY] : $DEFAULT;
+              ...
+          - pattern-inside: |
+              $PARAM = isset($_REQUEST[$KEY]) ? $_REQUEST[$KEY] : $DEFAULT;
+              ...
+          - pattern-inside: |
+              $PARAM = isset($_POST[$KEY]) ? $_POST[$KEY] : $DEFAULT;
+              ...
+          - pattern-inside: |
+              $PARAM = $_GET[$KEY] ?? $DEFAULT;
+              ...
+          - pattern-inside: |
+              $PARAM = $_REQUEST[$KEY] ?? $DEFAULT;
+              ...
+          - pattern-inside: |
+              $PARAM = $_POST[$KEY] ?? $DEFAULT;
+              ...
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... realpath(...) ...>) {
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            sanitize_file_name(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            basename(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            sanitize_key(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            validate_file(...);
+            ...
+          }
+      # Allow-list validator shape: an early guard clause rejects any value
+      # not in a fixed known-good set before the selector is ever used.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (!in_array($PARAM, $ALLOWED, true)) {
+              ...
+              wp_die(...);
+              ...
+            }
+            ...
+          }

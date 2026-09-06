@@ -1,0 +1,90 @@
+rules:
+  - id: claude.php.wordpress.xss.mail-tag-replace-html-escaping-disabled
+    languages: [php]
+    severity: HIGH
+    message: |
+      A Contact Form 7 mail-tag / merge-tag replacement call is made with
+      HTML-escaping left disabled (no options argument, an empty options
+      array, `false`, or an options array that does not set 'html' => true)
+      (CWE-79). This tag-replacement API supports two output modes: a
+      plain-text/mail mode (the default, `html` => false) which substitutes
+      submitted field values verbatim with no encoding, and an HTML mode
+      (`html` => true) which additionally applies escaping to the resolved
+      value. The plain-text mode is correct when the result is used to build
+      an actual mail body, but the SAME helper is commonly reused by
+      form-action add-ons (auto-responders, redirect/webhook/custom-script
+      actions) to populate a browser-rendered value — an inline <script>
+      block, an HTML snippet, an admin-visible summary — where the missing
+      HTML mode means a submitted field value flows into markup or inline
+      JavaScript completely unescaped.
+
+      This will not surface via a simple superglobal-to-echo taint rule: the
+      call site here only prepares the value; the eventual unescaped
+      echo/concatenation into HTML or a <script> block is typically in a
+      different method or class several calls away (e.g. a later hook
+      callback that loops over the prepared values). Trace forward from this
+      call to confirm the returned/assigned value is echoed into HTML/JS
+      output rather than only ever used to build a genuine outgoing email.
+
+      TRIAGE: a hit is a false positive only if the resolved value is
+      confirmed to be used solely to build a mail body/subject/header (never
+      echoed to a browser response), or if the options argument already
+      enables 'html' => true.
+
+      Fix: pass `true` (or an options array containing 'html' => true) so the
+      resolved value is HTML-escaped before it reaches non-mail, browser-
+      rendered output.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Stored Cross-Site Scripting (XSS)"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/79.html
+        - https://developer.wordpress.org/apis/security/escaping/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/vendor_prefixed/**"
+        - "**/node_modules/**"
+    pattern-either:
+      # Branch 1: the common per-action wrapper convention used by CF7
+      # add-on "action" classes — a thin method (conventionally named
+      # replace_tags()/replace_mail_tags()) around the core replacement
+      # function, where the wrapper itself accepts either a boolean `true`
+      # or an options array to opt into HTML-escaping.
+      - patterns:
+          - pattern-either:
+              - pattern: $OBJ->replace_tags($CONTENT)
+              - pattern: $OBJ->replace_tags($CONTENT, $OPTS)
+              - pattern: $OBJ->replace_mail_tags($CONTENT)
+              - pattern: $OBJ->replace_mail_tags($CONTENT, $OPTS)
+          - pattern-not: $OBJ->replace_tags($CONTENT, true)
+          - pattern-not: $OBJ->replace_tags($CONTENT, array('html' => true))
+          - pattern-not: $OBJ->replace_mail_tags($CONTENT, true)
+          - pattern-not: $OBJ->replace_mail_tags($CONTENT, array('html' => true))
+      # Branch 2: the shared Contact Form 7 core function called directly
+      # (no per-plugin wrapper) — recurs verbatim across the CF7 add-on
+      # ecosystem, which depends on the same core API.
+      - patterns:
+          - pattern-either:
+              - pattern: wpcf7_mail_replace_tags($CONTENT)
+              - pattern: wpcf7_mail_replace_tags($CONTENT, $OPTS)
+          - pattern-not: wpcf7_mail_replace_tags($CONTENT, array('html' => true))
+          # Exclude the mechanical forwarding call inside a wrapper method's
+          # own definition (e.g. replace_tags()/replace_mail_tags() itself) —
+          # the security-relevant decision is made by that wrapper's caller
+          # (Branch 1), not by this pass-through call.
+          - pattern-not-inside: |
+              function replace_tags(...) {
+                ...
+              }
+          - pattern-not-inside: |
+              function replace_mail_tags(...) {
+                ...
+              }

@@ -1,0 +1,97 @@
+rules:
+  - id: claude.php.wordpress.rce.dynamic-callable-user-input
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      User-controlled input flows into call_user_func()/call_user_func_array()
+      as the callable argument. An attacker can invoke arbitrary PHP
+      functions (CWE-94 / CWE-470).
+      Validate the callable against a strict allowlist before invocation.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+        - "CWE-470: Use of Externally-Controlled Input to Select Classes or Code ('Unsafe Reflection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Code Injection"
+      technology: [php, wordpress]
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+    pattern-propagators:
+      # wp_parse_args() merges user-supplied array (first arg) with defaults (second arg),
+      # returning a new array that preserves all user-supplied keys including callable values.
+      # Without this propagator, Semgrep breaks the taint chain at the merge call.
+      # Confirmed miss: acf-extended 0.9.1.1 — $_POST flowed through wp_parse_args() in
+      # render_form_ajax() before eventually reaching call_user_func_array().
+      - pattern: wp_parse_args($INPUT, ...)
+        from: $INPUT
+        to: return
+      # ACF's own arg-merge helpers follow the same contract as wp_parse_args.
+      - pattern: acf_parse_args($INPUT, ...)
+        from: $INPUT
+        to: return
+      # acfe_parse_args_r: ACF Extended's recursive merge; first arg (caller-supplied)
+      # takes precedence over second arg (stored defaults). Taint propagates from input to output.
+      - pattern: acfe_parse_args_r($INPUT, ...)
+        from: $INPUT
+        to: return
+      # stripslashes_deep() strips backslashes from magic-quoted strings; it does NOT
+      # validate or restrict callable characters. Taint must propagate through it.
+      # Confirmed miss: kali-forms 2.4.9 form_process() — $_POST['data'] was wrapped in
+      # stripslashes_deep() before being iterated and used to overwrite callable entries in
+      # $this->placeholdered_data, which were later passed to call_user_func(). The missing
+      # propagator caused Semgrep to lose the taint chain at the preprocessing step.
+      - pattern: stripslashes_deep($INPUT)
+        from: $INPUT
+        to: return
+      # wp_unslash() is WordPress's preferred single-value wrapper for stripslashes();
+      # same reasoning — does not neutralize callable strings.
+      - pattern: wp_unslash($INPUT)
+        from: $INPUT
+        to: return
+    pattern-sanitizers:
+      - pattern-either:
+          # Integer values cannot be valid callables
+          - pattern: (int) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          # sanitize_key() output is [a-z0-9_-] — prevents array callables
+          # and class::method syntax (no brackets, colons, or backslashes)
+          - pattern: sanitize_key(...)
+          # sanitize_title() → [a-z0-9%-_] — prevents class::method syntax
+          - pattern: sanitize_title(...)
+          # sanitize_html_class() → [A-Za-z0-9_-] — prevents callable syntax
+          - pattern: sanitize_html_class(...)
+          # sanitize_file_name() → [a-zA-Z0-9._-] — prevents callable syntax
+          - pattern: sanitize_file_name(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: call_user_func($CALLABLE, ...)
+              - pattern: call_user_func_array($CALLABLE, ...)
+          - focus-metavariable: $CALLABLE
+          # Exclude registry-dispatch pattern: $this->$registry[$user_key][$subkey].
+          # The user controls only the first-level lookup key ($KEY); the callable VALUE at
+          # the second level ($SUBKEY — e.g. 'callback', 'sanitize', 'handler') is
+          # developer-registered by plugin internals, never user-supplied.
+          # Two-level indexing is the distinguishing structural signal: single-level
+          # ($this->$prop[$user_key]) is still a TP because the user directly controls
+          # which slot is invoked. Two-level means the user only selects the registry entry;
+          # the specific named property within that entry is always developer-written.
+          # Confirmed FP sources:
+          #   - Elementor ajax/module.php — $this->ajax_actions[$action]['callback']
+          #   - kali-forms 2.4.9 class-meta-save.php:172 — $this->fields[$key]['sanitize']
+          - pattern-not: call_user_func($OBJ->$REG[$KEY][$SUBKEY], ...)
+          - pattern-not: call_user_func_array($OBJ->$REG[$KEY][$SUBKEY], ...)

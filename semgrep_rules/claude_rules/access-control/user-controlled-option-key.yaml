@@ -1,0 +1,146 @@
+rules:
+  - id: claude.php.wordpress.auth.user-controlled-option-key
+    mode: taint
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      User-controlled input flows into the option NAME argument of
+      update_option() / add_option() / delete_option(). An attacker who
+      controls the key can set `users_can_register` to 1 and `default_role`
+      to `administrator`, achieving full site takeover (CWE-269 / CWE-862).
+      Use a hardcoded option name or validate against a strict allowlist
+      before any option write.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-269: Improper Privilege Management"
+        - "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Arbitrary Options Update"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/update_option/
+        - https://developer.wordpress.org/reference/functions/delete_option/
+      # TRIAGE GUIDANCE:
+      #
+      # TRUE POSITIVE — user controls the option name:
+      #   $key = $_POST['option_name'];
+      #   update_option($key, $_POST['value']);
+      #   → Attacker can write to ANY wp_options row. Immediate escalation:
+      #   set users_can_register=1, default_role=administrator, register new admin.
+      #
+      # TRUE POSITIVE — loop over user-supplied keys:
+      #   foreach ($_POST['settings'] as $key => $value) {
+      #       update_option($key, $value);
+      #   }
+      #   → Same as above; each key is attacker-controlled.
+      #
+      # FALSE POSITIVE — hardcoded prefix + user suffix:
+      #   update_option('myplugin_' . sanitize_key($_POST['field']), $value);
+      #   → The prefix limits the namespace. Verify the prefix is not empty
+      #   and sanitize_key() is applied to the user portion. If only
+      #   myplugin_* options are affected, impact is limited to plugin settings.
+      #   Still suspicious but may not be escalatable.
+      #
+      # FALSE POSITIVE — allowlist check before write:
+      #   if (in_array($key, ['setting_a', 'setting_b'], true)) {
+      #       update_option($key, $value);
+      #   }
+      #   → Key is constrained to known-safe values. Confirm the allowlist
+      #   does NOT include security-sensitive option names.
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: $REQUEST->get_body()
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: update_option($KEY, ...)
+              - pattern: add_option($KEY, ...)
+              - pattern: update_site_option($KEY, ...)
+              - pattern: delete_option($KEY)
+              - pattern: delete_site_option($KEY)
+          - focus-metavariable: $KEY
+          # Hardcoded literal prefix + user-controlled suffix: the fixed prefix constrains
+          # the option namespace so the user cannot reach critical WP options
+          # (users_can_register, default_role, active_plugins, siteurl, etc.).
+          # Confirmed FP: woo-smart-wishlist 6.0.0 lines 404/463 —
+          # update_option('woosw_list_' . $key, ...) can only write to woosw_list_* keys.
+          - pattern-not: update_option("..." . $SUFFIX, ...)
+          - pattern-not: add_option("..." . $SUFFIX, ...)
+          - pattern-not: update_site_option("..." . $SUFFIX, ...)
+          - pattern-not: delete_option("..." . $SUFFIX)
+          - pattern-not: delete_site_option("..." . $SUFFIX)
+          # sprintf() with a literal format string constrains the key namespace identically to string concatenation.
+          - pattern-not: update_option(sprintf("...", ...), ...)
+          - pattern-not: add_option(sprintf("...", ...), ...)
+          - pattern-not: update_site_option(sprintf("...", ...), ...)
+          - pattern-not: delete_option(sprintf("...", ...))
+          - pattern-not: delete_site_option(sprintf("...", ...))
+          # Bare uppercase constant (define()'d or a class constant, e.g. a plugin-slug
+          # constant) concatenated with a literal and/or the user-controlled suffix: a
+          # constant reference constrains the key namespace identically to a literal-
+          # string prefix, since constants are immutable and not attacker-settable.
+          # $CONST is bound and regex-checked inside this same nested formula (not at
+          # the outer patterns: level) — a metavariable-regex on a metavariable that
+          # only appears inside pattern-not clauses rejects every candidate where that
+          # metavariable never binds, silently breaking unrelated sink shapes.
+          - pattern-not:
+              patterns:
+                - pattern-either:
+                    - pattern: update_option($CONST . "..." . $SUFFIX, ...)
+                    - pattern: update_option($CONST . $SUFFIX, ...)
+                    - pattern: add_option($CONST . "..." . $SUFFIX, ...)
+                    - pattern: add_option($CONST . $SUFFIX, ...)
+                    - pattern: update_site_option($CONST . "..." . $SUFFIX, ...)
+                    - pattern: update_site_option($CONST . $SUFFIX, ...)
+                    - pattern: delete_option($CONST . "..." . $SUFFIX)
+                    - pattern: delete_option($CONST . $SUFFIX)
+                    - pattern: delete_site_option($CONST . "..." . $SUFFIX)
+                    - pattern: delete_site_option($CONST . $SUFFIX)
+                - metavariable-regex:
+                    metavariable: $CONST
+                    regex: ^[A-Z_][A-Z0-9_]*$
+          # Allow-list guard before the write: in_array()/array_key_exists()/isset()
+          # validating the same key variable against a known-safe set — checked
+          # anywhere in the enclosing function, regardless of control-flow position
+          # relative to the sink — bounds the write to legitimate keys and
+          # neutralizes the option-name taint.
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                <... in_array($KEY, $ALLOWED, ...) ...>;
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                <... array_key_exists($KEY, $ALLOWED) ...>;
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                <... isset($ALLOWED[$KEY]) ...>;
+                ...
+              }
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: (int) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: sanitize_key(...)

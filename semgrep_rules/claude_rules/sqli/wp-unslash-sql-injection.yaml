@@ -1,0 +1,77 @@
+rules:
+  - id: claude.php.wordpress.sqli.wp-unslash-sql-injection
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      wp_unslash() output from a superglobal reaches a $wpdb query method
+      without $wpdb->prepare() or an equivalent SQL sanitizer.
+      wp_unslash() is NOT a sanitizer — it REMOVES the addslashes()
+      protection that WordPress auto-applies to superglobals via
+      wp_magic_quotes(). This re-enables single-quote breakout in SQL
+      string contexts (CWE-89).
+      Common vulnerable chain: wp_unslash($_POST['x']) ->
+      sanitize_text_field() -> SQL interpolation. sanitize_text_field()
+      preserves quotes and is NOT SQL-safe.
+      Fix: pass the value through $wpdb->prepare() with %s/%d placeholders.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_unslash/
+        - https://patchstack.com/academy/wordpress/vulnerabilities/sql-injection/
+    pattern-sources:
+      - pattern-either:
+          - pattern: wp_unslash($_GET)
+          - pattern: wp_unslash($_POST)
+          - pattern: wp_unslash($_REQUEST)
+          - pattern: wp_unslash($_COOKIE)
+          - pattern: wp_unslash($_SERVER)
+          - pattern: wp_unslash($_GET[$K])
+          - pattern: wp_unslash($_POST[$K])
+          - pattern: wp_unslash($_REQUEST[$K])
+          - pattern: wp_unslash($_COOKIE[$K])
+          - pattern: wp_unslash($_SERVER[$K])
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $wpdb->query($Q, ...)
+              - pattern: $wpdb->get_results($Q, ...)
+              - pattern: $wpdb->get_row($Q, ...)
+              - pattern: $wpdb->get_var($Q, ...)
+              - pattern: $wpdb->get_col($Q, ...)
+          - focus-metavariable: $Q
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: $wpdb->prepare(...)
+          - pattern: esc_sql(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          - pattern: sanitize_key(...)
+          - pattern: sanitize_sql_orderby(...)
+          - pattern: array_map('absint', ...)
+          - pattern: array_map('intval', ...)
+          - pattern: array_map('floatval', ...)
+          - pattern: array_map('sanitize_key', ...)
+          - pattern: map_deep($X, 'absint')
+          - pattern: map_deep($X, 'intval')
+          - pattern: map_deep($X, 'sanitize_key')
+          - pattern: wp_parse_id_list(...)
+          - pattern: sanitize_title(...)
+          - pattern: new DateTime(...)
+          - pattern: new DateTimeImmutable(...)
+          - pattern: strtotime(...)
+          # NOTE: sanitize_text_field() is NOT a sanitizer here.
+          # It strips HTML but preserves ' " ; ( ) and other SQL metacharacters.
+          # The wp_unslash() -> sanitize_text_field() -> SQL chain is a confirmed
+          # vulnerability pattern (Patchstack academy, Quiz & Survey Master CVE).

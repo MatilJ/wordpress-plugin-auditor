@@ -1,0 +1,43 @@
+rules:
+  - id: claude.php.wordpress.rce.comment-text-do-shortcode-filter
+    languages: [php]
+    severity: HIGH
+    message: |
+      do_shortcode() or apply_shortcodes() is registered as a filter on
+      comment_text/get_comment_text/comment_excerpt. Comments are writable by
+      unauthenticated visitors — any registered shortcode can be invoked via
+      a public comment (CWE-94). CVE-2023-4549.
+      apply_shortcodes() is a WP Core alias for do_shortcode() (shortcodes.php:223).
+      Remove the filter or use pre_do_shortcode_tag to allowlist specific
+      shortcode tags permitted in comments.
+    metadata:
+      category: security
+      cwe: "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Arbitrary Shortcode Execution"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/do_shortcode/
+    patterns:
+      - pattern-either:
+          - pattern: add_filter('comment_text', 'do_shortcode', ...)
+          - pattern: add_filter('comment_text', 'apply_shortcodes', ...)
+          - pattern: add_filter("comment_text", "do_shortcode", ...)
+          - pattern: add_filter("comment_text", "apply_shortcodes", ...)
+          - pattern: add_filter('get_comment_text', 'do_shortcode', ...)
+          - pattern: add_filter('get_comment_text', 'apply_shortcodes', ...)
+          - pattern: add_filter("get_comment_text", "do_shortcode", ...)
+          - pattern: add_filter("get_comment_text", "apply_shortcodes", ...)
+          - pattern: add_filter('comment_excerpt', 'do_shortcode', ...)
+          - pattern: add_filter('comment_excerpt', 'apply_shortcodes', ...)
+          - pattern: add_filter("comment_excerpt", "do_shortcode", ...)
+          - pattern: add_filter("comment_excerpt", "apply_shortcodes", ...)
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"

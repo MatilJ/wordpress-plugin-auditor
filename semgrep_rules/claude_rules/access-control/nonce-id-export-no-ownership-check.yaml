@@ -1,0 +1,122 @@
+rules:
+  - id: claude.php.wordpress.access-control.nonce-id-export-no-ownership-check
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A function verifies a nonce but performs no per-resource authorization check
+      before loading a record by attacker-supplied integer ID and sending it as a
+      file download or inline response. The nonce prevents CSRF but does not verify
+      that the requesting user owns or has access to the specific resource — any
+      user who can obtain the nonce may enumerate and export arbitrary resource IDs
+      (CWE-639 IDOR, CWE-862 Missing Authorization).
+
+      Detected pattern: wp_verify_nonce() / check_ajax_referer() present, integer ID
+      read from user input via filter_input(FILTER_VALIDATE_INT), file-send output
+      (header() + die() or readfile()), no current_user_can() in the function body.
+
+      TRIAGE REQUIRED:
+      1. Find where wp_create_nonce('<action>') is called. If the nonce action
+         includes the resource ID (e.g. 'export_item_' . $id), the nonce IS
+         resource-scoped and each nonce is valid only for that specific ID → FP.
+      2. If the nonce action is a static string (same for all resource IDs), any
+         valid nonce from one resource grants read access to all other IDs → TP.
+      3. Check whether the function or its callers use a plugin-specific ownership
+         wrapper (is_user_allowed(), check_access(), validate_ownership(), etc.)
+         before loading the resource. If so → FP.
+      4. Confirm the exported data is sensitive (configuration, user data, per-module
+         API credentials) and not purely public information.
+
+      Remediation: add an ownership or capability check immediately after ID
+      validation — e.g. if (!current_user_can('edit_post', $id)) { return; }
+    metadata:
+      category: security
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Insecure Direct Object Reference (IDOR)"
+      technology: [php, wordpress]
+      references:
+        - https://owasp.org/www-project-top-ten/2021/A01_2021-Broken_Access_Control
+        - https://developer.wordpress.org/apis/security/user-capabilities-and-roles/
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/
+    patterns:
+      # Anchor: nonce check — CSRF protected but not per-resource authorized.
+      - pattern-either:
+          - pattern: wp_verify_nonce(...)
+          - pattern: check_ajax_referer(...)
+          - pattern: check_admin_referer(...)
+      # Must be inside a function that reads an integer ID from user-supplied input.
+      - pattern-inside:
+          pattern: |
+            function $FUNC(...) {
+              ...
+              $ID = filter_input($SRC, $KEY, FILTER_VALIDATE_INT);
+              ...
+            }
+      # And produces a file download response: header()+die(), header()+echo+exit,
+      # or readfile(). All three are common PHP file-download output patterns.
+      - pattern-inside:
+          pattern-either:
+            # File-send via header + die — covers Content-Disposition JSON exports.
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  header(...);
+                  ...
+                  die(...);
+                  ...
+                }
+            # File-send via header + echo + exit — e.g. echo wp_json_encode(); exit;
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  header(...);
+                  ...
+                  echo ...;
+                  exit;
+                }
+            # readfile-based binary file download.
+            - pattern: |
+                function $FUNC(...) {
+                  ...
+                  readfile(...);
+                  ...
+                }
+      # Exclude: function calls current_user_can() — ownership check present.
+      # Two forms: standalone call and the common if-condition guard.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            current_user_can(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            if (<... current_user_can(...) ...>) {
+              ...
+            }
+            ...
+          }
+      # Exclude: common plugin-specific ownership wrappers.
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $this->validate_access_rights(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $this->check_permissions(...);
+            ...
+          }
+      - pattern-not-inside: |
+          function $FUNC(...) {
+            ...
+            $this->has_access(...);
+            ...
+          }

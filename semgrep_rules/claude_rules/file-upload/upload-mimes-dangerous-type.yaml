@@ -1,0 +1,91 @@
+rules:
+  - id: claude.php.wordpress.upload.upload-mimes-dangerous-type
+    languages: [php]
+    severity: WARNING
+    message: |
+      A callback registered on the 'upload_mimes' filter modifies the
+      allowed MIME types array. This expands the file types that can be
+      uploaded through WordPress, potentially enabling upload of dangerous
+      file types (CWE-434).
+
+      TRIAGE:
+        - PHP-executable extensions (php, phtml, phar, shtml, php5, pht)
+          added = CRITICAL — direct RCE via uploaded PHP file.
+        - .htaccess added = CRITICAL — attacker can override Apache
+          config to execute other uploaded files as PHP.
+        - SVG added without content sanitization = HIGH — Stored XSS
+          via malicious SVG content.
+        - JSON, CSV, XML = generally LOW risk unless processed unsafely.
+        - Check if the filter callback runs unconditionally or only for
+          users with specific capabilities (admin-only = PR:H, OOS).
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/hooks/upload_mimes/
+        - https://developer.wordpress.org/reference/functions/get_allowed_mime_types/
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+    # Match any function that receives a parameter and adds entries to it,
+    # in files that also register an upload_mimes filter. This catches both
+    # named class methods and standalone functions used as upload_mimes callbacks.
+    patterns:
+      - pattern: |
+          $MIMES[$KEY] = $VALUE;
+      - pattern-inside: |
+          function $FN($MIMES, ...) {
+            ...
+          }
+      # A genuine upload_mimes (or similarly-named) filter callback must return the
+      # mutated array back to WordPress — this rules out functions that merely reuse
+      # the same parameter name/keyword coincidentally for an unrelated array.
+      - pattern-inside: |
+          function $FN(...) {
+            ...
+            return $MIMES;
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $FN
+          regex: ".*(?i)(mime|upload|svg|filetype|media_type|allowed_type|file_type|custom_mime).*"
+      # WordPress's own 'upload_dir' filter callback shares this rule's
+      # generic "mutate array, return it" shape and its parameter is
+      # conventionally also matched by the function-name keyword regex
+      # above (contains "upload"), but its keys are directory-path
+      # metadata, not MIME-type entries — exclude the reserved upload_dir
+      # filter keys so this rule stays scoped to actual MIME-map mutation.
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: "(?i)^(?!['\"](basedir|baseurl|subdir|path|url|error)['\"]$).*"
+      # Well-established binary raster image formats have no known
+      # browser-side script-execution vector (unlike SVG, which is
+      # XML-based and can embed <script>/event-handler payloads) — adding
+      # them to the allowed-uploads list carries none of this rule's CWE-434
+      # concern regardless of how the callback is gated. Two further MIME
+      # values are excluded on the same no-active-content-interpretation
+      # basis: application/octet-stream is the generic "unknown binary"
+      # type — browsers never execute or MIME-sniff it as HTML/script,
+      # since it already signals "do not interpret" — and
+      # image/vnd.adobe.photoshop (PSD) is, like the raster formats above,
+      # a proprietary binary image format with no documented script vector.
+      # NOTE: text/plain, application/text, and application/json are
+      # intentionally NOT excluded here — text-based MIME types let an
+      # attacker fully control the byte content, which is a documented
+      # content-type-sniffing XSS vector when a site lacks
+      # X-Content-Type-Options: nosniff (see the confirmed TP case for
+      # 'json' => 'text/plain' in test-upload-mimes-dangerous-type.php).
+      # This risk is context-dependent (nosniff header, whether the file is
+      # ever directly navigated to) so it stays a manual-triage LOW/WARNING
+      # lead rather than an auto-suppressed FP.
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: "(?i)^(?!['\"](image/(heic|heif|webp|avif|jpeg|jpg|png|gif|bmp|tiff|x-icon|vnd\\.microsoft\\.icon|vnd\\.adobe\\.photoshop)|application/octet-stream)['\"]$).*"

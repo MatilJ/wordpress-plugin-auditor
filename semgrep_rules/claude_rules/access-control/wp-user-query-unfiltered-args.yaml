@@ -1,0 +1,76 @@
+rules:
+  - id: claude.php.wordpress.auth.wp-user-query-unfiltered-args
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      User-controlled data flows into WP_User_Query() without sanitizing the `fields`
+      argument (CWE-200). When `fields` is set to an array of column names such as
+      ['user_pass', 'user_email'], WP_User_Query::get_results() returns flat stdClass
+      objects instead of WP_User objects. Any post-query redaction that targets the
+      $user->data->* property path (valid for WP_User only) becomes a silent no-op,
+      exposing raw wp_users columns — including bcrypt/phpass password hashes — to the
+      caller. Fix: unset($args['fields']) or force $args['fields'] = 'all' before
+      passing to WP_User_Query; never accept arbitrary field selection from untrusted input.
+    metadata:
+      category: security
+      cwe: "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Sensitive Data Exposure"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/classes/wp_user_query/
+      # TRIAGE GUIDANCE:
+      #
+      # This rule fires when REST/GET/POST args flow to WP_User_Query() without
+      # the 'fields' key being restricted. Verify three things:
+      #
+      # 1. Is the 'fields' key removed or overwritten before the call?
+      #    If the code does `unset($args['fields'])` or `$args['fields'] = 'all'`
+      #    before `new WP_User_Query($args)`, this is a FP — the bypass is closed.
+      #
+      # 2. Does the post-query redaction use $user->data->* or $user->* directly?
+      #    Redaction via $user->data->user_pass ONLY works for WP_User objects.
+      #    When fields is a column array, results are stdClass with direct properties.
+      #    If the code instead uses `$user->user_pass`, it works for both cases.
+      #
+      # 3. Is the endpoint gated by manage_options / list_users?
+      #    If yes, the attacker must be an admin (PR:H) — out of scope for Wordfence.
+      #    Check the route's permission_callback.
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          # WP REST API request body — common in modern plugins
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: $REQUEST->get_body()
+    pattern-sanitizers:
+      - pattern-either:
+          # Numeric casts — cannot produce an array of column names
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: (bool) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          - pattern: sanitize_key(...)
+          # DB reads break false taint chains (returned data is not attacker-literal)
+          - pattern: $wpdb->get_results(...)
+          - pattern: $wpdb->get_row(...)
+          - pattern: $wpdb->get_var(...)
+          - pattern: $wpdb->get_col(...)
+          - pattern: get_option(...)
+          - pattern: get_post_meta(...)
+          - pattern: get_user_meta(...)
+          - pattern: get_transient(...)
+    pattern-sinks:
+      - pattern: new WP_User_Query($ARGS)

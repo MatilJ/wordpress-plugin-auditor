@@ -1,0 +1,67 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.request-param-sets-debug-flag
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A GET/REQUEST parameter sets a debug or verbose property on a class instance
+      without a capability check. Any visitor can enable the debug mode by appending
+      the parameter to any URL, potentially disclosing SQL queries, configuration
+      values, or internal state (CWE-200, CWE-862).
+
+      Guard debug flag activation with a capability check:
+        if (current_user_can('manage_options') && isset($_REQUEST['my_debug'])) {
+            $this->debug = true;
+        }
+    metadata:
+      category: security
+      cwe: "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Sensitive Data Exposure"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/data-validation/
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+    patterns:
+      - pattern-either:
+          # if (isset($_REQUEST['debug'])) { $this->debug = $VAL; }
+          # Uses pattern-inside + metavariable-pattern because PHP parser rejects
+          # isset() with subscripts as a top-level pattern. $X captures the LHS
+          # expression ($this->prop) and metavariable-regex checks the property name.
+          # Combined condition if (current_user_can() && isset()) is naturally excluded
+          # because the if condition is not a bare isset().
+          - patterns:
+              - pattern-inside: |
+                  if (isset($REQ)) {
+                    ...
+                  }
+              - pattern: $X = $VALUE;
+              - metavariable-pattern:
+                  metavariable: $REQ
+                  pattern-either:
+                    - pattern: $_REQUEST[...]
+                    - pattern: $_GET[...]
+              - metavariable-regex:
+                  metavariable: $X
+                  regex: "(?i)\\$this->(debug|verbose|log|trace|dev_mode|test_mode|profil)"
+          # $this->debug = isset($_REQUEST['debug']); (direct boolean assignment)
+          - patterns:
+              - pattern: $X = isset($_REQUEST[...]);
+              - metavariable-regex:
+                  metavariable: $X
+                  regex: "(?i)\\$this->(debug|verbose|log|trace|dev_mode|test_mode|profil)"
+          # $this->debug = !empty($_REQUEST['debug']);
+          - patterns:
+              - pattern: $X = !empty($_REQUEST[...]);
+              - metavariable-regex:
+                  metavariable: $X
+                  regex: "(?i)\\$this->(debug|verbose|log|trace|dev_mode|test_mode|profil)"
+          # $this->debug = !empty($_GET['debug']);
+          - patterns:
+              - pattern: $X = !empty($_GET[...]);
+              - metavariable-regex:
+                  metavariable: $X
+                  regex: "(?i)\\$this->(debug|verbose|log|trace|dev_mode|test_mode|profil)"

@@ -1,0 +1,104 @@
+rules:
+  - id: claude.php.wordpress.access-control.request-param-precedence-over-derived-owner-id
+    languages: [php]
+    severity: HIGH
+    message: |
+      A resource-ownership identifier used in an authorization decision
+      (enrollment, membership, ownership) is read from request input FIRST,
+      with the value that would normally be derived from the actual
+      content/object being accessed used only as a fallback when the request
+      parameter is absent (CWE-639 — Authorization Bypass Through
+      User-Controlled Key).
+
+      Because the request-controlled value takes precedence over the
+      correctly derived one, an attacker who legitimately owns / belongs to
+      resource A can substitute A's id in place of the real owning resource B
+      of the content actually being requested. The downstream
+      ownership/membership check then validates against A (where the
+      attacker is legitimate) instead of B (the resource actually being
+      accessed), granting access to B without the attacker ever owning or
+      being a member of B.
+
+      Pattern:
+        $id = $_GET['key'];             // or $_REQUEST, an input-sanitizer
+                                         // wrapper, filter_input(INPUT_GET),
+                                         // get_query_var(), etc.
+        if (! $id) {
+            $id = derive_from_actual_object(...);
+        }
+        ...
+        is_member($id, $user_id);       // or is_enrolled / has_access /
+                                         // can_access / is_owner / owns(...)
+
+      Fix: never let request input take precedence over a value derived from
+      the resource actually being accessed for an authorization decision.
+      Derive the owning resource id unconditionally from the object/content
+      id and drop the request-controlled override entirely. If an
+      intentional "view as" override is genuinely required, gate it behind
+      an explicit capability check on the current user before applying it.
+    metadata:
+      category: security
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Insecure Direct Object Reference (IDOR)"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/639.html
+        - https://owasp.org/www-project-top-ten/2021/A01_2021-Broken_Access_Control
+        - https://developer.wordpress.org/reference/functions/current_user_can/
+    patterns:
+      - pattern-either:
+          # The final line uses the `<... ... ...>` deep-expression operator so
+          # it matches the authorization call regardless of where it sits
+          # syntactically — a plain statement, a `return`, or (as in the real
+          # seeding case) one branch of a compound `if (A || B) { ... }`
+          # condition. A plain trailing-semicolon `$AUTHFUNC($RESOURCE_ID, ...);`
+          # form only matches a bare top-level call statement and misses both
+          # of those — confirmed empirically (semgrep 1.x). Bare-call and
+          # method-call are kept as separate pattern-either branches (rather
+          # than combined in one branch) because combining them in the same
+          # `patterns:` list caused metavariable-regex on $AUTHFUNC to stop
+          # matching the method-call shape — confirmed empirically; kept as
+          # two branches per falsy-check style avoids that.
+          - pattern: |
+              $RESOURCE_ID = $SOURCE;
+              if (! $RESOURCE_ID) {
+                $RESOURCE_ID = $DERIVE_EXPR;
+              }
+              ...
+              <... $AUTHFUNC($RESOURCE_ID, ...) ...>;
+          - pattern: |
+              $RESOURCE_ID = $SOURCE;
+              if (! $RESOURCE_ID) {
+                $RESOURCE_ID = $DERIVE_EXPR;
+              }
+              ...
+              <... $AUTHOBJ->$AUTHFUNC($RESOURCE_ID, ...) ...>;
+          - pattern: |
+              $RESOURCE_ID = $SOURCE;
+              if (empty($RESOURCE_ID)) {
+                $RESOURCE_ID = $DERIVE_EXPR;
+              }
+              ...
+              <... $AUTHFUNC($RESOURCE_ID, ...) ...>;
+          - pattern: |
+              $RESOURCE_ID = $SOURCE;
+              if (empty($RESOURCE_ID)) {
+                $RESOURCE_ID = $DERIVE_EXPR;
+              }
+              ...
+              <... $AUTHOBJ->$AUTHFUNC($RESOURCE_ID, ...) ...>;
+      - metavariable-regex:
+          metavariable: $SOURCE
+          regex: '.*(\$_GET\[|\$_REQUEST\[|Input::get\(|get_query_var\(|filter_input\(\s*INPUT_GET).*'
+      - metavariable-regex:
+          metavariable: $AUTHFUNC
+          regex: '(?i)^(is_enrolled|is_member|is_subscribed|has_access|has_permission|can_access|check_access|is_owner|owns|user_can_access|is_participant)$'
+      - pattern-not-inside: |
+          if (current_user_can($CAP)) {
+            ...
+          }

@@ -1,0 +1,20 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR}/hooks/audit-installs-hook.py\"",
+            "timeout": 5000
+          },
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR}/hooks/pattern-accumulator-hook.py\"",
+            "timeout": 10000
+          }
+        ]
+      }
+    ]
+  }
+}

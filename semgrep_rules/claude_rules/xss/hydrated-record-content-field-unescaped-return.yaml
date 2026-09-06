@@ -1,0 +1,156 @@
+rules:
+  - id: claude.php.wordpress.xss.hydrated-record-content-field-unescaped-return
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A record-formatting method rehydrates a stored/logged database row
+      inside a foreach loop — via array_map('maybe_unserialize', ...),
+      maybe_unserialize(), or unserialize() applied to the raw row — and
+      explicitly wraps one specific array key of that row in an escaping
+      function (htmlspecialchars()/esc_html()/esc_attr()/etc.) before the
+      formatted row is returned. No free-text content field of the SAME
+      record (subject/body/message/title/content/comment/note/description/
+      text — the fields a log/history/message viewer typically renders as
+      the bulk of the entry) receives the same treatment anywhere else in
+      the method.
+
+      Log/history viewers for email-sending, form-submission, webhook, and
+      messaging plugins commonly escape one recognizable field this way —
+      proving the author knows this data reaches an HTML/JS-rendering
+      context — while a sibling free-text field is left exactly as it came
+      out of the row (since it was never named explicitly, it silently
+      keeps the raw hydrated value). When that free-text field actually
+      originates from an unauthenticated or low-privileged source (mail
+      parameters captured from a wp_mail() interception, a public form
+      submission, a webhook payload) and the row is later returned to an
+      admin REST/AJAX log viewer, this omission is Stored XSS (CWE-79)
+      executed in the viewing administrator's session.
+
+      A second, structurally distinct shape: a foreach loop over a query
+      result set reassigns each row object through an extensibility hook
+      (`$row = apply_filters($hook, $row);`) — the standard WordPress idiom
+      for letting an add-on module attach extra properties to a log/report
+      row before it is displayed — then escapes exactly ONE named property
+      of that same row object (`$row->$field = esc_html($row->$field);`)
+      before the row collection is later serialized with a bare
+      `echo json_encode(...)`/`echo wp_json_encode(...)` (no esc_attr/
+      esc_html wrapper on the encode call itself). Because the hook can
+      attach any property name, and only the one hardcoded property is
+      escaped, any OTHER property present on the object — whether added by
+      the hook or already part of the query result — reaches the browser
+      unescaped. Client-side admin grids (DataTables and similar) render
+      JSON cell values as HTML by default, so this is Stored XSS in the
+      viewing administrator's session, with the attacker-controlled
+      property populated by whatever wrote the extra data through the hook
+      or into the underlying table.
+
+      TRIAGE: confirm (1) at least one content-like field of this record
+      genuinely originates from an unauthenticated/low-privileged source,
+      not admin-authored configuration, and (2) the returned/echoed row is
+      consumed by a REST/AJAX admin viewer that renders that field as raw
+      HTML rather than through a safe DOM method (React text node,
+      textContent, a client-side escaping helper). For the second shape,
+      also confirm the hook or table genuinely allows a property other than
+      the one hardcoded escape target to be populated with attacker-
+      influenced data.
+
+      Fix: apply the same escaping function used for the already-escaped
+      field to every free-text field of the row before it is returned, or
+      (second shape) guard-and-escape every additional property the hook
+      may attach — e.g. `if ( isset( $row->$field ) ) { $row->$field =
+      esc_html( $row->$field ); }` — before the bare JSON echo.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS) — Stored"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/escaping/
+        - https://cwe.mitre.org/data/definitions/79.html
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/vendor-prefixed/**"
+        - "**/node_modules/**"
+        - "**/freemius/**"
+    patterns:
+      - pattern-either:
+          - patterns:
+              # Form 1: array-key row rehydrated via unserialize/array_map.
+              - pattern-either:
+                  - pattern: $ARR[$KEY][$HDRFIELD] = $SANFUNC($ARR[$KEY][$HDRFIELD]);
+                  - pattern: $ARR[$KEY][$HDRFIELD] = $SANFUNC($ARR[$KEY][$HDRFIELD], $...ARGS);
+              - metavariable-regex:
+                  metavariable: $SANFUNC
+                  regex: "(?i)^(htmlspecialchars|htmlentities|esc_html|esc_attr|esc_html__|esc_attr__|wp_kses|wp_kses_post|wp_strip_all_tags)$"
+              - pattern-inside: |
+                  function $METHOD(...) {
+                    ...
+                    foreach ($SRC as $ROWKEY => $ROW) {
+                      ...
+                      $ARR[$ROWKEY] = $HYDRATEFN($...HARGS);
+                      ...
+                    }
+                    ...
+                  }
+              - metavariable-regex:
+                  metavariable: $HYDRATEFN
+                  regex: "(?i)^(array_map|maybe_unserialize|unserialize)$"
+          - patterns:
+              # Form 2: row OBJECT reassigned through an extensibility hook
+              # (apply_filters), one named property escaped, collection later
+              # bare-echoed as JSON — any other/hook-added property is unescaped.
+              - pattern: $ROW->$FIELD = $SANFUNC($ROW->$FIELD);
+              - metavariable-regex:
+                  metavariable: $SANFUNC
+                  regex: "(?i)^(htmlspecialchars|htmlentities|esc_html|esc_attr|esc_html__|esc_attr__|wp_kses|wp_kses_post|wp_strip_all_tags)$"
+              - pattern-inside: |
+                  function $METHOD(...) {
+                    ...
+                    foreach ($SRC as $ROW) {
+                      ...
+                      $ROW = apply_filters($HOOK, $ROW, ...);
+                      ...
+                    }
+                    ...
+                    echo $JSONFUNC($JSONARG);
+                    ...
+                  }
+              - metavariable-regex:
+                  metavariable: $JSONFUNC
+                  regex: "(?i)^(json_encode|wp_json_encode)$"
+              - pattern-not-inside: |
+                  function $METHOD(...) {
+                    ...
+                    if ( isset( $ROW2->$OTHERFIELD ) ) {
+                      $ROW2->$OTHERFIELD = $SANFUNC3( $ROW2->$OTHERFIELD );
+                    }
+                    ...
+                  }
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $METHOD(...) {
+                  ...
+                  $ARR2[$KEY2][$CONTFIELD] = $SANFUNC2($ARR2[$KEY2][$CONTFIELD]);
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $CONTFIELD
+                regex: "(?i)^['\"]?(subject|body|message|title|content|comment|note|description|text)['\"]?$"
+      - pattern-not-inside:
+          patterns:
+            - pattern: |
+                function $METHOD(...) {
+                  ...
+                  $ARR2[$KEY2][$CONTFIELD] = $SANFUNC2($ARR2[$KEY2][$CONTFIELD], $...ARGS2);
+                  ...
+                }
+            - metavariable-regex:
+                metavariable: $CONTFIELD
+                regex: "(?i)^['\"]?(subject|body|message|title|content|comment|note|description|text)['\"]?$"

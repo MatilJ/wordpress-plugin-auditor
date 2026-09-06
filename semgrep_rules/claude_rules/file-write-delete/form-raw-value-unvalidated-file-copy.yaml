@@ -1,0 +1,81 @@
+rules:
+  - id: claude.php.wordpress.file-write-delete.form-raw-value-unvalidated-file-copy
+    languages: [php]
+    severity: HIGH
+    message: |
+      A form field's raw submitted value ('raw_value' — the generic,
+      unvalidated representation some third-party form-builder submission
+      APIs expose alongside a separate, distinct accessor for legitimately
+      uploaded files) is stored as the path for a field the code treats as
+      an upload/file type, gated only by a string check on the field's
+      declared type. No file needs to exist in $_FILES for 'raw_value' to
+      be populated — an attacker can submit that field as ordinary text and
+      have an arbitrary local path accepted as if it were a real uploaded
+      file's path (CWE-22 / CWE-73). If this value later reaches copy(),
+      rename(), file_get_contents(), or an include/require, this becomes an
+      arbitrary file read/copy/inclusion primitive.
+
+      TRIAGE:
+        1. Confirm 'raw_value' (or an equivalent generic/raw field accessor)
+           is used here rather than a dedicated validated-upload accessor.
+        2. Confirm no isset() check against a separate uploaded-files
+           structure (a parallel array/method keyed by field id exposing a
+           'path'/'tmp_name'/'file' sub-key) gates the assignment.
+        3. Trace where the stored value is used later — a filesystem
+           read/copy/write/include sink, or a DB write later rendered as a
+           download link, raises impact to file read/copy/traversal.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+        - "CWE-73: External Control of File Name or Path"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Arbitrary File Copy"
+      technology: [php, wordpress]
+      references:
+        - "https://cwe.mitre.org/data/definitions/22.html"
+        - "https://cwe.mitre.org/data/definitions/73.html"
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $VAL = $FIELD['raw_value'];
+              if (<... 'upload' ...>) {
+                ...
+                $UPLOADS[$K] = $VAL;
+                ...
+              }
+          - pattern: |
+              $VAL = $FIELD['raw_value'];
+              if (<... "upload" ...>) {
+                ...
+                $UPLOADS[$K] = $VAL;
+                ...
+              }
+          - pattern: |
+              $VAL = $FIELD['raw_value'];
+              if (<... 'file' ...>) {
+                ...
+                $UPLOADS[$K] = $VAL;
+                ...
+              }
+          - pattern: |
+              $VAL = $FIELD['raw_value'];
+              if (<... "file" ...>) {
+                ...
+                $UPLOADS[$K] = $VAL;
+                ...
+              }
+      - pattern-not-inside: |
+          function $FN(...) {
+            ...
+            isset($FILEREC['path']);
+            ...
+          }

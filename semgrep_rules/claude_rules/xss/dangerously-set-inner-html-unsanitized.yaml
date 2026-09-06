@@ -1,0 +1,78 @@
+rules:
+  - id: claude.js.wordpress.xss.dangerously-set-inner-html-unsanitized
+    languages: [js, typescript]
+    severity: MEDIUM
+    message: |
+      dangerouslySetInnerHTML (React/Preact) is assigned a raw expression
+      that is not the result of a sanitizer call (CWE-79). The __html value
+      is injected into the DOM as literal markup — any HTML/script the
+      value contains executes verbatim in the viewer's browser. If the
+      value originates from stored or otherwise user-controlled data (a
+      submitted form/field value, comment, post meta, or any server-
+      returned record rendered in an admin or front-end screen), this is a
+      stored or DOM-based XSS sink.
+
+      TRIAGE:
+        - Safe if the value is wrapped in a sanitizer call (e.g.
+          DOMPurify.sanitize(), or any call/method whose name contains
+          sanitize/purify/clean/escape).
+        - A conditional gate that only tests whether the value "looks like
+          HTML" (e.g. a regex test for a tag) does not neutralize it — the
+          gate selects for HTML-bearing input, it does not strip or escape
+          it.
+        - A fixed string literal with no interpolation is not user data —
+          not a finding.
+        - Confirm the value's origin (props/state/API response) before
+          reporting; a value proven to be static plugin-authored content is
+          not attacker-controlled.
+
+      Fix: sanitize the value (e.g. DOMPurify.sanitize(value)) before
+      assigning it to dangerouslySetInnerHTML, or render the field as plain
+      text instead of raw HTML.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [javascript, react, wordpress]
+      references:
+        - https://cheatsheetseries.owasp.org/cheatsheets/DOM_based_XSS_Prevention_Cheat_Sheet.html
+        - https://owasp.org/www-community/attacks/xss/
+    paths:
+      exclude:
+        - "**/node_modules/**"
+        - "**/vendor/**"
+    pattern-either:
+      # Form A: JSX, self-closing element.
+      - patterns:
+          - pattern: '<$EL dangerouslySetInnerHTML={{__html: $VAL}} />'
+          - pattern-not:
+              patterns:
+                - pattern: '<$EL dangerouslySetInnerHTML={{__html: $SAN(...)}} />'
+                - metavariable-regex:
+                    metavariable: $SAN
+                    regex: "(?i).*(saniti|purify|clean|escape).*"
+      # Form B: JSX, element with an explicit closing tag.
+      - patterns:
+          - pattern: '<$EL dangerouslySetInnerHTML={{__html: $VAL}}></$EL>'
+          - pattern-not:
+              patterns:
+                - pattern: '<$EL dangerouslySetInnerHTML={{__html: $SAN(...)}}></$EL>'
+                - metavariable-regex:
+                    metavariable: $SAN
+                    regex: "(?i).*(saniti|purify|clean|escape).*"
+      # Form C: transpiled/plain object-literal form, e.g. React.createElement(
+      # $TAG, {dangerouslySetInnerHTML: {__html: $VAL}, ...}) — matches the
+      # object property regardless of surrounding call/object shape.
+      - patterns:
+          - pattern: 'dangerouslySetInnerHTML: {__html: $VAL}'
+          - pattern-not:
+              patterns:
+                - pattern: 'dangerouslySetInnerHTML: {__html: $SAN(...)}'
+                - metavariable-regex:
+                    metavariable: $SAN
+                    regex: "(?i).*(saniti|purify|clean|escape).*"

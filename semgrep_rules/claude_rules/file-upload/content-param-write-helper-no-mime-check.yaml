@@ -1,0 +1,160 @@
+rules:
+  - id: claude.php.wordpress.file-upload.content-param-write-helper-no-mime-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      A private/protected helper method whose own two parameters ARE the
+      raw content and the destination path persists them to disk via
+      file_put_contents(), with no content-type validation call anywhere
+      in the enclosing class (CWE-434). This is distinct from a filename-
+      extension bypass: the destination extension can be entirely fixed/
+      hardcoded by the caller, and no filename is derived or sanitized at
+      all — the vulnerable step is that the raw BYTES being persisted are
+      never confirmed to actually be the expected content type (e.g. a
+      real JPEG/PNG) before the write. The decode step (typically
+      base64_decode() of request data) and the eventual write are commonly
+      split across one or more intermediate delegate-method calls within
+      the same class (e.g. save() -> store() -> writeFile()), so when the
+      plugin performs a content-type check at all, it usually lives in a
+      sibling/caller method rather than inside this low-level write helper
+      itself — a function-scoped guard would never see it. An attacker-
+      supplied payload can be persisted under a trusted-looking, fixed-
+      extension name for later abuse: image-library exploitation (e.g. a
+      crafted GD/Imagick input), an LFI-chained execution primitive, or
+      simple stored-content spoofing under an expected asset path.
+
+      Add a real content-type check (mime_content_type(), finfo_file(),
+      getimagesize(), exif_imagetype(), or wp_check_filetype()/
+      wp_check_filetype_and_ext()) that runs before the write and aborts
+      on mismatch — either inside the write helper itself, or in every
+      caller before the helper is invoked.
+
+      TRIAGE:
+        1. Confirm the content parameter traces back to attacker-supplied
+           request data (directly, or via a base64_decode()/data-URI
+           payload) rather than developer-generated content.
+        2. Confirm no content-type validation call exists ANYWHERE in the
+           enclosing class — a check present in an unrelated method of a
+           large, multi-purpose class is a reason to dismiss only if it
+           demonstrably runs on the same call path before this helper
+           executes.
+        3. Confirm the destination directory is web-accessible.
+        4. Determine the auth level required to reach the calling code path.
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/434.html
+        - https://developer.wordpress.org/reference/functions/wp_check_filetype_and_ext/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"
+    patterns:
+      - pattern-inside: |
+          class $CLASS {
+            ...
+          }
+      - pattern-inside: |
+          function $FN($CONTENT, $DST) {
+            ...
+          }
+      - pattern: file_put_contents($DST, $CONTENT)
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $M(...) {
+              ...
+              mime_content_type(...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $M(...) {
+              ...
+              finfo_file(...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $M(...) {
+              ...
+              new finfo(...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $M(...) {
+              ...
+              getimagesize(...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $M(...) {
+              ...
+              exif_imagetype(...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $M(...) {
+              ...
+              wp_check_filetype(...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $M(...) {
+              ...
+              wp_check_filetype_and_ext(...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $M(...) {
+              ...
+              wp_handle_upload(...);
+              ...
+            }
+            ...
+          }
+      - pattern-not-inside: |
+          class $CLASS {
+            ...
+            function $M(...) {
+              ...
+              wp_handle_sideload(...);
+              ...
+            }
+            ...
+          }

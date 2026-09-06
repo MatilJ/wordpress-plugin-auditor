@@ -1,0 +1,53 @@
+rules:
+  - id: claude.php.wordpress.access-control.user-input-to-account-state-meta
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      Privilege escalation via user-controlled key (CWE-639): user-controlled input flows
+      into the VALUE written to update_user_meta() or update_option() under a KEY that
+      governs account state (membership / plan / tier / subscription / account type /
+      verification / approval / active status / marketplace vendor-selling status). A
+      user who reaches this handler can self-assign a privileged account state — upgrade
+      their plan, mark their own email verified, approve or activate their account, or
+      flip themselves into an already-enabled marketplace seller/vendor state — without
+      server-side validation of the transition. Integer casts (intval/absint) do NOT
+      neutralize this: the attacker still chooses the value. Derive the state from a
+      server-validated source and gate the change with a capability check, not a
+      client-supplied value.
+
+      TRIAGE: Confirm the handler is reachable by an unauthenticated or low-privilege
+      user and that the key actually governs access/account state (not a cosmetic
+      preference). The wp_capabilities key and set_role()/add_cap() sinks are covered by
+      separate access-control rules.
+    metadata:
+      category: security
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Privilege Escalation"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/639.html
+        - https://cwe.mitre.org/data/definitions/841.html
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: update_user_meta($U, $KEY, $SINK, ...)
+              - pattern: update_option($KEY, $SINK, ...)
+          - focus-metavariable: $SINK
+          # KEY must name an account-state field; excludes wp_capabilities and cosmetic meta.
+          - metavariable-regex:
+              metavariable: $KEY
+              regex: (?i)['\"].*(membership|subscription|\bplan\b|\btier\b|account[_-]?type|user[_-]?type|account[_-]?status|email[_-]?verified|is[_-]?verified|email[_-]?confirmed|is[_-]?approved|is[_-]?active|activated|approval|upgrade|premium|pro[_-]?status|user[_-]?level|access[_-]?level|enable[_-]?selling|selling[_-]?enabled|is[_-]?vendor|vendor[_-]?status|vendor[_-]?enabled|seller[_-]?status).*['\"]

@@ -1,0 +1,148 @@
+rules:
+  - id: claude.php.wordpress.file-upload.wp-remote-get-to-file-write
+    languages: [php]
+    severity: HIGH
+    message: |
+      Data fetched via wp_remote_get(), wp_remote_post(), or the raw PHP
+      URL-fopen wrapper file_get_contents($url) is written to disk via
+      file_put_contents() without file type or content validation
+      (CWE-434). This shape is common in "import from remote URL" loops
+      (feed/MLS/IDX importers, remote-image sideloaders): a destination
+      extension is often derived from the source URL string itself (e.g.
+      pathinfo($url, PATHINFO_EXTENSION)) rather than from the fetched
+      bytes, so a URL ending in .php yields a .php file on disk regardless
+      of what was actually downloaded. If the source URL or destination
+      path is influenced by user input, an attacker can cause a PHP file
+      to be saved in a web-accessible directory, enabling Remote Code
+      Execution.
+
+      Use download_url() + wp_handle_sideload() instead (which validates
+      MIME types internally), or validate the actual fetched content
+      (getimagesizefromstring(), wp_check_filetype(),
+      wp_check_filetype_and_ext()) and derive the extension from that
+      verified type before writing — never from the source URL string.
+
+      TRIAGE:
+        1. Is the URL user-controlled? Check $_POST/$_GET/REST params
+           or options writable by low-privilege users.
+        2. Is the destination filename user-influenced?
+        3. Is the destination in a web-accessible directory?
+        4. Is the function reachable by unauthenticated or low-priv users?
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_remote_get/
+        - https://developer.wordpress.org/reference/functions/download_url/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+    patterns:
+      - pattern-either:
+          # wp_remote_get → wp_remote_retrieve_body → file_put_contents
+          - pattern: |
+              $RESPONSE = wp_remote_get(...);
+              ...
+              file_put_contents($PATH, wp_remote_retrieve_body($RESPONSE));
+          - pattern: |
+              $RESPONSE = wp_remote_post(...);
+              ...
+              file_put_contents($PATH, wp_remote_retrieve_body($RESPONSE));
+          # Intermediate body variable
+          - pattern: |
+              $RESPONSE = wp_remote_get(...);
+              ...
+              $BODY = wp_remote_retrieve_body($RESPONSE);
+              ...
+              file_put_contents($PATH, $BODY);
+          - pattern: |
+              $RESPONSE = wp_remote_post(...);
+              ...
+              $BODY = wp_remote_retrieve_body($RESPONSE);
+              ...
+              file_put_contents($PATH, $BODY);
+          # Direct array access on response body
+          - pattern: |
+              $RESPONSE = wp_remote_get(...);
+              ...
+              file_put_contents($PATH, $RESPONSE['body']);
+          - pattern: |
+              $RESPONSE = wp_remote_post(...);
+              ...
+              file_put_contents($PATH, $RESPONSE['body']);
+          # Raw PHP URL-fopen wrapper used as the remote-fetch primitive instead
+          # of wp_remote_get() — same class, common in pre-WP-HTTP-API import
+          # loops (e.g. an MLS/IDX feed importer downloading listing images).
+          - pattern: |
+              file_put_contents($PATH, file_get_contents($URL));
+          - pattern: |
+              $BODY = file_get_contents($URL);
+              ...
+              file_put_contents($PATH, $BODY);
+      # Suppress when type check appears between fetch and write
+      - pattern-not: |
+          $RESPONSE = wp_remote_get(...);
+          ...
+          wp_check_filetype(...);
+          ...
+          file_put_contents($PATH, ...);
+      - pattern-not: |
+          $RESPONSE = wp_remote_get(...);
+          ...
+          wp_check_filetype_and_ext(...);
+          ...
+          file_put_contents($PATH, ...);
+      - pattern-not: |
+          $RESPONSE = wp_remote_post(...);
+          ...
+          wp_check_filetype(...);
+          ...
+          file_put_contents($PATH, ...);
+      - pattern-not: |
+          $RESPONSE = wp_remote_post(...);
+          ...
+          wp_check_filetype_and_ext(...);
+          ...
+          file_put_contents($PATH, ...);
+      # Suppress the file_get_contents($URL) arm once the fetched bytes are
+      # validated before the write — getimagesizefromstring() is the exact
+      # neutralizer the CVE-2026-16236 fix used (derive the extension from
+      # the verified image type instead of the source URL string).
+      - pattern-not: |
+          $BODY = file_get_contents($URL);
+          ...
+          getimagesizefromstring($BODY);
+          ...
+          file_put_contents($PATH, ...);
+      - pattern-not: |
+          $BODY = file_get_contents($URL);
+          ...
+          wp_check_filetype(...);
+          ...
+          file_put_contents($PATH, ...);
+      - pattern-not: |
+          $BODY = file_get_contents($URL);
+          ...
+          wp_check_filetype_and_ext(...);
+          ...
+          file_put_contents($PATH, ...);
+      - pattern-not: |
+          $BODY = file_get_contents($URL);
+          ...
+          getimagesize(...);
+          ...
+          file_put_contents($PATH, ...);
+      - pattern-not: |
+          $BODY = file_get_contents($URL);
+          ...
+          exif_imagetype(...);
+          ...
+          file_put_contents($PATH, ...);

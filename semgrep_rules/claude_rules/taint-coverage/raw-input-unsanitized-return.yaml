@@ -1,0 +1,123 @@
+rules:
+  - id: claude.php.wordpress.taint-coverage.raw-input-unsanitized-return
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A function or method returns raw request input ($_GET/$_POST/$_REQUEST/
+      $_COOKIE/$_SERVER/filter_input()) without passing it through a
+      recognized sanitizer first.
+
+      This rule exists to compensate for a structural gap in taint-mode
+      source detection: Semgrep's taint engine is intraprocedural by
+      default and does not treat a helper/getter function's return value
+      as tainted in its callers. Any rule using $_GET/$_POST/filter_input(...)
+      as a source will silently miss a vulnerability whose only path to a
+      dangerous sink (shell_exec, echo, $wpdb->query, include/require,
+      wp_remote_get, etc.) runs through this function's return value rather
+      than a direct read at the point of use. Manually trace every call site
+      of the flagged function to the eventual sink and apply the
+      context-appropriate escaping/validation there (escapeshellarg() for
+      shell commands, esc_html()/esc_attr()/esc_url() for HTML output,
+      $wpdb->prepare() for SQL, realpath()+containment check for file paths).
+    metadata:
+      category: security
+      cwe: "CWE-20: Improper Input Validation"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Taint Tracking Coverage Gap"
+      technology: [php, wordpress]
+      references:
+        - https://semgrep.dev/docs/writing-rules/data-flow/taint-mode
+        - https://cwe.mitre.org/data/definitions/20.html
+    # Bundled third-party libraries' own internal request/environment plumbing
+    # (e.g. a bundled HTTP/process-building library reading $_SERVER/$_ENV to
+    # construct its own internal objects) is not a plugin-authored sink path —
+    # same bundled-library FP class already established for other rules in
+    # this corpus (is-callable-dynamic-call, block-attribute-string-concat-tag-name).
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/libs/**"
+        - "**/Libs/**"
+        - "**/node_modules/**"
+        - "**/freemius/**"
+        - "**/PHPSecLib/**"
+        - "**/phpseclib/**"
+        - "**/Symfony/**"
+        - "**/Monolog/**"
+      # TRIAGE GUIDANCE:
+      #
+      # This is a LEAD generator, not a confirmed vulnerability. A hit means:
+      # "this function's return value is raw/unsanitized request data — go
+      # find every caller and check what sink it eventually reaches."
+      #
+      # FALSE POSITIVE — the function is a low-level accessor whose callers
+      # are already known/audited to sanitize immediately:
+      #   function get_raw_param() { return $_GET['x']; }
+      #   // every caller does: esc_html(get_raw_param())
+      #   → still technically a hit (this rule cannot see caller-side
+      #   sanitization), but downgrade to non-issue once callers are traced.
+      #
+      # TRUE LEAD — flagged function's return value is used, in some caller,
+      # without escaping before a sink (this is exactly the pattern that
+      # caused a missed unauthenticated RCE finding in one audit: a private
+      # getArchiveFilePath()-style method wrapped filter_input(INPUT_GET, ...)
+      # and returned it; the caller passed the result into a second method
+      # that built a shell command string from it with no escaping — none of
+      # the standard taint-mode rules connected source to sink across the
+      # three-method hop).
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: filter_input(...)
+    pattern-sinks:
+      - pattern: return $X;
+    pattern-sanitizers:
+      - pattern-either:
+          # Shell-context sanitizers
+          - pattern: escapeshellarg(...)
+          - pattern: escapeshellcmd(...)
+          # HTML/JS output escapers
+          - pattern: esc_html(...)
+          - pattern: esc_attr(...)
+          - pattern: esc_url(...)
+          - pattern: esc_url_raw(...)
+          - pattern: esc_js(...)
+          - pattern: esc_textarea(...)
+          - pattern: wp_kses(...)
+          - pattern: wp_kses_post(...)
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          - pattern: wp_json_encode(...)
+          - pattern: json_encode(...)
+          # SQL-context sanitizer
+          - pattern: $WPDB->prepare(...)
+          # Path/filename sanitizers
+          - pattern: sanitize_file_name(...)
+          - pattern: sanitize_key(...)
+          - pattern: sanitize_title(...)
+          - pattern: sanitize_html_class(...)
+          - pattern: sanitize_mime_type(...)
+          - pattern: realpath(...)
+          - pattern: basename(...)
+          # General WP text sanitizers
+          - pattern: sanitize_text_field(...)
+          - pattern: sanitize_textarea_field(...)
+          - pattern: sanitize_email(...)
+          - pattern: sanitize_user(...)
+          - pattern: strip_tags(...)
+          - pattern: wp_strip_all_tags(...)
+          # Numeric casts (no injection-relevant characters possible)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)

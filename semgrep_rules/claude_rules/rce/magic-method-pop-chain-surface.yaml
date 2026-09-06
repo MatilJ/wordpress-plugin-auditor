@@ -1,0 +1,76 @@
+rules:
+  - id: claude.php.wordpress.rce.magic-method-pop-chain-surface
+    languages: [php]
+    severity: INFO
+    message: |
+      __destruct, __wakeup, or __unserialize method definition detected.
+      __destruct and __wakeup are primary POP chain entry points — PHP
+      invokes them automatically during deserialization. __unserialize
+      (PHP 7.4+) takes PRIORITY over __wakeup — if a class defines both,
+      __wakeup is completely ignored. When an unserialize() sink exists
+      in the same codebase, review the method body for file operations,
+      code execution, or database writes that could be triggered via PHP
+      Object Injection (CWE-502).
+    metadata:
+      category: security
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+      owasp: "A08:2021 - Software and Data Integrity Failures"
+      confidence: LOW
+      likelihood: LOW
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Insecure Deserialization"
+      technology: [php, wordpress]
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function __destruct() { ... }
+          - pattern: |
+              function __wakeup() { ... }
+          - pattern: |
+              function __unserialize($DATA) { ... }
+      # A truly empty body is a no-op — it cannot execute gadget logic regardless
+      # of what unserialize() surface exists elsewhere (common defensive pattern
+      # to disable the magic method entirely, e.g. on a singleton).
+      - pattern-not: |
+          function __destruct() { }
+      - pattern-not: |
+          function __wakeup() { }
+      - pattern-not: |
+          function __unserialize($DATA) { }
+  - id: claude.php.wordpress.rce.magic-method-pop-chain-intermediate
+    languages: [php]
+    severity: INFO
+    message: |
+      __toString or __call method definition detected. These are NOT
+      auto-invoked during deserialization, but serve as intermediate POP
+      chain gadgets: __destruct on a crafted object operates on a
+      controllable property, triggering __toString (via string context)
+      or __call (via non-existent method call) on a different class.
+      Relevant only when an unserialize() sink AND a __destruct/__wakeup
+      entry point already exist in the codebase.
+    metadata:
+      category: security
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+      owasp: "A08:2021 - Software and Data Integrity Failures"
+      confidence: LOW
+      likelihood: LOW
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Insecure Deserialization"
+      technology: [php, wordpress]
+    patterns:
+      - pattern-either:
+          - pattern: |
+              function __toString() { ... }
+          - pattern: |
+              function __call($NAME, $ARGS) { ... }
+      # A single-statement cast-and-return body (the overwhelmingly common
+      # __toString() shape for a value-object wrapper class) makes no method
+      # call, property write, or other side effect — it cannot itself act as
+      # a POP-chain gadget step regardless of what other classes exist in the
+      # same codebase, so it is excluded the same way a truly-empty body is.
+      - pattern-not: |
+          function __toString() {
+            return (string) $THIS->$PROP;
+          }

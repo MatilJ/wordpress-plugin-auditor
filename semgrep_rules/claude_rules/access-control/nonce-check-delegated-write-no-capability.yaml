@@ -1,0 +1,176 @@
+# NOTE: join mode requires `semgrep login`. Do NOT run with --oss-only.
+# Join mode is memory-intensive; run on one plugin at a time.
+
+rules:
+  # Closes the "Known miss — delegated writes" gap documented in
+  # claude.php.wordpress.auth.nonce-without-capability-check: that rule only
+  # fires when the write sink appears DIRECTLY in the same function body as the
+  # nonce check. When the nonce-checking function instead delegates to a single
+  # instance method that performs the write, neither the single-function rule
+  # nor the write-sink line individually complete the CWE-862 picture — this
+  # join rule correlates the two across the delegation boundary.
+  - id: claude.php.wordpress.access-control.nonce-check-delegated-write-no-capability
+    mode: join
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A function verifies a nonce (wp_verify_nonce / check_ajax_referer /
+      check_admin_referer) with no current_user_can() check of its own, then
+      delegates to a same-class instance method ($this->method()) whose body
+      performs a state-changing write (update_option, $wpdb write, post/user/
+      term/comment deletion, transient write, outbound HTTP request forwarding
+      stored credentials, etc.) — and that delegated method also has no
+      current_user_can() check of its own. The nonce confirms request intent
+      (CSRF protection) only; it does not establish the caller's privilege
+      level. Any user who can obtain the nonce can trigger the write regardless
+      of role (CWE-862).
+
+      TRIAGE REQUIRED:
+      1. Confirm the outer function is reachable by an authenticated role lower
+         than the capability the write should require (e.g. the nonce is
+         embedded in a widget/page requiring only the 'read' capability, which
+         every authenticated role including Subscriber holds).
+      2. Confirm the delegated method is not itself gated by a capability check
+         performed by a DIFFERENT caller path — this rule only proves the
+         specific call reached from the nonce-checking function is ungated.
+      3. Method-name collisions: if the file defines two unrelated classes that
+         happen to share a method name, the join key (file path + method name)
+         can pair an unrelated nonce check with an unrelated write. Confirm both
+         matched locations belong to the same class before reporting.
+
+      Remediation: add current_user_can('appropriate_capability') immediately
+      after the nonce check in the outer function, or inside the delegated
+      method itself so every caller inherits the gate.
+    join:
+      rules:
+        # Split into two independently-anchored sub-rules (nonce-check,
+        # delegate-call) rather than one combined pattern: PHP's statement-
+        # sequence "..." does not descend into nested if-blocks, so a nonce
+        # check or delegate call sitting inside an `if (isset(...)) { if
+        # (nonce-check) { ... } }` guard (a common WP idiom for handling a
+        # manual-refresh POST inside a hook callback) would be invisible to a
+        # single flat "function { ... X; ... }" template. Anchoring each on
+        # its own bare expression pattern instead makes the match
+        # nesting-depth-agnostic; the join on $OUTER recombines them.
+        - id: nonce-check
+          languages: [php]
+          patterns:
+            - pattern-either:
+                - pattern: wp_verify_nonce(...)
+                - pattern: check_ajax_referer(...)
+                - pattern: check_admin_referer(...)
+            - pattern-inside: |
+                function $OUTER(...) {
+                  ...
+                }
+            - pattern-not-inside: |
+                function $OUTER(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $OUTER(...) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+
+        - id: delegate-call
+          languages: [php]
+          patterns:
+            - pattern: $this->$INNER(...)
+            - pattern-inside: |
+                function $OUTER(...) {
+                  ...
+                }
+
+        - id: delegate-write-no-cap
+          languages: [php]
+          patterns:
+            - pattern-inside: |
+                function $INNER(...) {
+                  ...
+                }
+            - pattern-either:
+                - pattern: $wpdb->insert(...)
+                - pattern: $wpdb->update(...)
+                - pattern: $wpdb->replace(...)
+                - pattern: $wpdb->delete(...)
+                - pattern: update_post_meta(...)
+                - pattern: update_user_meta(...)
+                - pattern: update_option(...)
+                - pattern: update_site_option(...)
+                - pattern: wp_delete_attachment(...)
+                - pattern: wp_delete_post(...)
+                - pattern: unlink(...)
+                - pattern: wp_delete_user(...)
+                - pattern: wp_delete_term(...)
+                - pattern: wp_delete_comment(...)
+                - pattern: set_site_transient(...)
+                - pattern: set_transient(...)
+                - pattern: wp_insert_post(...)
+                - pattern: wp_update_post(...)
+                - pattern: wp_schedule_event(...)
+                - pattern: wp_schedule_single_event(...)
+                - pattern: wp_insert_user(...)
+                - pattern: wp_update_user(...)
+                - pattern: delete_option(...)
+                - pattern: wp_remote_post(...)
+                - pattern: wp_remote_get(...)
+                - pattern: wp_remote_request(...)
+                - pattern: wp_safe_remote_post(...)
+                - pattern: wp_safe_remote_get(...)
+            - pattern-not-inside: |
+                function $INNER(...) {
+                  ...
+                  current_user_can(...);
+                  ...
+                }
+            - pattern-not-inside: |
+                function $INNER(...) {
+                  ...
+                  if (<... current_user_can(...) ...>) {
+                    ...
+                  }
+                  ...
+                }
+            # Self-scoped boolean-flag write: the target is the acting user's own
+            # meta (get_current_user_id(), not a request-derived ID) and the stored
+            # value is a literal true/false, not an attacker-influenced payload — the
+            # common "hide/dismiss this notice for me" idiom. No cross-user victim
+            # exists and no capability-bearing value can be carried by a boolean
+            # literal, so CWE-862's "any user can affect another user's data"
+            # precondition does not hold regardless of the missing capability check.
+            - pattern-not: update_user_meta(get_current_user_id(), $KEY, true)
+            - pattern-not: update_user_meta(get_current_user_id(), $KEY, false)
+
+      on:
+        - 'nonce-check.path == delegate-call.path'
+        - 'nonce-check.$OUTER == delegate-call.$OUTER'
+        - 'delegate-call.path == delegate-write-no-cap.path'
+        - 'delegate-call.$INNER == delegate-write-no-cap.$INNER'
+
+    paths:
+      exclude:
+        - "**/freemius/**"
+        - "**/vendor/**"
+        - "**/node_modules/**"
+
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/862.html
+        - https://developer.wordpress.org/apis/security/nonces/
+        - https://developer.wordpress.org/apis/security/user-capabilities-and-roles/
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/

@@ -1,0 +1,53 @@
+rules:
+  - id: claude.php.wordpress.rce.eval-user-input
+    mode: taint
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      User-controlled input flows into eval() or assert() with a string expression.
+      This is a direct remote code execution vulnerability (CWE-94).
+      Refactor to avoid passing any dynamic content to eval()/assert().
+    metadata:
+      category: security
+      cwe: "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Code Injection"
+      technology: [php, wordpress]
+      references:
+        - https://www.php.net/manual/en/function.eval.php
+        - https://developer.wordpress.org/apis/security/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: $_FILES
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+    pattern-sanitizers:
+      - pattern-either:
+          # Integer/float casts cannot produce executable PHP code
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          # sanitize_key() output is [a-z0-9_-] only — cannot form meaningful
+          # PHP code (no quotes, parens, semicolons, operators)
+          - pattern: sanitize_key(...)
+          # sanitize_title() → [a-z0-9%-_] — cannot form PHP code
+          - pattern: sanitize_title(...)
+          # sanitize_html_class() → [A-Za-z0-9_-] — cannot form PHP code
+          - pattern: sanitize_html_class(...)
+          # sanitize_file_name() → [a-zA-Z0-9._-] — cannot form PHP code
+          - pattern: sanitize_file_name(...)
+    pattern-sinks:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: assert($X)

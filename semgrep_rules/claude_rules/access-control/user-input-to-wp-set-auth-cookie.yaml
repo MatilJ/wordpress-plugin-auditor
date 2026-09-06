@@ -1,0 +1,197 @@
+rules:
+  - id: claude.php.wordpress.access.user-input-to-wp-set-auth-cookie
+    mode: taint
+    languages: [php]
+    severity: CRITICAL
+    message: |
+      User-controlled input flows into the $user_id argument of
+      wp_set_auth_cookie(). An attacker can authenticate as any user
+      including administrators — instant account takeover (CWE-287).
+
+      WP Core: wp_set_auth_cookie($user_id) at pluggable.php:1067 sets
+      AUTH_COOKIE and LOGGED_IN_COOKIE for the specified user_id with no
+      internal authorization check. If $user_id is attacker-controlled,
+      severity is CVSS 9.8.
+
+      Fix: never pass user-controlled input to wp_set_auth_cookie().
+      Authenticate users through wp_signon() or verify identity via
+      cryptographically secure tokens before setting cookies.
+
+      TRIAGE GUIDANCE:
+
+      TRUE POSITIVE indicators:
+        - user_id comes from POST/GET/REQUEST or a weak external token
+        - No cryptographic verification of the user's identity before the call
+        - Custom login/registration endpoint that bypasses wp_signon()
+        - The user_id is resolved indirectly: a request-supplied numeric id
+          looks up a DB/domain record (an order, payment, or booking object)
+          and the record's own user_id/owner field — not the request value
+          itself — reaches the sink. Fetching-by-id does not establish that
+          the current requester is the party the record belongs to.
+
+      FALSE POSITIVE indicators:
+        - user_id comes from get_current_user_id() (self-login)
+        - user_id derived from wp_signon() return (standard auth flow)
+        - Cryptographically verified token resolves to user_id
+        - The enclosing function gates the call behind an out-of-band,
+          per-record state check established at a different time than the
+          current request (e.g. a get_transient() lookup, or a $_SESSION
+          value COMPARED against a separately-resolved identifier) rather
+          than trusting the resolved record alone — this binds the request
+          to the party that actually initiated the flow. A bare isset()/
+          truthiness check on a $_SESSION slot that is itself the value
+          reaching the sink is NOT this — it is an alternate raw source,
+          not a verification.
+    metadata:
+      category: security
+      cwe: "CWE-287: Improper Authentication"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_set_auth_cookie/
+        - https://patchstack.com/academy/wordpress/vulnerabilities/privilege-escalation/
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: file_get_contents("php://input")
+          - pattern: filter_input(...)
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_json_params()
+          - pattern: $REQUEST->get_params()
+          - pattern: $REQUEST->get_body_params()
+          - pattern: $REQUEST->get_body()
+    pattern-sinks:
+      - patterns:
+          - pattern: wp_set_auth_cookie($USER_ID, ...)
+          - focus-metavariable: $USER_ID
+          # The identity-binding check is commonly refactored as a guard
+          # around the whole auto-login block rather than a sanitizer applied
+          # to $USER_ID itself — a shape taint-mode pattern-sanitizers cannot
+          # model. Anchoring on pattern-not-inside at the sink instead: if the
+          # enclosing function gates entry via an if-condition that consults a
+          # transient or native session store (an out-of-band value set at a
+          # different time/request than the one attempting to authenticate),
+          # treat that as a real identity-binding check and suppress. A bare
+          # get_transient()/$_SESSION read elsewhere in the function that is
+          # NOT part of the guarding condition (e.g. an unrelated redirect
+          # lookup) does not suppress.
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... get_transient(...) ...>) {
+                  ...
+                }
+                ...
+              }
+          # A bare isset()/truthiness check on a $_SESSION slot does not bind the
+          # request to a prior legitimate flow when that SAME slot is also the
+          # raw value flowing to the sink — the slot is then just an alternate
+          # attacker-writable source (e.g. a fallback carried over from a
+          # cookie-based value), not a verification. Only suppress when the
+          # condition actually COMPARES the session value against a separate,
+          # independently-derived value.
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... $_SESSION[...] == $OTHER ...>) {
+                  ...
+                }
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... $OTHER == $_SESSION[...] ...>) {
+                  ...
+                }
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... $_SESSION[...] === $OTHER ...>) {
+                  ...
+                }
+                ...
+              }
+          - pattern-not-inside: |
+              function $FUNC(...) {
+                ...
+                if (<... $OTHER === $_SESSION[...] ...>) {
+                  ...
+                }
+                ...
+              }
+          # A mismatch-rejects shape is an equally valid binding check: comparing
+          # the request-derived identifier against the session value with != /
+          # !== and rejecting (return/exit/wp_send_json+exit) on inequality binds
+          # the sink just as tightly as an equality check on a match — only the
+          # polarity of the branch differs. Without these, a function that
+          # correctly rejects on mismatch (the common fix shape for this exact
+          # bug class) still reads as unguarded and false-positives forever.
+          # $OTHER is constrained to a variable-rooted expression (starts with
+          # $): a bare literal ('', null, true, false, 0) on the other side is
+          # a truthiness/non-empty check, not a comparison against an
+          # independently-derived identifier, and must NOT count as binding —
+          # otherwise this collapses into the raw-source case above.
+          - pattern-not-inside:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) {
+                      ...
+                      if (<... $_SESSION[...] != $OTHER ...>) {
+                        ...
+                      }
+                      ...
+                    }
+                - metavariable-regex:
+                    metavariable: $OTHER
+                    regex: "^\\$"
+          - pattern-not-inside:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) {
+                      ...
+                      if (<... $OTHER != $_SESSION[...] ...>) {
+                        ...
+                      }
+                      ...
+                    }
+                - metavariable-regex:
+                    metavariable: $OTHER
+                    regex: "^\\$"
+          - pattern-not-inside:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) {
+                      ...
+                      if (<... $_SESSION[...] !== $OTHER ...>) {
+                        ...
+                      }
+                      ...
+                    }
+                - metavariable-regex:
+                    metavariable: $OTHER
+                    regex: "^\\$"
+          - pattern-not-inside:
+              patterns:
+                - pattern: |
+                    function $FUNC(...) {
+                      ...
+                      if (<... $OTHER !== $_SESSION[...] ...>) {
+                        ...
+                      }
+                      ...
+                    }
+                - metavariable-regex:
+                    metavariable: $OTHER
+                    regex: "^\\$"

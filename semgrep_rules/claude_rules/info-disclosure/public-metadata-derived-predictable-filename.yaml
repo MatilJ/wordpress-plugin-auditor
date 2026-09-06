@@ -1,0 +1,119 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.public-metadata-derived-predictable-filename
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A filename/directory-name component is built by sanitizing a value
+      read from public, unauthenticated-visible site metadata (get_bloginfo(),
+      home_url(), site_url(), get_option('blogname')) — typically via
+      sanitize_title()/sanitize_file_name() — with no random, secret, or
+      per-request component mixed in. Any attacker can compute the exact
+      same string offline (the same public metadata is exposed via the
+      site's own <title> tag, RSS feed, and the default REST API root
+      response) with zero guessing required.
+
+      This rule exists to compensate for a structural gap in taint-mode
+      source detection: Semgrep's taint engine is intraprocedural by
+      default, so it cannot see whether this function's return value later
+      becomes part of a persistent file path under a web-accessible
+      directory (wp_upload_dir()) in a DIFFERENT function/class — a common
+      shape when the write itself goes through a plugin's own Filesystem/
+      Zip wrapper class rather than a direct fopen()/file_put_contents()
+      call visible in the same function.
+
+      TRIAGE — trace every caller of the flagged function/method:
+      1. Is the returned value used to build a path under wp_upload_dir()
+         (or any other web-accessible directory)?
+      2. Is the resulting file persistent (never deleted after the response
+         that created it) rather than streamed and cleaned up immediately?
+      3. Is the directory protected by an .htaccess/index.php deny rule, or
+         is the file itself served through a capability-checked handler
+         instead of being directly web-accessible?
+      4. Does the file's contents carry PII, credentials, or other
+         non-public data?
+      If 1-2 hold and 3 does NOT (no protection, direct web access) and 4
+      holds, this is Unauthenticated Information Disclosure via a
+      predictable path (CWE-552 / CWE-200).
+
+      Fix: mix a random/secret component into the filename
+      (wp_generate_password()/wp_generate_uuid4()/random_bytes()-derived),
+      protect the containing directory (.htaccess deny-all + index.php
+      stub), and/or delete the file immediately after it has been
+      delivered to the authorized requester.
+    metadata:
+      category: security
+      cwe: "CWE-552: Files or Directories Accessible to External Parties"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Taint Tracking Coverage Gap"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/552.html
+        - https://cwe.mitre.org/data/definitions/200.html
+        - https://developer.wordpress.org/reference/functions/wp_upload_dir/
+    patterns:
+      - pattern-either:
+          # $META is itself directly a public-metadata accessor call.
+          - pattern: sanitize_title(get_bloginfo(...)) . $SUFFIX
+          - pattern: sanitize_title(home_url(...)) . $SUFFIX
+          - pattern: sanitize_title(site_url(...)) . $SUFFIX
+          - pattern: sanitize_title(get_option('blogname')) . $SUFFIX
+          - pattern: sanitize_file_name(get_bloginfo(...)) . $SUFFIX
+          - pattern: sanitize_file_name(home_url(...)) . $SUFFIX
+          - pattern: sanitize_file_name(site_url(...)) . $SUFFIX
+          - pattern: sanitize_file_name(get_option('blogname')) . $SUFFIX
+          # $META is a variable whose value traces back to one of those same
+          # accessors earlier in the enclosing function — the deep-match
+          # (<... ...>) tolerates an intervening empty()/ternary/isset()
+          # wrapper around the accessor call, the common "fall back to a
+          # default if metadata is empty" idiom.
+          - patterns:
+              - pattern: sanitize_title($META) . $SUFFIX
+              - pattern-inside: |
+                  function $FUNC(...) {
+                    ...
+                    $META = <... get_bloginfo(...) ...>;
+                    ...
+                  }
+          - patterns:
+              - pattern: sanitize_title($META) . $SUFFIX
+              - pattern-inside: |
+                  function $FUNC(...) {
+                    ...
+                    $META = <... home_url(...) ...>;
+                    ...
+                  }
+          - patterns:
+              - pattern: sanitize_file_name($META) . $SUFFIX
+              - pattern-inside: |
+                  function $FUNC(...) {
+                    ...
+                    $META = <... get_bloginfo(...) ...>;
+                    ...
+                  }
+      # The suffix must be a fixed literal — a per-request/random component
+      # here would already defeat predictability regardless of the $META
+      # side. metavariable-regex (not metavariable-pattern) is required here:
+      # metavariable-pattern performs a sub-search within the bound snippet,
+      # so it would still "match" a bare-literal pattern against just the
+      # leading segment of a longer concatenation chain — the anchored (^...$)
+      # regex is the only way to require the ENTIRE bound text be nothing but
+      # the literal.
+      - metavariable-regex:
+          metavariable: $SUFFIX
+          regex: ^('[^']*'|"[^"]*")$
+      # PHP string concatenation is a flattened n-ary chain: without this
+      # exclusion, Semgrep can match the pattern against an inner two-part
+      # sub-expression of a longer chain (e.g. binding $SUFFIX to just the
+      # "-" segment of "... . '-' . wp_generate_password(...)"), silently
+      # ignoring a genuinely-random trailing segment that defeats
+      # predictability.
+      - pattern-not-inside: |
+          $ANYTHING . $SUFFIX . $EXTRA
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"

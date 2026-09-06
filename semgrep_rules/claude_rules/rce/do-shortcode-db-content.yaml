@@ -1,0 +1,52 @@
+rules:
+  - id: claude.php.wordpress.rce.do-shortcode-db-content
+    mode: taint
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      Database-stored content flows into do_shortcode()/apply_shortcodes().
+      If the write path is accessible to low-privilege users (unauthenticated,
+      Subscriber, Contributor) and does not strip shortcode syntax at write time,
+      this is second-order Arbitrary Shortcode Execution (CWE-94).
+      apply_shortcodes() is a WP Core alias for do_shortcode() (shortcodes.php:223).
+
+      sanitize_text_field() at write time does NOT prevent this — shortcode
+      bracket syntax passes through unchanged.
+
+      TRIAGE: trace the write path for the DB key/meta to determine the minimum
+      auth level required to store content, and whether strip_shortcodes() or
+      equivalent is applied at write time.
+    metadata:
+      category: security
+      cwe: "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: LOW
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Arbitrary Shortcode Execution"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/do_shortcode/
+    pattern-sources:
+      - pattern-either:
+          - pattern: get_option(...)
+          - pattern: get_post_meta(...)
+          - pattern: get_user_meta(...)
+          - pattern: get_transient(...)
+    pattern-sinks:
+      - pattern-either:
+          - pattern: do_shortcode($X, ...)
+          - pattern: apply_shortcodes($X, ...)
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: strip_shortcodes(...)
+          - pattern: wp_strip_all_tags(...)
+          - pattern: (int) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+        - "**/node_modules/**"

@@ -1,0 +1,171 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.rest-item-permission-check-missing-context-gate
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      A get_items_permissions_check() method (the WP_REST_Controller collection-
+      route convention) gates the 'edit' request context behind a capability
+      check, but its sibling get_item_permissions_check() — the permission
+      callback for the single-resource route — never inspects the request's
+      context at all.
+
+      WP REST schemas commonly restrict sensitive fields (email addresses, IP
+      addresses, internal notes, tokens) to 'context' => ['edit'] so WP Core's
+      filter_response_by_context() strips them under the default 'view' context.
+      That redaction is a data-shaping step, not an authorization control —
+      nothing stops a caller from requesting ?context=edit on the single-item
+      route. When the collection route's permission check proves the plugin
+      author intended context=edit to require an elevated capability, an
+      identical but absent gate on the single-item route lets any caller who
+      passes the item's own (often weaker, merely-authenticated) read check
+      request context=edit and receive the edit-only fields anyway (CWE-200;
+      root cause CWE-862).
+
+      TRIAGE: (1) confirm the item schema actually restricts a sensitive field
+      (PII, secrets, internal state) to context=edit — a schema exposing every
+      field identically in both view and edit context has nothing to leak here;
+      (2) confirm get_item_permissions_check()'s own checks are satisfiable by a
+      lower-privileged caller than the capability gating
+      get_items_permissions_check()'s context=edit branch — if both already
+      require the same capability tier this is a false positive; (3) trace
+      whether get_item_permissions_check() delegates to a shared helper that
+      both methods call — if that helper itself performs the context check,
+      this is a false positive from the pattern's lack of interprocedural
+      tracing, not a real gap.
+
+      Fix: mirror the collection route's context check inside the single-item
+      permission callback, e.g.:
+        $context = $request['context'] ?? 'view';
+        if ('edit' === $context && !current_user_can('edit_posts')) {
+            return new WP_Error('rest_forbidden_context', ..., ['status' => 403]);
+        }
+    metadata:
+      category: security
+      cwe:
+        - "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+        - "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      # Fires when a class/trait defines get_items_permissions_check() with a
+      # Yoda-style 'edit' === $context guard behind a capability check, and the
+      # sibling get_item_permissions_check() never references the request's
+      # context (array-access or get_param) or the same capability check at all.
+      # False positive when: the item schema has no context=edit-only sensitive
+      # field, the item check already requires an equal-or-stricter capability
+      # unconditionally (regardless of context), or the context check lives in a
+      # shared helper both methods call.
+      references:
+        - https://developer.wordpress.org/rest-api/reference/schema/#context
+        - https://cwe.mitre.org/data/definitions/200.html
+        - https://cwe.mitre.org/data/definitions/862.html
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              class $CLASS {
+                ...
+                function get_items_permissions_check($REQ2) {
+                  ...
+                  if ('edit' === $CTXVAR && !$CAPCHECK(...)) {
+                    ...
+                  }
+                  ...
+                }
+                ...
+              }
+          - pattern-inside: |
+              class $CLASS {
+                ...
+                function get_items_permissions_check($REQ2) {
+                  ...
+                  if ('edit' === $CTXVAR && !$OBJ->$CAPCHECK(...)) {
+                    ...
+                  }
+                  ...
+                }
+                ...
+              }
+          - pattern-inside: |
+              trait $TRAIT {
+                ...
+                function get_items_permissions_check($REQ2) {
+                  ...
+                  if ('edit' === $CTXVAR && !$CAPCHECK(...)) {
+                    ...
+                  }
+                  ...
+                }
+                ...
+              }
+          - pattern-inside: |
+              trait $TRAIT {
+                ...
+                function get_items_permissions_check($REQ2) {
+                  ...
+                  if ('edit' === $CTXVAR && !$OBJ->$CAPCHECK(...)) {
+                    ...
+                  }
+                  ...
+                }
+                ...
+              }
+      - pattern: |
+          function get_item_permissions_check($REQ) {
+            ...
+          }
+      # Exclude: single-item check itself inspects the request context.
+      - pattern-not: |
+          function get_item_permissions_check($REQ) {
+            ...
+            $CTX = $REQ['context'] ?? $DEFAULT;
+            ...
+          }
+      - pattern-not: |
+          function get_item_permissions_check($REQ) {
+            ...
+            <... $REQ['context'] ...>;
+            ...
+          }
+      - pattern-not: |
+          function get_item_permissions_check($REQ) {
+            ...
+            <... $REQ->get_param('context') ...>;
+            ...
+          }
+      # Exclude: single-item check already requires the same capability the
+      # collection route's context gate requires, unconditionally (no leak
+      # possible regardless of context, even without an explicit context check).
+      # Two forms per call style: bare expression statement and if-guard, since
+      # the capability check commonly gates the function via an early return.
+      - pattern-not: |
+          function get_item_permissions_check($REQ) {
+            ...
+            $CAPCHECK(...);
+            ...
+          }
+      - pattern-not: |
+          function get_item_permissions_check($REQ) {
+            ...
+            if (!$CAPCHECK(...)) {
+              ...
+            }
+            ...
+          }
+      - pattern-not: |
+          function get_item_permissions_check($REQ) {
+            ...
+            $OBJ->$CAPCHECK(...);
+            ...
+          }
+      - pattern-not: |
+          function get_item_permissions_check($REQ) {
+            ...
+            if (!$OBJ->$CAPCHECK(...)) {
+              ...
+            }
+            ...
+          }

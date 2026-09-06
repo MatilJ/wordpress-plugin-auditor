@@ -1,0 +1,51 @@
+rules:
+  - id: claude.php.wordpress.info-disclosure.phpinfo-in-handler
+    languages: [php]
+    severity: MEDIUM
+    message: |
+      phpinfo() is called inside a function body. If this function is registered
+      as an AJAX handler, REST callback, or admin_init hook, any user who can
+      reach the endpoint can view the full PHP configuration including loaded
+      extensions, environment variables, and internal file paths (CWE-200).
+
+      Remove phpinfo() from production code, or guard it with:
+        if (current_user_can('manage_options')) { phpinfo(); }
+    metadata:
+      category: security
+      cwe: "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: vuln
+      vulnerability_class: "Sensitive Data Exposure"
+      technology: [php, wordpress]
+      references:
+        - https://www.php.net/manual/en/function.phpinfo.php
+        - https://cwe.mitre.org/data/definitions/200.html
+    patterns:
+      - pattern: phpinfo(...);
+      - pattern-inside: |
+          function $FUNC(...) {
+            ...
+          }
+      - pattern-not-inside: |
+          if (<... current_user_can(...) ...>) {
+            ...
+          }
+      # phpinfo() output captured into an output buffer and parsed internally
+      # (e.g. to detect an OpenSSL/extension version) is never sent to the response.
+      - pattern-not-inside: |
+          ob_start();
+          ...
+          phpinfo(...);
+          ...
+          <... ob_get_contents() ...>;
+          ...
+      - pattern-not-inside: |
+          ob_start();
+          ...
+          phpinfo(...);
+          ...
+          <... ob_get_clean() ...>;
+          ...

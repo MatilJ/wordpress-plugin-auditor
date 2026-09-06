@@ -1,0 +1,119 @@
+rules:
+  - id: claude.js.wordpress.xss.href-attr-unsanitized-scheme
+    languages: [js, typescript]
+    severity: MEDIUM
+    message: |
+      A raw expression is bound directly to an anchor's href attribute —
+      via a virtual-DOM attribute object (`attrs: {href: $VAL}` / a flat
+      props object passed to a hyperscript/React/Preact element factory),
+      a direct DOM property assignment (`el.href = $VAL`), or
+      `el.setAttribute('href', $VAL)` — with no URL-scheme validation
+      before the value reaches the browser (CWE-79).
+
+      This is a distinct failure mode from the classic string-concatenation
+      href/src injection: setting the attribute via an object/property form
+      (rather than building an HTML string) does prevent quote-based
+      attribute breakout, but it does NOT prevent the value itself from
+      being interpreted as a `javascript:` (or other script-executing)
+      URI. If the value can contain `javascript:...`, clicking the
+      resulting link executes arbitrary JavaScript in the viewer's
+      browser — a stored or DOM-based XSS sink whenever the bound value
+      originates from stored/fetched data (a REST/AJAX response, a
+      hydrated record field, post/comment content, or any other
+      user-controlled source) rather than a value the same code freshly
+      constructed from a whitelisted/enum token.
+
+      Fix: strip or reject the `javascript:` (and other non-http(s))
+      schemes before assignment — e.g. a dedicated helper that removes
+      `javascript:` prefixes via regex, or validates the parsed URL's
+      protocol against an http(s)-only allow-list — or use DOMPurify's
+      URL-sanitization support.
+
+      TRIAGE:
+        - A plain string/template literal with no interpolation is not a
+          finding — there is no attacker-controlled value.
+        - Confirm the value's origin before reporting: trace it back to a
+          stored record, REST/AJAX response, or other field an in-scope
+          role (unauthenticated/Subscriber/Customer) can influence. A
+          value the same function derives from a fixed enum/ID (e.g. a
+          route name, a numeric ID) is not attacker-controlled even though
+          it looks structurally identical.
+        - Safe if the value is wrapped in a call whose name contains
+          sanitize/escape/purify/clean, or in encodeURI()/
+          encodeURIComponent()/DOMPurify.sanitize() — these neutralize or
+          are excluded by this rule.
+        - A validator that only checks the value's hostname/path (not its
+          URI scheme) does not neutralize this — confirm the guard
+          actually strips or rejects `javascript:`/`data:`/`vbscript:`
+          schemes specifically before dismissing.
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp: "A03:2021 - Injection"
+      confidence: LOW
+      likelihood: MEDIUM
+      impact: MEDIUM
+      subcategory: audit
+      # Complements href-url-string-concat: that rule's own message
+      # recommends the attribute-object/.attr() form as the safe FIX for
+      # quote-breakout injection. That recommendation is correct for
+      # quote-breakout but does not address this rule's failure mode
+      # (javascript: URI scheme surviving into the attribute) — the two
+      # rules are not redundant, they cover different sub-mechanisms of
+      # the same href/src sink family.
+      # Semgrep only sees the write-side binding; every hit still requires
+      # manually confirming (1) the value's origin is attacker-influenced
+      # and (2) no upstream code already stripped the scheme before this
+      # point (e.g. a check one assignment earlier: `const v = clean(x); ...href: v`
+      # is invisible to this rule's syntactic match).
+      vulnerability_class: "Cross-Site Scripting (XSS)"
+      technology: [javascript, wordpress, vue, react]
+      references:
+        - https://cwe.mitre.org/data/definitions/79.html
+        - https://cheatsheetseries.owasp.org/cheatsheets/DOM_based_XSS_Prevention_Cheat_Sheet.html
+    paths:
+      exclude:
+        - "**/node_modules/**"
+        - "**/vendor/**"
+    pattern-either:
+      # Form A: virtual-DOM attribute object / flat props object — matches
+      # regardless of surrounding call/object shape (Vue's `attrs: {href: ...}`
+      # sub-object, or a React/Preact/hyperscript flat props object).
+      - patterns:
+          - pattern: "href: $VAL"
+          - pattern-not: 'href: "..."'
+          - pattern-not: "href: `...`"
+          - pattern-not:
+              patterns:
+                - pattern: "href: $SANFN(...)"
+                - metavariable-regex:
+                    metavariable: $SANFN
+                    regex: "(?i).*(saniti[sz]e|escape|purify|clean|encodeuri|dompurify).*"
+      # Form B: direct DOM property assignment.
+      - patterns:
+          - pattern: "$EL.href = $VAL;"
+          - pattern-not: '$EL.href = "...";'
+          - pattern-not: "$EL.href = `...`;"
+          - pattern-not:
+              patterns:
+                - pattern: "$EL.href = $SANFN(...);"
+                - metavariable-regex:
+                    metavariable: $SANFN
+                    regex: "(?i).*(saniti[sz]e|escape|purify|clean|encodeuri|dompurify).*"
+      # Form C: setAttribute (double- and single-quoted attribute name).
+      - patterns:
+          - pattern-either:
+              - pattern: $EL.setAttribute("href", $VAL)
+              - pattern: $EL.setAttribute('href', $VAL)
+          - pattern-not: $EL.setAttribute("href", "...")
+          - pattern-not: $EL.setAttribute('href', "...")
+          - pattern-not: $EL.setAttribute("href", `...`)
+          - pattern-not: $EL.setAttribute('href', `...`)
+          - pattern-not:
+              patterns:
+                - pattern-either:
+                    - pattern: $EL.setAttribute("href", $SANFN(...))
+                    - pattern: $EL.setAttribute('href', $SANFN(...))
+                - metavariable-regex:
+                    metavariable: $SANFN
+                    regex: "(?i).*(saniti[sz]e|escape|purify|clean|encodeuri|dompurify).*"

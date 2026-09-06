@@ -1,0 +1,62 @@
+rules:
+  - id: claude.php.wordpress.upload.wp-upload-bits-user-filename
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      wp_upload_bits() is called with a filename derived from user input
+      ($_POST, $_GET, $_REQUEST, $_FILES). Internally, wp_upload_bits()
+      validates only the file extension using wp_check_filetype() — it
+      does NOT perform content inspection via finfo_file() or
+      exif_imagetype() (CWE-434).
+
+      When the filename is user-controlled, the attacker sets the
+      extension. While .php is not in the default allowed MIME types,
+      plugins that expand upload_mimes or call wp_upload_bits() in import
+      contexts may allow dangerous extensions.
+
+      Common in import handlers where the original filename from an
+      uploaded file is passed directly to wp_upload_bits().
+
+      TRIAGE:
+        1. Trace the filename argument — is it from $_FILES['name'],
+           $_POST['filename'], or a REST parameter?
+        2. Check if additional extension validation exists before the call.
+        3. Check the upload_mimes filter — does the plugin expand it?
+        4. Note: sanitize_file_name() strips path traversal characters
+           but does NOT prevent .php extension uploads.
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 - Insecure Design"
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Unrestricted File Upload"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/reference/functions/wp_upload_bits/
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/freemius/**"
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_POST[$K]
+          - pattern: $_GET[$K]
+          - pattern: $_REQUEST[$K]
+          - pattern: $_FILES[$K]['name']
+          - pattern: $_FILES[$K]["name"]
+    pattern-sinks:
+      - patterns:
+          - pattern: wp_upload_bits($FILENAME, ...)
+          - focus-metavariable: $FILENAME
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: sanitize_file_name(...)
+          - pattern: basename(...)
+          - pattern: md5(...)
+          - pattern: sha1(...)
+          - pattern: uniqid(...)
+          - pattern: wp_unique_filename(...)

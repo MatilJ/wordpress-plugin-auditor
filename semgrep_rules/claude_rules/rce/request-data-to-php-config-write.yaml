@@ -1,0 +1,139 @@
+rules:
+  - id: claude.php.wordpress.rce.request-data-to-php-config-write
+    mode: taint
+    languages: [php]
+    severity: HIGH
+    message: |
+      Request-controlled data (a superglobal, or a WP_REST_Request
+      accessor) flows unescaped into the CONTENT argument of a file write
+      call (file_put_contents()/fwrite()/$wp_filesystem->put_contents())
+      whose destination path/handle is named like a plugin configuration,
+      settings, constants, license, or regenerated cache file. This is the
+      "regenerated PHP file" persistence idiom: a template string
+      containing PHP syntax (one or more define('CONST', '...')
+      statements, or a heredoc/nowdoc block assigning the value to a
+      variable) is rewritten with the new value via string substitution
+      or concatenation and written back to a `.php` file the plugin
+      `include`s/`require`s on every subsequent load — or that simply
+      sits inside a web-accessible directory and can be requested
+      directly.
+
+      If the tainted value is inserted into a quoted string literal, or
+      a heredoc/nowdoc body, in that template with no escaping of the
+      literal's own quote character (and backslash) — or, for a heredoc,
+      no rejection of a line matching the closing identifier — an
+      attacker can supply a value that closes the string/heredoc early,
+      followed by arbitrary PHP statements, which execute unconditionally
+      the next time the generated file is included, or immediately if the
+      attacker requests it directly — Code Injection (CWE-94) via
+      configuration/cache-file poisoning. Unlike a path-traversal
+      file-write bug, the destination path here is fixed or predictable;
+      the injection lives in the unescaped CONTENT.
+
+      Fix: escape the value for the exact literal context it is inserted
+      into before the write (addslashes()/var_export()/json_encode() for
+      a PHP single/double-quoted string literal), or avoid regenerating
+      executable PHP from request data entirely (store settings via
+      register_setting()/update_option() instead of a hand-rolled
+      constants file).
+
+      TRIAGE:
+        1. Confirm the write target is later include()/require()'d (grep
+           the plugin for the same filename), OR sits inside a
+           web-accessible directory (a plugin/theme/uploads path with no
+           execution-blocking .htaccess/index.php) so the attacker can
+           trigger it with a direct HTTP request — if neither applies and
+           the file is only ever read as data (file_get_contents(),
+           parsed as JSON/INI), this is not code injection, just an
+           integrity/tamper issue.
+        2. Confirm the tainted value is embedded inside a quoted PHP
+           string literal, or a heredoc/nowdoc body, in the template
+           (e.g. via preg_replace()/str_replace()/sprintf()/string
+           concatenation) with no quote-escaping sanitizer, and — for a
+           heredoc — no rejection of attacker-supplied lines matching the
+           closing identifier, between the source and the write.
+        3. Confirm the write is reachable without an authentication/
+           capability check that would exclude ordinary or unauthenticated
+           requests (a REST route registered on a pre-dispatch/early hook
+           such as `rest_pre_dispatch` runs before the matched route's own
+           permission_callback, so a callback registered there that
+           performs the write itself must carry its own explicit
+           is_user_logged_in()/current_user_can() check — the route's
+           permission_callback offers no protection against it).
+    metadata:
+      category: security
+      cwe: "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: LOW
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Code Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/94.html
+        - https://owasp.org/www-community/attacks/Command_Injection
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $_COOKIE
+          - pattern: $_SERVER
+          - pattern: filter_input(...)
+          # WP_REST_Request::get_param() / get_json_params(), and the
+          # ArrayAccess subscript form ($request['key']) it also supports —
+          # equally attacker-controlled as a raw superglobal, and the
+          # idiom used by REST route/pre-dispatch handlers.
+          - pattern: $REQUEST->get_param(...)
+          - pattern: $REQUEST->get_json_params(...)
+          - patterns:
+              - pattern: $REQ[$KEY]
+              - metavariable-regex:
+                  metavariable: $REQ
+                  regex: ^\$(request|req|rest_request|wp_request|the_request)$
+    pattern-sinks:
+      - patterns:
+          - pattern: file_put_contents($PATH, $CONTENT, ...)
+          - focus-metavariable: $CONTENT
+          - metavariable-regex:
+              metavariable: $PATH
+              regex: (?i).*(config|settings|constants|licen[cs]e|options?|cache)(_?file|_?path)?.*
+      - patterns:
+          - pattern: fwrite($HANDLE, $CONTENT)
+          - focus-metavariable: $CONTENT
+          - metavariable-regex:
+              metavariable: $HANDLE
+              regex: (?i).*(config|settings|constants|licen[cs]e|options?|cache)(_?file|_?path|_?handle|_?fh|_?fp)?.*
+      # WP_Filesystem API wrapper — same CONTENT-into-a-.php-file idiom,
+      # used instead of the raw file_put_contents()/fwrite() pair when the
+      # plugin already initialised $wp_filesystem for permissions/FTP
+      # fallback handling.
+      - patterns:
+          - pattern: $FS->put_contents($PATH, $CONTENT, ...)
+          - focus-metavariable: $CONTENT
+          - metavariable-regex:
+              metavariable: $PATH
+              regex: (?i).*(config|settings|constants|licen[cs]e|options?|cache)(_?file|_?path)?.*
+    pattern-sanitizers:
+      - pattern-either:
+          # The real fix: escape the value for the literal PHP-string
+          # context it lands in before it is spliced into the template.
+          - pattern: addslashes(...)
+          - pattern: var_export(..., true)
+          - pattern: json_encode(...)
+          - pattern: preg_quote(...)
+          - pattern: (int) $X
+          - pattern: (float) $X
+          - pattern: (bool) $X
+          - pattern: intval(...)
+          - pattern: absint(...)
+          - pattern: floatval(...)
+          - pattern: sanitize_key(...)
+          # Name-agnostic match on a project-local helper whose own name
+          # declares quote-escaping intent for generated code.
+          - patterns:
+              - pattern: $SANFUNC(...)
+              - metavariable-regex:
+                  metavariable: $SANFUNC
+                  regex: (?i).*(escape|quote).*

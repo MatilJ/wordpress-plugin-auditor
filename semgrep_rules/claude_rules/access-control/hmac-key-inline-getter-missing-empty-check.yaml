@@ -1,0 +1,58 @@
+rules:
+  - id: claude.php.wordpress.access-control.hmac-key-inline-getter-missing-empty-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      hash_hmac() computes a signature/HMAC using a secret that is fetched via a
+      live method, static, or function call inlined directly as the key argument,
+      rather than first being captured into a variable and checked for emptiness
+      (CWE-287 / CWE-1390). A getter backed by an option, a stored property, or a
+      third-party registration record commonly returns '' or null before that
+      value has ever been configured (fresh install, an integration that was
+      never connected, a deleted record, a setup race). PHP silently coerces
+      that null/'' key into hash_hmac(), producing a digest keyed by the empty
+      string — a value with no attacker-unknown component, since it depends only
+      on the (often attacker-supplied) message. Anyone can compute the same
+      digest and forge a value that satisfies a downstream signature check
+      (`=== `, `==`, or even `hash_equals()` against the forged digest),
+      bypassing whatever authentication that signature was meant to enforce —
+      typically a webhook or callback endpoint.
+
+      TRIAGE: confirm the getter can realistically return empty/null on some
+      reachable site state (unconfigured integration, deleted option/record, a
+      setup race) — if the getter is backed by a value WordPress itself
+      guarantees is always non-empty (wp_salt(), AUTH_KEY and the other salt
+      constants), this is a false positive. Also check whether the caller of the
+      enclosing function already captured and validated the secret before this
+      call executes — this rule cannot see across that boundary, only within
+      the matched call itself.
+
+      Fix: fetch the secret into a variable first, fail the check closed
+      (return false / throw) when it is empty, non-string, or otherwise absent,
+      and only then pass the validated variable into hash_hmac(); finish the
+      comparison with hash_equals(), never ==/===.
+    metadata:
+      category: security
+      cwe: "CWE-287: Improper Authentication"
+      owasp: "A07:2021 - Identification and Authentication Failures"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Authentication Bypass"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/287.html
+        - https://cwe.mitre.org/data/definitions/1390.html
+        - https://cwe.mitre.org/data/definitions/640.html
+        - https://www.php.net/manual/en/function.hash-equals.php
+    patterns:
+      - pattern-either:
+          - pattern: hash_hmac($ALGO, $DATA, $OBJ->$METHOD())
+          - pattern: hash_hmac($ALGO, $DATA, $CLASS::$METHOD())
+          - pattern: hash_hmac($ALGO, $DATA, $FUNC())
+      - pattern-not: hash_hmac($ALGO, $DATA, wp_salt(...))
+    paths:
+      exclude:
+        - "**/vendor/**"
+        - "**/node_modules/**"

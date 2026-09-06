@@ -1,0 +1,64 @@
+rules:
+  - id: claude.php.wordpress.access-control.strpos-username-allowlist-membership-bypass
+    languages: [php]
+    severity: HIGH
+    message: |
+      A free-text username allowlist (e.g. an admin-configurable settings
+      textarea listing usernames who should receive elevated access) is
+      tested for membership with strpos() against the current user's
+      user_login, instead of an exact/delimiter-aware match (CWE-697:
+      Incorrect Comparison). strpos() performs a SUBSTRING search, not a
+      token match: any authenticated user whose own username is a substring
+      of ANY legitimately-whitelisted username (e.g. "alice" is a substring
+      of the whitelisted "alice_marketing") is incorrectly treated as
+      whitelisted too, even though the administrator only intended to grant
+      access to one specific, named individual. This is an authorization
+      bypass (CWE-863) whenever the result gates a capability decision
+      (setting the required capability to a lower value, or feeding
+      current_user_can() directly) — an unintended third party piggybacks on
+      an admin's narrow, individual-targeted grant via string overlap.
+
+      TRIAGE:
+      1. Confirm the strpos() result (or its `=== false` / `!== false`
+         comparison) feeds a capability/permission decision within the same
+         function or a short call chain (e.g. sets $minimum_capability, or
+         directly guards a current_user_can() call / return value) — a
+         strpos() check used only for display/search filtering, unrelated to
+         an access decision, is not this vulnerability.
+      2. Confirm the allowlist value is admin-configurable free text (a
+         settings option), not a fixed, hardcoded, single-value comparison.
+      3. Check the default/unconfigured state: strpos('', $login) correctly
+         returns false in PHP, so an empty allowlist is not itself
+         exploitable — the bug requires the admin to have populated the
+         list with at least one entry.
+      4. An anonymous/guest request may satisfy strpos($allowlist, '') as a
+         degenerate case (needle is empty) — verify a downstream
+         current_user_can() check still fails closed for a logged-out user
+         (ID 0) before treating this as unauthenticated-reachable.
+
+      Fix: split the allowlist on a delimiter (e.g. explode(',', $allowlist))
+      and test exact membership with in_array($login, $list, true) — never
+      strpos() — or store/compare usernames as an array in the first place.
+    metadata:
+      category: security
+      cwe: "CWE-863: Incorrect Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Authorization Bypass / Incorrect Comparison"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/863.html
+        - https://cwe.mitre.org/data/definitions/697.html
+        - https://www.php.net/manual/en/function.strpos.php
+    pattern-either:
+      - pattern: false === strpos($ALLOWLIST, (string) $USER->user_login)
+      - pattern: false !== strpos($ALLOWLIST, (string) $USER->user_login)
+      - pattern: strpos($ALLOWLIST, (string) $USER->user_login) === false
+      - pattern: strpos($ALLOWLIST, (string) $USER->user_login) !== false
+      - pattern: false === strpos($ALLOWLIST, $USER->user_login)
+      - pattern: false !== strpos($ALLOWLIST, $USER->user_login)
+      - pattern: strpos($ALLOWLIST, $USER->user_login) === false
+      - pattern: strpos($ALLOWLIST, $USER->user_login) !== false

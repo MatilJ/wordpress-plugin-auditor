@@ -1,0 +1,59 @@
+rules:
+  - id: claude.php.wordpress.sqli.custom-orm-sequential-placeholder-replace
+    languages: [php]
+    severity: HIGH
+    message: |
+      A hand-rolled PDO-style query binder substitutes named ":placeholder"
+      tokens into a raw SQL template using str_replace() inside a loop over
+      the bound values, reassigning the same query-string variable on every
+      iteration. Each replacement is individually produced by wpdb->prepare()
+      (correctly escaped and quoted), but the splice itself is not atomic:
+      str_replace() rescans the ALREADY-SUBSTITUTED string on each later
+      iteration, not just the original template. If one bound value is a
+      string containing the literal name of another placeholder, that text
+      survives inside its own (properly quoted) substitution and gets matched
+      and replaced again by the later placeholder's iteration — splicing an
+      extra quote pair into the middle of what was a single string literal
+      and breaking out of it. This is SQL injection (CWE-89) even though
+      every individual value passes through wpdb->prepare().
+
+      Fix: build the full placeholder => replacement map first, then apply it
+      in a single simultaneous pass over the ORIGINAL template with strtr(),
+      never a loop of str_replace() calls that reassign the query string.
+      Note that PHP's str_replace() also processes its search/replace ARRAY
+      arguments sequentially (documented left-to-right behavior) — passing
+      arrays to a single str_replace() call is not a fix; only strtr()
+      guarantees a non-overlapping simultaneous substitution.
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: LOW
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "SQL Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://developer.wordpress.org/reference/classes/wpdb/prepare/
+        - https://www.php.net/manual/en/function.strtr.php
+      # Detects custom named-placeholder DB binders that splice prepare()'d
+      # values into a query via a str_replace() loop that reassigns the query
+      # string, instead of one simultaneous strtr() pass over the template.
+    patterns:
+      - pattern-either:
+          - pattern: |
+              foreach ($BINDINGS as $PLACEHOLDER => $VALUE) {
+                ...
+                $REPL = $WPDB->prepare($FMT, $VALUE);
+                ...
+                $QUERY = str_replace($PLACEHOLDER, $REPL, $QUERY);
+                ...
+              }
+          - pattern: |
+              foreach ($BINDINGS as $PLACEHOLDER => $VALUE) {
+                ...
+                $QUERY = str_replace($PLACEHOLDER, $WPDB->prepare($FMT, $VALUE), $QUERY);
+                ...
+              }

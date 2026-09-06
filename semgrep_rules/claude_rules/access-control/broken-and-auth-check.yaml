@@ -1,0 +1,95 @@
+rules:
+  - id: claude.php.wordpress.access-control.broken-and-auth-check
+    languages: [php]
+    severity: HIGH
+    message: |
+      Authorization check uses logical AND (&&) to combine !is_user_logged_in()
+      with !current_user_can(), making the capability check permanently dead code
+      for all logged-in users (CWE-862 Missing Authorization).
+
+      Why this is always wrong: PHP uses short-circuit evaluation for &&.
+      For any logged-in user, !is_user_logged_in() evaluates to false.
+      false && (anything) = false immediately — PHP never evaluates the
+      remaining operands. The wp_die() guard is therefore never reached, and
+      current_user_can() is never called, regardless of the user's role.
+
+      Any logged-in user (Subscriber, Customer, etc.) bypasses the capability
+      check as long as they are authenticated. Combined with the fact that
+      WordPress nonces are user-session-bound and self-generatable by any
+      logged-in user, this commonly creates a full Missing Authorization
+      vulnerability even when a nonce check follows.
+
+      Vulnerable pattern (redux-framework 4.5.11, 6+ AJAX handlers):
+        if ( !is_user_logged_in() && !is_admin() && !current_user_can($cap) ) {
+            wp_die( ... );  // NEVER fires for logged-in users
+        }
+
+      Fix — use OR (||) so ALL conditions must be false for access to proceed:
+        if ( !is_user_logged_in() || !current_user_can($cap) ) { wp_die(...); }
+      Or simply:
+        if ( !current_user_can($cap) ) { wp_die(...); }
+
+      The same && / De Morgan inversion also appears as a request-value
+      allow-list guard: if (!$VALUE && in_array($VALUE, [...])) { return; }.
+      A value that IS a member of a non-empty-string allow-list is truthy,
+      and a falsy value cannot be a member, so this condition is always
+      false — the intended "return/deny unless valid" never fires, silently
+      admitting any value including ones outside the allow-list, which can
+      skip per-value authorization branches gated later by strict ===
+      comparison against the same allow-listed values.
+    metadata:
+      category: security
+      cwe: "CWE-862: Missing Authorization"
+      owasp: "A01:2021 - Broken Access Control"
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      subcategory: vuln
+      vulnerability_class: "Missing Authorization"
+      technology: [php, wordpress]
+      references:
+        - https://developer.wordpress.org/apis/security/user-capabilities-and-roles/
+        - https://www.php.net/manual/en/language.operators.logical.php
+        - https://www.wordfence.com/blog/2023/02/authorization-vs-intent-why-you-should-always-verify-both/
+    pattern-either:
+      # Two-condition form: !is_user_logged_in() && !current_user_can()
+      - pattern: |
+          if (!is_user_logged_in() && !current_user_can(...)) {
+            ...
+          }
+      # Three-condition form (most common): includes !is_admin() in middle
+      - pattern: |
+          if (!is_user_logged_in() && !is_admin() && !current_user_can(...)) {
+            ...
+          }
+      # Reversed: !is_admin() first, then !is_user_logged_in(), then !current_user_can()
+      - pattern: |
+          if (!is_admin() && !is_user_logged_in() && !current_user_can(...)) {
+            ...
+          }
+      # Static method wrapper variant: $CLASS::current_user_can() instead of the
+      # global function. Plugins commonly wrap current_user_can() in a helper class
+      # (e.g. Redux_Helpers::current_user_can(), Plugin_Auth::current_user_can()).
+      # The && short-circuit bug applies identically regardless of wrapper.
+      - pattern: |
+          if (!is_user_logged_in() && !$CLASS::current_user_can(...)) {
+            ...
+          }
+      - pattern: |
+          if (!is_user_logged_in() && !is_admin() && !$CLASS::current_user_can(...)) {
+            ...
+          }
+      # Reversed with static method wrapper — exact redux-framework 4.5.11 pattern:
+      #   if ( !is_admin() && !is_user_logged_in() && !Redux_Helpers::current_user_can() )
+      - pattern: |
+          if (!is_admin() && !is_user_logged_in() && !$CLASS::current_user_can(...)) {
+            ...
+          }
+      # Allow-list guard variant: !$VALUE && in_array($VALUE, [...]) as a
+      # "return/deny if invalid" gate is always false (see message), so the
+      # guard never triggers and any value — not just allow-listed ones —
+      # reaches later code that trusts it was validated.
+      - pattern: |
+          if (!$VALUE && in_array($VALUE, [...])) {
+            ...
+          }

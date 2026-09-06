@@ -1,0 +1,73 @@
+rules:
+  - id: claude.php.wordpress.rce.callable-slot-overwrite-dynamic-key
+    languages: [php]
+    severity: HIGH
+    message: |
+      A class property is read by literal key and passed directly to
+      call_user_func()/call_user_func_array() — implying the slot is expected to
+      always hold a trusted, developer-seeded callable (e.g. a class::method
+      string merged in from a hardcoded defaults table). The SAME property is
+      also written elsewhere in the class using a non-literal (variable or
+      concatenated) key, with no visible guard excluding the reserved key
+      name(s) read at the call site. If the write-side key is influenced by
+      external input (a submitted field name, a request parameter used as a
+      map key, etc.) and can equal the literal key read at the sink, an
+      attacker can overwrite the trusted callable slot with an arbitrary
+      string before it is invoked (CWE-94 / CWE-470). Semgrep taint analysis
+      is intra-procedural and will not flag this shape when the write and the
+      call_user_func() read are in different methods of the same class.
+
+      Fix: before writing a request-influenced key into the shared array,
+      exclude the reserved key name(s) explicitly (allow-list/deny-list the
+      key), and/or re-resolve the callable at the call site from a fresh,
+      hardcoded trusted source instead of trusting the shared property's
+      current value.
+    metadata:
+      category: security
+      cwe:
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+        - "CWE-470: Use of Externally-Controlled Input to Select Classes or Code ('Unsafe Reflection')"
+      owasp: "A03:2021 - Injection"
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      subcategory: audit
+      vulnerability_class: "Code Injection"
+      technology: [php, wordpress]
+      references:
+        - https://cwe.mitre.org/data/definitions/94.html
+        - https://owasp.org/www-community/attacks/Code_Injection
+    patterns:
+      - pattern-either:
+          - pattern: call_user_func($OBJ->$PROP[$LITKEY], ...)
+          - pattern: call_user_func_array($OBJ->$PROP[$LITKEY], ...)
+      # The read-side key must be a literal — a reserved/well-known slot name,
+      # not itself request-influenced. (A variable key at the read site is a
+      # different, already-covered pattern — see dynamic-callable-user-input.)
+      - metavariable-pattern:
+          metavariable: $LITKEY
+          patterns:
+            - pattern-either:
+                - pattern: "'...'"
+                - pattern: "\"...\""
+      # Elsewhere in the SAME class, the SAME property ($PROP is unified
+      # across this whole `patterns:` block) is written using a non-literal
+      # key — the write and the call_user_func() read may live in different
+      # methods; class-scoping (not function-scoping) is what makes this rule
+      # able to see the cross-method confused-deputy shape that taint mode
+      # cannot.
+      - pattern-inside: |
+          class $CLASS {
+            ...
+            function $M(...) {
+              ...
+              $OBJ2->$PROP[$WKEY] = $ASSIGNED;
+              ...
+            }
+            ...
+          }
+      - metavariable-pattern:
+          metavariable: $WKEY
+          patterns:
+            - pattern-not: "'...'"
+            - pattern-not: "\"...\""
